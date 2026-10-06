@@ -1,0 +1,91 @@
+/*
+ * Customer Master design-token layer.
+ *
+ * Every colour, spacing, type, shape and layering value the SPA uses is
+ * defined here as a CSS custom property; global.css and the components
+ * consume them through var(--…) and write no literal values of their own.
+ * Token names are a cross-folder contract: rename none of them.
+ *
+ * The palette translates the 5250 display attributes of PMTCUSTD (search
+ * subfile), MTNCUSTD (17x54 detail window, pink border) and PMTSTATED
+ * (16x40 state window) from a dark terminal screen to one light web theme.
+ * Every text colour reaches WCAG 2.2 AA (4.5:1) on both --color-bg and
+ * --color-surface, and every UI boundary colour reaches 3:1, so contrast
+ * holds through the palette itself.
+ *
+ * Self-contained: no imports, external resources or web fonts.
+ */
+:root {
+  /* One light theme only; form controls and scrollbars render in light mode. */
+  color-scheme: light;
+
+  /* ---- Colour ---------------------------------------------------------- */
+
+  /* Page background: the screen behind every 5250 record format. */
+  --color-bg: #ffffff;
+  /* Window interior (MTNCUSTD, PMTSTATED WINDOW): dialogs, toasts, key buttons. */
+  --color-surface: #f6f8fa;
+  /* Default 5250 green text: body text (15.8:1 on bg, 14.84:1 on surface). */
+  --color-fg: #1f2328;
+  /* Unattributed literals such as "Sorted by:" and the change-stamp label (6.11:1 / 5.74:1). */
+  --color-muted: #59636e;
+  /* Field and window outlines (DSPATR(UL) input underline, WDWBORDER): 4.55:1 / 4.27:1. */
+  --color-border: #6e7781;
+  /* COLOR(BLU): "Type options, press Enter.", option and function-key legends (7.59:1 / 7.13:1). */
+  --color-accent: #0550ae;
+  /* COLOR(WHT) + DSPATR(UL): column headings and window titles (15.8:1 / 14.84:1). */
+  --color-heading: #1f2328;
+  /* DSPATR(HI) function line, Opt heading, customer id; COLOR(PNK) sorted column and MTNCUSTD border (7.82:1 / 7.35:1). */
+  --color-highlight: #9a1b5c;
+  /* COLOR(RED): inactive subfile rows and the "Including Inactives" label (6.57:1 / 6.18:1). */
+  --color-inactive: #b42318;
+  /* DSPATR(RI) on an invalid field: reverse-image background, also the error text colour (7.75:1 / 7.28:1). */
+  --color-error-bg: #a4161a;
+  /* DSPATR(RI) foreground: text on --color-error-bg (7.75:1). */
+  --color-error-fg: #ffffff;
+  /* DSPATR(PC) cursor position: keyboard focus ring (5.19:1 / 4.88:1, at least 3:1). */
+  --color-focus: #0969da;
+  /* WINDOW overlay: dims the screen beneath an open dialog (--color-fg at 45%). */
+  --color-backdrop: rgb(31 35 40 / 0.45);
+
+  /* ---- Spacing (rem, so it scales with the user's font size) ----------- */
+
+  /* Hairline gaps: key buttons, table cell block padding. */
+  --space-1: 0.25rem;
+  /* Field padding, gaps between related controls. */
+  --space-2: 0.5rem;
+  /* Label-to-input column gap, button inline padding. */
+  --space-3: 0.75rem;
+  /* Screen and window padding, section separation. */
+  --space-4: 1rem;
+  /* Larger separation between screen regions. */
+  --space-5: 1.5rem;
+  /* Largest separation, e.g. page-level blocks. */
+  --space-6: 2rem;
+
+  /* ---- Type ------------------------------------------------------------ */
+
+  /* Proportional system text for labels, headings and messages. */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* 5250 fixed-pitch grid: codes, ids, phones and inputs, so `size` matches character counts. */
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Key legends, field messages. */
+  --font-size-sm: 0.875rem;
+  /* Body text; equals the 16px browser default. */
+  --font-size-md: 1rem;
+  /* Screen titles ("Customer Master", "USA States"). */
+  --font-size-lg: 1.25rem;
+  /* Body line height. */
+  --line-height: 1.5;
+
+  /* ---- Shape and layers ------------------------------------------------ */
+
+  /* Corner radius for inputs, buttons, dialogs and toasts. */
+  --radius: 4px;
+  /* Focus ring thickness; WCAG 2.2 focus appearance needs at least 2 CSS px. */
+  --focus-ring-width: 3px;
+  /* Dialog backdrop layer; a dialog paints at calc(var(--z-dialog) + 1). */
+  --z-dialog: 100;
+  /* Message subfile (MSGSFL) equivalent: the toast host stays above every open dialog. */
+  --z-toast: 1000;
+}
