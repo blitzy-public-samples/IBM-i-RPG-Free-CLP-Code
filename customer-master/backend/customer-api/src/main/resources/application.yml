@@ -1,0 +1,98 @@
+# Base configuration of the customer-api application (web API by default; the
+# generator profile overlays application-generator.yml).
+#
+# Every environment-dependent value is a ${ENV:default} placeholder whose name is
+# documented in customer-master/.env.example and set by docker-compose.yml.
+# Credentials (database, users, USPS) have no default here: Compose supplies the
+# local values, and a deployment supplies its own through the environment.
+#
+# Several classes share the customer-master prefix, each binding only its block:
+#   customer-master.db, .search   -> config.AppProperties
+#   customer-master.address       -> AddressValidationProperties (address-validation module)
+#   customer-master.security      -> security.UsersProperties (web context only)
+#   customer-master.generator     -> generator.GeneratorProperties (application-generator.yml)
+
+spring:
+  datasource:
+    # The schema comes from DB_SCHEMA; no SQL script selects a library or schema.
+    url: jdbc:postgresql://${DB_HOST:db}:${DB_PORT:5432}/${DB_NAME:customermaster}?currentSchema=${DB_SCHEMA:customer_master}
+    # One role runs Flyway, the API and the generator, and owns custmast_id_seq.
+    username: ${DB_USER:}
+    password: ${DB_PASSWORD:}
+    hikari:
+      # Keeps unqualified names resolving when Testcontainers @ServiceConnection
+      # replaces the URL with one that carries no currentSchema.
+      schema: ${DB_SCHEMA:customer_master}
+  flyway:
+    schemas: ${DB_SCHEMA:customer_master}
+    # V1-V4 only. Compose sets SPRING_FLYWAY_LOCATIONS to add classpath:db/seed (V5).
+    locations: classpath:db/migration
+    # Lets a run without db/seed validate a database where the V5 seed was applied.
+    # Flyway classes an applied V5 above the newest local V4 as "future", not
+    # "missing", and setting this list replaces Flyway's default "*:future", so
+    # both patterns are needed; "*:missing" alone fails that validation.
+    ignore-migration-patterns:
+      - "*:missing"
+      - "*:future"
+  jackson:
+    deserialization:
+      # Unknown JSON properties (custId on add, chgUser, ...) are rejected: 400 APP0400.
+      fail-on-unknown-properties: true
+
+server:
+  error:
+    whitelabel:
+      # ProblemErrorController answers /error with problem+json; this is the second guard.
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        # /actuator/health/readiness backs the Compose app healthcheck.
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  # Deterministic output for OpenApiSnapshotIT and openapi/customer-master-api.yaml.
+  writer-with-order-by-keys: true
+
+customer-master:
+  db:
+    # Lock wait of add and update transactions before 409 DEM1001.
+    lock-timeout: ${DB_LOCK_TIMEOUT:5s}
+  search:
+    # Page size of the search list (the 12-row subfile page).
+    default-size: 12
+    # Largest page an API client may request.
+    max-size: 100
+    # Row cap of one search (the 9,999-record subfile cap, DEM0006).
+    max-rows: 9999
+  address:
+    enabled: ${ADDRESS_VALIDATION_ENABLED:true}
+    # stub (deterministic) or usps (Web Tools XML client, retired by USPS on 2026-01-25).
+    client: ${ADDRESS_VALIDATION_CLIENT:stub}
+    usps:
+      base-url: ${USPS_BASE_URL:https://secure.shippingapis.com/ShippingAPI.dll}
+      # Replace the USPS_ID and USPS_PWD data areas; never given a value in this file.
+      user-id: ${USPS_USER_ID:}
+      password: ${USPS_PASSWORD:}
+      connect-timeout: ${USPS_CONNECT_TIMEOUT:5s}
+      read-timeout: ${USPS_READ_TIMEOUT:10s}
+  security:
+    # HTTP Basic users. No defaults: the web application refuses to start until
+    # the CM_* variables are set (Compose sets them).
+    users:
+      - username: ${CM_INQUIRY_USER:}
+        password: ${CM_INQUIRY_PASSWORD:}
+        role: INQUIRY
+      - username: ${CM_MAINTENANCE_USER:}
+        password: ${CM_MAINTENANCE_PASSWORD:}
+        role: MAINTENANCE
