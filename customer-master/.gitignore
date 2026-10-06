@@ -1,0 +1,21 @@
+# Ignore rules for the customer-master tree; patterns are relative to this folder.
+
+# Build outputs (Maven modules, npm installs, Vite bundle)
+**/target/
+**/node_modules/
+frontend/dist/
+
+# Test reports (Vitest coverage, Playwright)
+frontend/coverage/
+e2e/test-results/
+e2e/playwright-report/
+
+# Performance results (k6 summaries); the wildcard form lets .gitkeep be re-included
+perf/results/*
+!perf/results/.gitkeep
+
+# Local environment: the real .env holds secrets; .env.example stays tracked
+.env
+
+# Data: a full CSZ download mounted at /data; data/README.md stays tracked
+data/*.csv
