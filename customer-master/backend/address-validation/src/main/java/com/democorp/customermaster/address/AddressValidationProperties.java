@@ -1,0 +1,262 @@
+package com.democorp.customermaster.address;
+
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.time.Duration;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
+
+/**
+ * Typed settings of the address-validation module, bound from {@value #PREFIX}.
+ *
+ * <p>This record replaces three things the IBM i address service relied on:
+ * <ul>
+ *   <li>the data areas that held the USPS Web Tools user id and password, read and
+ *       trimmed on every call, now {@link Usps#userId()} and {@link Usps#password()};</li>
+ *   <li>the endpoint URL hard-coded in the HTTP call, now {@link Usps#baseUrl()};</li>
+ *   <li>the bind-time choice of the address service program through its binding
+ *       directory, now {@link #client()}, which {@link AddressValidationAutoConfiguration}
+ *       reads to register exactly one {@link AddressValidationClient} bean.</li>
+ * </ul>
+ *
+ * <h2>Properties</h2>
+ * <table>
+ *   <caption>Properties, the environment variables customer-api maps onto them, and defaults</caption>
+ *   <tr><th>Property</th><th>Environment variable</th><th>Default</th></tr>
+ *   <tr><td>{@code customer-master.address.enabled}</td><td>{@code ADDRESS_VALIDATION_ENABLED}</td><td>{@code true}</td></tr>
+ *   <tr><td>{@code customer-master.address.client}</td><td>{@code ADDRESS_VALIDATION_CLIENT}</td><td>{@code stub}</td></tr>
+ *   <tr><td>{@code customer-master.address.usps.base-url}</td><td>{@code USPS_BASE_URL}</td><td>{@value #DEFAULT_BASE_URL}</td></tr>
+ *   <tr><td>{@code customer-master.address.usps.user-id}</td><td>{@code USPS_USER_ID}</td><td>empty</td></tr>
+ *   <tr><td>{@code customer-master.address.usps.password}</td><td>{@code USPS_PASSWORD}</td><td>empty</td></tr>
+ *   <tr><td>{@code customer-master.address.usps.connect-timeout}</td><td>{@code USPS_CONNECT_TIMEOUT}</td><td>{@code 5s}</td></tr>
+ *   <tr><td>{@code customer-master.address.usps.read-timeout}</td><td>{@code USPS_READ_TIMEOUT}</td><td>{@code 10s}</td></tr>
+ * </table>
+ * The environment variables reach these properties through {@code ${ENV:default}}
+ * placeholders in customer-api's {@code application.yml}. The defaults declared here
+ * equal those placeholder defaults, so the module behaves the same when it is used
+ * without that file, as in its own tests. The user id and the password deliberately
+ * have no default: no credential is ever carried in source or configuration files.
+ *
+ * <h2>Registration</h2>
+ * The record carries no stereotype annotation and is not found by any properties
+ * scan. {@link AddressValidationAutoConfiguration} is its only registrar, through
+ * {@code @EnableConfigurationProperties(AddressValidationProperties.class)}, so it is
+ * bound and validated only in a context that contains the auto-configuration.
+ *
+ * <h2>Validation (fail fast)</h2>
+ * Binding uses the canonical constructors, whose compact forms validate the values.
+ * Any exception they throw aborts application startup:
+ * <ul>
+ *   <li>an unknown {@code client} value, such as {@code foo}, fails enum conversion;</li>
+ *   <li>{@code client=usps} with a blank {@code usps.user-id} raises
+ *       {@link IllegalStateException};</li>
+ *   <li>a timeout that is zero or negative, or a base URL that is not an absolute
+ *       {@code http}/{@code https} URL, raises {@link IllegalArgumentException}.</li>
+ * </ul>
+ * Bean Validation is not used, because this library keeps no validator on its classpath.
+ *
+ * <h2>Before setting {@code client=usps}</h2>
+ * USPS retired the Web Tools APIs, including the {@code AddressValidateRequest}
+ * endpoint at {@value #DEFAULT_BASE_URL}, on 2026-01-25. The real client implements
+ * the XML contract the original service documented and keeps the base URL
+ * configurable, but it cannot be assumed to reach a live endpoint. Complete the
+ * pre-enablement checks in {@code customer-master/docs/developer-guide.md} (endpoint,
+ * registration and licensing, contract differences, credential exposure in the query
+ * string, the success test) before switching the client from the default stub.
+ *
+ * @param enabled whether customer-api standardizes addresses during review. When
+ *                {@code false}, customer-api skips standardization entirely and the
+ *                maintenance flow is exactly the field-rule flow without address
+ *                standardization; the client bean is still registered.
+ * @param client  which {@link AddressValidationClient} implementation is registered;
+ *                bound case-insensitively ({@code stub}, {@code STUB}, {@code usps})
+ * @param usps    settings of the USPS Web Tools client; always present, populated
+ *                with its defaults when no {@code usps.*} property is set
+ */
+@ConfigurationProperties(AddressValidationProperties.PREFIX)
+public record AddressValidationProperties(
+        @DefaultValue("true") boolean enabled,
+        @DefaultValue("stub") Client client,
+        @DefaultValue Usps usps) {
+
+    /** Property prefix of this record. */
+    public static final String PREFIX = "customer-master.address";
+
+    /**
+     * The endpoint the original service called, kept as the default for
+     * {@code customer-master.address.usps.base-url}. Retired by USPS on 2026-01-25.
+     */
+    public static final String DEFAULT_BASE_URL = "https://secure.shippingapis.com/ShippingAPI.dll";
+
+    /** Default connect timeout of the USPS client ({@code 5s}). */
+    public static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(5);
+
+    /** Default read timeout of the USPS client ({@code 10s}). */
+    public static final Duration DEFAULT_READ_TIMEOUT = Duration.ofSeconds(10);
+
+    /** Text shown in place of a configured credential by {@link Usps#toString()}. */
+    static final String MASK = "****";
+
+    /**
+     * Validates the bound settings.
+     *
+     * @throws IllegalArgumentException when {@code client} is {@code null}
+     * @throws IllegalStateException    when {@code client} is {@link Client#USPS} and no
+     *                                  user id is configured
+     */
+    public AddressValidationProperties {
+        if (client == null) {
+            throw new IllegalArgumentException(PREFIX + ".client must be stub or usps");
+        }
+        if (usps == null) {
+            usps = Usps.defaults();
+        }
+        if (client == Client.USPS && usps.userId().isBlank()) {
+            throw new IllegalStateException(
+                    PREFIX + ".usps.user-id must be set when " + PREFIX + ".client=usps");
+        }
+    }
+
+    /**
+     * The {@link AddressValidationClient} implementations the auto-configuration can
+     * register. Spring Boot's lenient enum conversion binds the values in any case.
+     */
+    public enum Client {
+
+        /**
+         * {@link StubAddressValidationClient}: deterministic fixtures, no network
+         * access. The default for local runs, Compose and every test suite.
+         */
+        STUB,
+
+        /**
+         * {@link UspsWebToolsAddressValidationClient}: the USPS Web Tools XML API at
+         * {@link Usps#baseUrl()}. Requires {@link Usps#userId()}.
+         */
+        USPS
+    }
+
+    /**
+     * Settings of the USPS Web Tools client, bound from {@code customer-master.address.usps}.
+     *
+     * <p>The compact constructor normalizes and validates the values: a {@code null}
+     * string becomes {@code ""}; the user id and the password are stripped of
+     * surrounding whitespace, as the original service trimmed the data-area values
+     * before every call; a blank base URL (for example an empty {@code USPS_BASE_URL})
+     * falls back to {@link #DEFAULT_BASE_URL}. The password is sent with every request
+     * even though the original service noted that USPS appeared to ignore it.
+     *
+     * <p>{@link #toString()} never prints the user id or the password.
+     *
+     * @param baseUrl        endpoint of the Web Tools {@code ShippingAPI.dll}
+     *                       ({@code USPS_BASE_URL}); an absolute {@code http} or
+     *                       {@code https} URL without a fragment
+     * @param userId         Web Tools user id ({@code USPS_USER_ID}); no default, required
+     *                       when {@code client=usps}
+     * @param password       Web Tools password ({@code USPS_PASSWORD}); no default
+     * @param connectTimeout TCP connect timeout ({@code USPS_CONNECT_TIMEOUT}, default
+     *                       {@code 5s}); must be positive
+     * @param readTimeout    response timeout ({@code USPS_READ_TIMEOUT}, default
+     *                       {@code 10s}); must be positive
+     */
+    public record Usps(
+            @DefaultValue(DEFAULT_BASE_URL) String baseUrl,
+            String userId,
+            String password,
+            @DefaultValue("5s") Duration connectTimeout,
+            @DefaultValue("10s") Duration readTimeout) {
+
+        /**
+         * Normalizes and validates the bound values.
+         *
+         * @throws IllegalArgumentException when a timeout is {@code null}, zero or
+         *                                  negative, or the base URL is not an
+         *                                  absolute {@code http}/{@code https} URL
+         */
+        public Usps {
+            baseUrl = (baseUrl == null || baseUrl.isBlank()) ? DEFAULT_BASE_URL : baseUrl.strip();
+            requireHttpUrl(baseUrl);
+            userId = (userId == null) ? "" : userId.strip();
+            password = (password == null) ? "" : password.strip();
+            requirePositive(connectTimeout, PREFIX + ".usps.connect-timeout");
+            requirePositive(readTimeout, PREFIX + ".usps.read-timeout");
+        }
+
+        /**
+         * The settings used when no {@code customer-master.address.usps.*} property is
+         * bound: the default base URL, no credentials, and the default timeouts.
+         *
+         * @return the default USPS settings
+         */
+        public static Usps defaults() {
+            return new Usps(DEFAULT_BASE_URL, "", "", DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT);
+        }
+
+        /**
+         * Describes the settings with both credentials masked, so the record can appear
+         * in logs, failure analysis and test output without exposing them. A configured
+         * credential shows as {@value AddressValidationProperties#MASK}; an empty one
+         * shows as {@code ""}, which tells an operator that it is missing.
+         *
+         * @return the masked description
+         */
+        @Override
+        public String toString() {
+            return "Usps[baseUrl=" + baseUrl
+                    + ", userId=" + mask(userId)
+                    + ", password=" + mask(password)
+                    + ", connectTimeout=" + connectTimeout
+                    + ", readTimeout=" + readTimeout + "]";
+        }
+
+        /**
+         * Masks a credential for display.
+         *
+         * @param credential the normalized (never {@code null}) credential
+         * @return {@value AddressValidationProperties#MASK} when set, {@code ""} when empty
+         */
+        private static String mask(String credential) {
+            return credential.isEmpty() ? "\"\"" : MASK;
+        }
+
+        /**
+         * Rejects a missing, zero or negative timeout; the JDK HTTP client accepts
+         * neither as a connect or read timeout.
+         *
+         * @param timeout  the bound timeout
+         * @param property the property name reported in the exception message
+         */
+        private static void requirePositive(Duration timeout, String property) {
+            if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+                throw new IllegalArgumentException(property + " must be positive");
+            }
+        }
+
+        /**
+         * Rejects a base URL the client cannot extend. The client appends
+         * {@code ?API=Verify&XML=...} (or {@code &...} when a query is already present),
+         * so the value must be an absolute {@code http}/{@code https} URL with a host and
+         * no fragment. Checking it here fails startup instead of the first address
+         * review. The value itself is left out of the message, because an operator could
+         * have placed credentials in its user-info part.
+         *
+         * @param url the normalized base URL
+         */
+        private static void requireHttpUrl(String url) {
+            String property = PREFIX + ".usps.base-url";
+            URI uri;
+            try {
+                uri = new URI(url);
+            } catch (URISyntaxException ex) {
+                throw new IllegalArgumentException(property + " is not a valid URL");
+            }
+            String scheme = uri.getScheme();
+            boolean http = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+            if (!http || uri.getHost() == null || uri.getRawFragment() != null) {
+                throw new IllegalArgumentException(
+                        property + " must be an absolute http or https URL with a host and no fragment");
+            }
+        }
+    }
+}

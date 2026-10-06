@@ -1,0 +1,32 @@
+{
+  // Tooling project for `tsc -b`, referenced by tsconfig.json. It type-checks
+  // only the files that run in Node during build and test (vite.config.ts);
+  // the browser app under src/ belongs to tsconfig.json.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    // tsconfig.json has its own inputs and references this project, so
+    // TypeScript requires it to be composite and to emit (TS6306, TS6310):
+    // `noEmit` is not allowed here. Only declarations are emitted, and they go
+    // under node_modules/.tmp with the build info, so `tsc -b` writes nothing
+    // into the source tree.
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./node_modules/.tmp/tsconfig.node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
+  },
+  "include": ["vite.config.ts"]
+}
