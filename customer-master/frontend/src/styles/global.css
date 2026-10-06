@@ -1,0 +1,619 @@
+/*
+ * Customer Master base styles and shared class contract.
+ *
+ * src/main.tsx loads this file after tokens.css. Every value comes from a
+ * token defined there: no colour literal is written here except
+ * `transparent`, `currentColor` and the forced-colors system colours.
+ * Self-contained: no imported stylesheets, external resources or web fonts.
+ *
+ * The class names below are a cross-folder contract used verbatim by
+ * src/components, src/features, src/auth and src/pages. Rename none of them.
+ *
+ * 5250 display attributes carried from PMTCUSTD, MTNCUSTD and PMTSTATED:
+ *   SH_FUNCT DSPATR(HI), centred by CenterStr  .screen-header__function
+ *   USER keyword (row 2)                       .screen-header__user
+ *   COLOR(BLU) options line and key legends    .instructions, .fkey-bar__key
+ *   COLOR(WHT) + DSPATR(UL) column headings    .results-table th
+ *   COLOR(PNK) sorted heading (PMTSTATED)      .is-sorted
+ *   COLOR(RED) inactive rows and label         .row--inactive, .label--inactive-included
+ *   SFLEND(*MORE)                              .paging-indicator
+ *   'Demo Corp of America' DSPATR(UL)          .footer-brand
+ *   WINDOW + WDWBORDER                         dialog, .dialog, .dialog__backdrop
+ *   DSPATR(RI) on an invalid field             [aria-invalid="true"] reverse image
+ *   DSPATR(PR) + HI protected value            .read-only, input[readonly]
+ *   DSPATR(PC) cursor position                 :focus-visible ring
+ *
+ * Nothing in this file moves: there are no timed effects of any kind, so no
+ * prefers-reduced-motion query is needed.
+ */
+
+/* ==== Base elements ===================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/*
+ * The root font size stays at the browser default (tokens are rem-based), so
+ * user zoom and font-size preferences keep scaling the whole UI.
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height);
+  color: var(--color-fg);
+  background: var(--color-bg);
+}
+
+h1,
+h2,
+h3 {
+  margin-block: 0 var(--space-2);
+  margin-inline: 0;
+  color: var(--color-heading);
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: var(--font-size-lg);
+}
+
+h2,
+h3 {
+  font-size: var(--font-size-md);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+/* The results table carries a <caption> (visible or .visually-hidden). */
+caption {
+  caption-side: top;
+  padding-block: var(--space-2);
+  font-weight: 600;
+  text-align: start;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+/*
+ * Text fields (the 5250 input fields, DSPATR(UL) when editable).
+ * - Monospace, so the `size` attribute (set by the components to the field's
+ *   maxLength: 13 for search filters, 40 for Name, 1 for Opt and Active)
+ *   matches the character count. Width stays `auto`; CSS attr() cannot drive
+ *   a width, so `size` is the sizing mechanism and max-inline-size only stops
+ *   overflow on narrow screens.
+ * - No CSS case transform: src/components/upperField.ts uppercases the real
+ *   value as it is typed, so what is shown is exactly what is submitted.
+ * - :where() keeps this rule at element specificity, so .read-only and the
+ *   [aria-invalid] reverse image below override it by source order alone.
+ *   Checkboxes and radios keep their native rendering.
+ */
+input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])),
+select,
+textarea {
+  max-inline-size: 100%;
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  font-family: var(--font-mono);
+  color: var(--color-fg);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+button {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-3);
+  color: var(--color-fg);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+/* Disabled is shown by colour and cursor only; no opacity, so text stays crisp. */
+button:disabled {
+  color: var(--color-muted);
+  cursor: not-allowed;
+}
+
+/* The underline keeps colour from being the only sign of a link. */
+a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
+/*
+ * Universal keyboard focus ring (replaces DSPATR(PC)). The 2px offset keeps
+ * the ring on the surrounding background: on a reverse-image field the ring
+ * colour against --color-error-bg alone would reach only 1.49:1.
+ * No rule in this file removes an outline.
+ */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/*
+ * Windows: MTNCUSTD WINDOW(*DFT 17 54) with WDWBORDER((*COLOR PNK)) and
+ * PMTSTATED WINDOW(*DFT 16 40). src/components/Dialog.tsx renders
+ * <dialog open aria-modal="true" class="dialog"> after a .dialog__backdrop
+ * element and never calls showModal(): a top-layer dialog would paint above
+ * the toast host, which no z-index can reach.
+ * - Centred with inset 0 + margin auto + fit-content, never with a transform:
+ *   a transformed dialog would become the containing block of a nested
+ *   picker's fixed backdrop and dialog, trapping them inside its box.
+ * - Painted one layer above its own backdrop (calc(--z-dialog + 1)), so the
+ *   order in the DOM does not matter. A State picker nested inside the detail
+ *   dialog paints within the detail dialog's stacking context, above it.
+ * - `display` is deliberately not set, so the user-agent rule
+ *   dialog:not([open]) { display: none } keeps closed dialogs hidden.
+ */
+dialog,
+.dialog {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-dialog) + 1);
+  inline-size: fit-content;
+  block-size: fit-content;
+  max-inline-size: calc(100vw - 2 * var(--space-4));
+  max-block-size: calc(100vh - 2 * var(--space-4));
+  margin: auto;
+  padding: var(--space-4);
+  overflow: auto;
+  color: var(--color-fg);
+  background: var(--color-surface);
+  border: 2px solid var(--color-highlight);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px var(--color-backdrop);
+}
+
+/* Only reached by a dialog opened with showModal(), which the app never does. */
+dialog::backdrop {
+  background: var(--color-backdrop);
+}
+
+/* ==== Class contract ==================================================== */
+
+/*
+ * Screen-reader-only text: the hidden "Inactive" label in inactive rows, the
+ * "Signed in as" prefix in the header, hidden captions and action names.
+ */
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Page wrapper: about the 80-column 5250 screen at monospace size. */
+.screen {
+  max-inline-size: 80rem;
+  margin-inline: auto;
+  padding: var(--space-4);
+}
+
+/*
+ * Screen header (the SH_HDR record). Title centred on row 1; the user at the
+ * start of row 2 and the function line centred under the title. Children are
+ * placed by class, so DOM order does not matter; any extra child (such as a
+ * sign-out button) auto-places into a free cell.
+ */
+.screen-header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-areas:
+    ". title ."
+    "user function .";
+  gap: var(--space-1) var(--space-4);
+  align-items: baseline;
+  margin-block-end: var(--space-4);
+}
+
+.screen-header__title {
+  grid-area: title;
+  margin: 0;
+  font-size: var(--font-size-lg);
+  text-align: center;
+}
+
+/* SH_FUNCT DSPATR(HI); text-align replaces the CenterStr padding arithmetic. */
+.screen-header__function {
+  grid-area: function;
+  margin: 0;
+  font-weight: 600;
+  color: var(--color-highlight);
+  text-align: center;
+}
+
+/* The DDS USER keyword. */
+.screen-header__user {
+  grid-area: user;
+  justify-self: start;
+  margin: 0;
+  font-family: var(--font-mono);
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Function-key legend (SFT_KEYS COLOR(BLU)); each key is a real button. */
+.fkey-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-4);
+}
+
+.fkey-bar__key {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+}
+
+.fkey-bar__key:disabled {
+  color: var(--color-muted);
+  border-color: var(--color-border);
+}
+
+/* Hover only where a real pointer hovers, so touch taps leave no sticky state. */
+@media (hover: hover) {
+  .fkey-bar__key:not(:disabled):hover {
+    background: var(--color-bg);
+    text-decoration: underline;
+  }
+}
+
+/*
+ * Messages (the MSGSFL/MSGCTL message subfile). ToastProvider mounts the one
+ * .toast-region outside every dialog; it holds a role="status" and a
+ * role="alert" container, each always rendered so assistive technology has
+ * registered the live regions before a message arrives. The region is never
+ * hidden when empty. It sits above every dialog (--z-toast) and lets every
+ * pointer event through, so it never blocks the function-key bar beneath it.
+ */
+.toast-region {
+  position: fixed;
+  inset-inline: 0;
+  inset-block-end: var(--space-4);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  pointer-events: none;
+}
+
+/* The status and alert live-region containers inside the host. */
+.toast-region > * {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  inline-size: 100%;
+}
+
+.toast {
+  max-inline-size: min(40rem, 100%);
+  margin: 0;
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  overflow-wrap: break-word;
+  color: var(--color-fg);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-inline-start-width: 4px;
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px var(--color-backdrop);
+  pointer-events: none;
+}
+
+/* Information and confirmations (DEM0000, DEM0009, DEM0002, DEM0006). */
+.toast--status {
+  border-inline-start-color: var(--color-accent);
+}
+
+/* Errors; the bold weight distinguishes them without relying on colour. */
+.toast--alert {
+  font-weight: 600;
+  border-inline-start-color: var(--color-error-bg);
+}
+
+/* Dims the screen beneath an open window, one layer below the window itself. */
+.dialog__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  background: var(--color-backdrop);
+}
+
+/* PMTSTATED WDWBORDER((*COLOR BLU)): the State window keeps its blue border. */
+.dialog.state-picker {
+  border-color: var(--color-accent);
+}
+
+/*
+ * Labelled field (FormField). Two columns, labels then inputs, as MTNCUSTD
+ * puts labels at column 1 and inputs from column 9 to 17. The message sits
+ * under its input.
+ */
+.form-field {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) auto;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  align-items: baseline;
+  margin-block: var(--space-2);
+}
+
+.form-field__label {
+  grid-column: 1;
+}
+
+.form-field__input {
+  grid-column: 2;
+  justify-self: start;
+}
+
+/* --color-error-bg as text reaches AA on both bg (7.75:1) and surface (7.28:1). */
+.form-field__message {
+  grid-column: 2;
+  font-size: var(--font-size-sm);
+  color: var(--color-error-bg);
+}
+
+@media (max-width: 30rem) {
+  .form-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-field__label,
+  .form-field__input,
+  .form-field__message {
+    grid-column: 1;
+  }
+}
+
+/*
+ * Protected values (DSPATR(PR) + HI): display mode and the confirmation
+ * panel. Read-only inputs stay focusable, so the focus ring still applies.
+ */
+.read-only,
+input[readonly],
+textarea[readonly] {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-fg);
+  background: transparent;
+  border-color: transparent;
+}
+
+/*
+ * Reverse image (DSPATR(RI)) on an invalid field: detail fields, search and
+ * state filters, per-row Opt inputs. It follows the read-only rule so it wins
+ * at equal specificity. The field also carries aria-invalid plus a
+ * .form-field__message or toast, so colour is never the only signal.
+ */
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  color: var(--color-error-fg);
+  background: var(--color-error-bg);
+  border-color: var(--color-error-bg);
+  caret-color: var(--color-error-fg);
+}
+
+/* "Type options, press Enter." and the option legends (COLOR(BLU)). */
+.instructions {
+  margin-block: var(--space-2);
+  color: var(--color-accent);
+}
+
+
+/*
+ * Results subfile (customer list, state list, conflict comparison).
+ * Cells use overflow-wrap: anywhere, which lowers the table's minimum
+ * content width, so on a narrow viewport long names and cities wrap inside
+ * their cells instead of pushing the whole page sideways. With room to
+ * spare (any desktop width) the auto table layout gives every column its
+ * full width and nothing wraps. The table keeps display: table, so its row
+ * and column semantics stay intact for assistive technology.
+ */
+.results-table {
+  inline-size: 100%;
+}
+
+/* Column headings: COLOR(WHT) + DSPATR(UL); the bold weight carries 'Opt' DSPATR(HI). */
+.results-table th {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  overflow-wrap: anywhere;
+  font-weight: 600;
+  color: var(--color-heading);
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* Row headers are field labels (conflict comparison), which the 5250 never underlines. */
+.results-table tbody th {
+  text-decoration: none;
+}
+
+/* Monospace cells keep the 5250 grid for ids, codes and ZIP. */
+.results-table td {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  vertical-align: baseline;
+}
+
+/*
+ * Row action buttons (Select, Edit, Display) sit side by side in one cell. A
+ * table cell cannot take `gap` without leaving table layout, so the spacing
+ * is an end margin on every button but the last.
+ */
+.results-table td > button:not(:last-child) {
+  margin-inline-end: var(--space-1);
+}
+
+/* Button labels stay whole; only the cell text wraps on a narrow viewport. */
+.results-table button {
+  overflow-wrap: normal;
+}
+
+/* On a narrow viewport the cells give up some inline padding before any text wraps. */
+@media (max-width: 30rem) {
+  .results-table th,
+  .results-table td {
+    padding-inline: var(--space-1);
+  }
+}
+
+/*
+ * Inactive rows (indicator 83, COLOR(RED)). Inputs inside keep their own
+ * colours, and the row also carries a .visually-hidden "Inactive" label.
+ */
+.row--inactive,
+.row--inactive td {
+  color: var(--color-inactive);
+}
+
+/* The sorted column heading (COLOR(PNK)), set alongside aria-sort. */
+.is-sorted,
+.results-table th.is-sorted {
+  color: var(--color-highlight);
+}
+
+/* A field whose value differs from the current record; the row also says "Changed". */
+.conflict-row--differs th,
+.conflict-row--differs td {
+  font-weight: 600;
+  color: var(--color-highlight);
+}
+
+/* SFLEND(*MORE): "More..." or "Bottom" under the list. */
+.paging-indicator {
+  margin-block: var(--space-1) 0;
+  font-family: var(--font-mono);
+  text-align: end;
+}
+
+/* "Including Inactives" (COLOR(RED); the source typo is fixed in the markup). */
+.label--inactive-included {
+  font-weight: 600;
+  color: var(--color-inactive);
+}
+
+/* 'Demo Corp of America' DSPATR(UL): the source underlines the whole padded line. */
+.footer-brand {
+  display: block;
+  margin-block: var(--space-4) 0;
+  padding-block-end: var(--space-1);
+  text-align: center;
+  border-block-end: 1px solid var(--color-fg);
+}
+
+/* ==== Screen-specific layout hooks ====================================== */
+
+/*
+ * Further classes the screens apply. .search-panel, .customer-form,
+ * .confirmation-panel, .dialog--detail, .dialog--picker and .dialog--conflict
+ * need nothing beyond the rules above and stay unstyled hooks.
+ */
+
+/* Sign-in page wrapper: a narrow centred column. */
+.sign-in {
+  max-inline-size: 36rem;
+  margin-inline: auto;
+  padding: var(--space-4);
+}
+
+/*
+ * Search criteria (PMTCUSTD rows 4 and 5): the three filters side by side,
+ * each label above its input, as the source puts labels on row 4 and inputs
+ * on row 5.
+ */
+.search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: var(--space-2) var(--space-5);
+}
+
+.search-filters .form-field {
+  grid-template-columns: auto;
+  margin-block: 0;
+}
+
+.search-filters .form-field__label,
+.search-filters .form-field__input,
+.search-filters .form-field__message {
+  grid-column: 1;
+}
+
+.search-filters .label--inactive-included {
+  align-self: center;
+}
+
+/* "Last Change ... by ..." stamp (MTNCUSTD row 13). */
+.change-stamp {
+  margin-block: var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-muted);
+}
+
+/* The DEM1002 text shown inside the conflict comparison window. */
+.conflict-message {
+  margin-block: 0 var(--space-3);
+  font-weight: 600;
+  color: var(--color-error-bg);
+}
+
+/* ==== Forced colors (Windows High Contrast and similar) ================= */
+
+/*
+ * Backgrounds are replaced by system colours, so the reverse image and the
+ * alert accent would vanish; borders keep them distinguishable. These system
+ * colours are the only non-token colours in this file.
+ */
+@media (forced-colors: active) {
+  input[aria-invalid="true"],
+  select[aria-invalid="true"],
+  textarea[aria-invalid="true"] {
+    border: 2px dashed CanvasText;
+  }
+
+  .toast--alert {
+    border: 2px solid CanvasText;
+    border-inline-start-width: 4px;
+  }
+}
+
