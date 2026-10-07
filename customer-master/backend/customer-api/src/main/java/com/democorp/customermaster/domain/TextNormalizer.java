@@ -110,8 +110,10 @@ public final class TextNormalizer {
      * Applies the shared, length-preserving uppercase rule described on the class, without trimming.
      *
      * <p>For callers that must uppercase a value whose blanks are already settled. When no code point
-     * changes, the argument itself is returned and nothing is allocated, which keeps bulk callers such as
-     * the generator cheap on already-uppercase data.
+     * changes, the argument itself is returned, with no result buffer or copy built, which keeps bulk
+     * callers such as the generator cheap on already-uppercase data. An all-ASCII value is examined
+     * without any allocation, while each non-ASCII code point still creates a short-lived string as its
+     * mapping is computed.
      *
      * @param s the value; may be {@code null}
      * @return the uppercased value with the same code-point length, never {@code null}; {@code ""} for
