@@ -29,6 +29,10 @@ import org.springframework.validation.annotation.Validated;
  * {@code search.max-size} (100) has no source counterpart: it is the largest page a client may
  * request.
  *
+ * <p>{@code CustomerMaintenanceService} reads {@link #db()} for its add and update transactions,
+ * and {@code CustomerSearchService} reads {@link #search()}. The generator's {@code CustomerLoader}
+ * keeps its own fixed lock timeout and does not read this class.
+ *
  * @param db     database settings ({@code customer-master.db.*})
  * @param search customer search settings ({@code customer-master.search.*})
  */
