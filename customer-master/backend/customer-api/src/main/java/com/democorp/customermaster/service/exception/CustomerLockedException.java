@@ -23,17 +23,25 @@ package com.democorp.customermaster.service.exception;
  * {@code &1} substitution variable ({@code 5250_Subfile/CRTMSGF.CLLE}), so that data was
  * never shown. The target therefore sends no data with DEM1001: the exception message
  * is the catalog code alone and never holds SQL text, an SQLSTATE or {@code SQLERRMC}.
- * The optional cause, typically Spring's {@code CannotAcquireLockException}, is kept
- * only so the server log can record it; it is never exposed to a client.
+ * The optional cause, typically Spring's {@code CannotAcquireLockException} from
+ * {@code CustomerIdAllocator}, or the data-access exception carrying {@code 55P03} that
+ * {@code CustomerRepository.save} wraps, is kept only so the server log can record it; it
+ * is never exposed to a client.
  *
  * <p>The package depends on the JDK alone, so repository and service classes can throw
  * these exceptions without introducing a dependency cycle.
  *
+ * <p>{@code CustomerRepository.save} wraps a lock timeout in Spring Data's
+ * {@code DbActionExecutionException}, and Spring's PostgreSQL error codes leave
+ * {@code 55P03} uncategorized, so the caller tests the SQLSTATE in the cause chain:
  * <pre>{@code
  * try {
  *     return repository.save(customer);
- * } catch (CannotAcquireLockException e) {
- *     throw new CustomerLockedException(e);
+ * } catch (DbActionExecutionException e) {
+ *     if (hasSqlState(e, "55P03")) {       // walks getCause() to the SQLException
+ *         throw new CustomerLockedException(e.getCause());
+ *     }
+ *     throw e;
  * }
  * }</pre>
  */
