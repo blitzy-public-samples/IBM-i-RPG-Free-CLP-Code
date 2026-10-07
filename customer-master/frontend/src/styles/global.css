@@ -1,9 +1,19 @@
 /*
  * Customer Master base styles and shared class contract.
  *
- * src/main.tsx loads this file after tokens.css. Every value comes from a
- * token defined there: no colour literal is written here except
- * `transparent`, `currentColor` and the forced-colors system colours.
+ * src/main.tsx loads this file after tokens.css. The palette and the shared
+ * design scales come from the tokens defined there, through var(--…):
+ * colour, spacing, font families and sizes, body line height, corner radius,
+ * focus-ring width, elevation, component sizes and layers. No colour literal
+ * is written here except `transparent`, `currentColor` and the forced-colors
+ * system colours. The other literals are structural constants local to the
+ * rules that use them: 0, 1 and 100%, keywords, grid lines and calc()
+ * factors; the 600 bold weight and the 1.25 heading line height; the 2px
+ * focus-ring offset; 1px, 2px and 4px border widths; the visually-hidden
+ * clip (1px, -1px, 50%); grid fractions and the minmax(8rem, 14rem) label
+ * column; the 80rem screen and min(40rem, 100%) toast inline bounds; 100vw
+ * and 100vh viewport arithmetic; the 0.2em underline offset; and the 30rem
+ * breakpoints, since a media query cannot read a custom property.
  * Self-contained: no imported stylesheets, external resources or web fonts.
  *
  * The class names below are a cross-folder contract used verbatim by
@@ -94,9 +104,10 @@ button {
  * Text fields (the 5250 input fields, DSPATR(UL) when editable).
  * - Monospace, so the `size` attribute (set by the components to the field's
  *   maxLength: 13 for search filters, 40 for Name, 1 for Opt and Active)
- *   matches the character count. Width stays `auto`; CSS attr() cannot drive
- *   a width, so `size` is the sizing mechanism and max-inline-size only stops
- *   overflow on narrow screens.
+ *   matches the character count. Width stays `auto` and `size` is the sizing
+ *   mechanism, because it works in every browser and even without CSS,
+ *   whereas typed attr() lengths are not available in every supported
+ *   browser. max-inline-size only stops overflow on narrow screens.
  * - No CSS case transform: src/components/upperField.ts uppercases the real
  *   value as it is typed, so what is shown is exactly what is submitted.
  * - :where() keeps this rule at element specificity, so .read-only and the
@@ -132,10 +143,60 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/*
+ * Enabled buttons. Hover (only where a real pointer hovers, so touch taps
+ * leave no sticky state) brightens the face and darkens the outline; pressed
+ * inverts to --color-bg on --color-fg (15.8:1). The pressed rule follows the
+ * hover rule, so a press under the pointer shows the pressed image. Disabled
+ * buttons match neither. .fkey-bar__key restates every property set here.
+ */
+@media (hover: hover) {
+  button:not(:disabled):hover {
+    background: var(--color-bg);
+    border-color: var(--color-fg);
+  }
+}
+
+button:not(:disabled):active {
+  color: var(--color-bg);
+  background: var(--color-fg);
+  border-color: var(--color-fg);
+}
+
+/*
+ * Disabled fields: muted text (5.74:1) on the surface colour and the
+ * not-allowed cursor; the border stays. opacity: 1 cancels the browser's own
+ * dimming of a disabled select, which would pull that text below 4.5:1.
+ * :where() leaves only :disabled in the specificity, so .read-only,
+ * input[readonly] and the [aria-invalid] reverse image below still win.
+ * Checkboxes and radios stay native.
+ */
+:where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):disabled {
+  color: var(--color-muted);
+  background: var(--color-surface);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
 /* The underline keeps colour from being the only sign of a link. */
 a {
   color: var(--color-accent);
   text-decoration: underline;
+}
+
+/*
+ * Hovered links darken to --color-fg; pressed links invert to --color-bg on
+ * --color-accent (7.59:1). The underline stays in every state.
+ */
+@media (hover: hover) {
+  a:hover {
+    color: var(--color-fg);
+  }
+}
+
+a:active {
+  color: var(--color-bg);
+  background: var(--color-accent);
 }
 
 /*
@@ -158,6 +219,11 @@ a {
  * - Centred with inset 0 + margin auto + fit-content, never with a transform:
  *   a transformed dialog would become the containing block of a nested
  *   picker's fixed backdrop and dialog, trapping them inside its box.
+ * - Every window, a State picker nested in the detail dialog included, keeps
+ *   the toast band clear at all times (toast clearance, after the
+ *   .toast-region rules): its end inset is raised past the band, so it
+ *   centres in the viewport area above the band and never moves or shrinks
+ *   when a message appears, and a taller window scrolls inside itself.
  * - Painted one layer above its own backdrop (calc(--z-dialog + 1)), so the
  *   order in the DOM does not matter. A State picker nested inside the detail
  *   dialog paints within the detail dialog's stacking context, above it.
@@ -168,11 +234,12 @@ dialog,
 .dialog {
   position: fixed;
   inset: 0;
+  inset-block-end: calc(var(--toast-band-block-size) + var(--space-4));
   z-index: calc(var(--z-dialog) + 1);
   inline-size: fit-content;
   block-size: fit-content;
   max-inline-size: calc(100vw - 2 * var(--space-4));
-  max-block-size: calc(100vh - 2 * var(--space-4));
+  max-block-size: calc(100vh - var(--toast-band-block-size) - 3 * var(--space-4));
   margin: auto;
   padding: var(--space-4);
   overflow: auto;
@@ -180,7 +247,7 @@ dialog,
   background: var(--color-surface);
   border: 2px solid var(--color-highlight);
   border-radius: var(--radius);
-  box-shadow: 0 4px 16px var(--color-backdrop);
+  box-shadow: var(--shadow-dialog);
 }
 
 /* Only reached by a dialog opened with showModal(), which the app never does. */
@@ -280,31 +347,65 @@ dialog::backdrop {
   border-color: var(--color-border);
 }
 
-/* Hover only where a real pointer hovers, so touch taps leave no sticky state. */
+/*
+ * Hover only where a real pointer hovers, so touch taps leave no sticky state.
+ * The key states restate every property of the generic button hover and
+ * pressed rules, which outrank .fkey-bar__key alone, so a key keeps its
+ * accent border and legend.
+ */
 @media (hover: hover) {
   .fkey-bar__key:not(:disabled):hover {
     background: var(--color-bg);
+    border-color: var(--color-accent);
     text-decoration: underline;
   }
 }
 
+/* Pressed key: the legend inverts to --color-bg on --color-accent (7.59:1). */
+.fkey-bar__key:not(:disabled):active {
+  color: var(--color-bg);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 /*
  * Messages (the MSGSFL/MSGCTL message subfile). ToastProvider mounts the one
- * .toast-region outside every dialog; it holds a role="status" and a
- * role="alert" container, each always rendered so assistive technology has
- * registered the live regions before a message arrives. The region is never
- * hidden when empty. It sits above every dialog (--z-toast) and lets every
- * pointer event through, so it never blocks the function-key bar beneath it.
+ * .toast-region outside every dialog, as the last child of the app root; it
+ * holds a role="status" and a role="alert" container, each always rendered so
+ * assistive technology has registered the live regions before a message
+ * arrives. The region is never hidden when empty. It sits above every dialog
+ * (--z-toast) and lets every pointer event through, so it never blocks the
+ * function-key bar beneath it.
+ * - The region is a sticky band at the end of the page: --toast-band-block-size
+ *   tall between --space-4 margins. On a long page it stays pinned to the
+ *   viewport bottom; on a short one the flex column of its parent (toast
+ *   clearance, below) pushes it there.
+ * - Its height never changes, so a message never moves a screen or window.
+ *   Toasts sit at the bottom of the band. A message too long for the band
+ *   starts at its top and continues below it, adding that length to the end
+ *   of the page, and scrolling the page to its end brings the rest into view:
+ *   the mouse wheel or touch anywhere (over a toast it passes through to the
+ *   page or window backdrop beneath), or End and the arrow keys from a control
+ *   that does not use them itself, such as a window's function-key buttons,
+ *   because a window that cannot scroll further passes the scroll on to the
+ *   page. Nothing in the region takes focus, so the whole message stays
+ *   reachable from inside a window's focus trap.
+ * - The end padding of the alert container, the last child, is the --space-4
+ *   margin, so it also stays below the last line of a long message.
  */
 .toast-region {
-  position: fixed;
-  inset-inline: 0;
-  inset-block-end: var(--space-4);
+  position: sticky;
+  inset-block-end: 0;
   z-index: var(--z-toast);
+  flex: none;
   display: flex;
   flex-direction: column;
+  justify-content: safe flex-end;
   align-items: center;
   gap: var(--space-2);
+  block-size: calc(var(--toast-band-block-size) + 2 * var(--space-4));
+  margin-block-start: auto;
+  padding-block: var(--space-4) 0;
   padding-inline: var(--space-4);
   pointer-events: none;
 }
@@ -315,6 +416,46 @@ dialog::backdrop {
   flex-direction: column;
   align-items: center;
   gap: var(--space-2);
+  inline-size: 100%;
+}
+
+.toast-region > :last-child {
+  padding-block-end: var(--space-4);
+}
+
+/*
+ * Toast clearance: keyboard focus is never hidden behind a message shown in
+ * the band at the viewport bottom. The band is kept clear at all times rather
+ * than only while a toast is shown. src/errors/useProblemPresenter.ts
+ * publishes an alert and focuses the first invalid field in the same call, so
+ * that focus scrolls before the toast renders; with the band already reserved
+ * the field is clear of the message when it arrives, and nothing on a screen
+ * or window moves when a message appears or goes.
+ * - The root scroll-padding makes focus scrolling and scrollIntoView stop a
+ *   control a --space-4 gap above the band, a gap that also holds its focus
+ *   ring, instead of behind it.
+ * - The region's parent, the app root, is a flex column at least the viewport
+ *   tall. The band, in flow after the screen, gives a page room to scroll its
+ *   last controls (the function-key bar, the footer) clear of it, and the
+ *   region's auto start margin seats it at the viewport bottom on a short
+ *   page. The other children keep the full width they would have as blocks.
+ * - Every window ends above the band through its own end inset and height
+ *   limit (the dialog, .dialog rule). Windows are fixed and the band scrolls
+ *   with the page, so while the page is scrolled to its end to read a long
+ *   message, the message reaches above the band, over an open window, by as
+ *   much as it is longer than the band, until the page is scrolled back.
+ */
+:root {
+  scroll-padding-block-end: calc(var(--toast-band-block-size) + 2 * var(--space-4));
+}
+
+:where(:has(> .toast-region)) {
+  display: flex;
+  flex-direction: column;
+  min-block-size: 100vh;
+}
+
+:where(:has(> .toast-region)) > :where(:not(.toast-region)) {
   inline-size: 100%;
 }
 
@@ -329,7 +470,7 @@ dialog::backdrop {
   border: 1px solid var(--color-border);
   border-inline-start-width: 4px;
   border-radius: var(--radius);
-  box-shadow: 0 2px 8px var(--color-backdrop);
+  box-shadow: var(--shadow-toast);
   pointer-events: none;
 }
 
@@ -411,6 +552,21 @@ textarea[readonly] {
   color: var(--color-fg);
   background: transparent;
   border-color: transparent;
+}
+
+/*
+ * Long values wrap inside their column. As grid items, a span or output
+ * display value and a field message would otherwise keep their longest
+ * unbroken run as their minimum width, so a 40-character name would push a
+ * dialog sideways at 320 CSS px. Native controls keep their `size` width and
+ * scroll their own value, so they are left out.
+ */
+.form-field__input:not(input, select, textarea),
+.read-only:not(input, select, textarea),
+.form-field__message {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -550,7 +706,7 @@ textarea[aria-invalid="true"] {
 
 /* Sign-in page wrapper: a narrow centred column. */
 .sign-in {
-  max-inline-size: 36rem;
+  max-inline-size: var(--size-sign-in);
   margin-inline: auto;
   padding: var(--space-4);
 }

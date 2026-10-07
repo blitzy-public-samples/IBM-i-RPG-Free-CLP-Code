@@ -1,9 +1,14 @@
 /*
  * Customer Master design-token layer.
  *
- * Every colour, spacing, type, shape and layering value the SPA uses is
- * defined here as a CSS custom property; global.css and the components
- * consume them through var(--…) and write no literal values of their own.
+ * The palette and the shared design scales (colour, spacing, type, shape,
+ * elevation, component sizes and layers) are defined here as CSS custom
+ * properties; global.css and the components consume them through var(--…).
+ * Colour is token-only: outside this file no colour literal is written
+ * except `transparent`, `currentColor` and the forced-colors system colours.
+ * Structural constants local to the rules that use them (border widths, the
+ * bold weight, the visually-hidden clip, grid geometry, viewport arithmetic
+ * and the breakpoints) stay literal in global.css, whose header lists them.
  * Token names are a cross-folder contract: rename none of them.
  *
  * The palette translates the 5250 display attributes of PMTCUSTD (search
@@ -78,6 +83,15 @@
   /* Body line height. */
   --line-height: 1.5;
 
+  /* ---- Elevation and sizes --------------------------------------------- */
+
+  /* Window lift (MTNCUSTD, PMTSTATED WINDOW): dialogs float above the dimmed screen. */
+  --shadow-dialog: 0 4px 16px var(--color-backdrop);
+  /* Message lift (MSGSFL): toasts stand off the screen or window beneath them. */
+  --shadow-toast: 0 2px 8px var(--color-backdrop);
+  /* Sign-in page column width: a narrow centred form. */
+  --size-sign-in: 36rem;
+
   /* ---- Shape and layers ------------------------------------------------ */
 
   /* Corner radius for inputs, buttons, dialogs and toasts. */
@@ -88,4 +102,16 @@
   --z-dialog: 100;
   /* Message subfile (MSGSFL) equivalent: the toast host stays above every open dialog. */
   --z-toast: 1000;
+  /*
+   * Height of the toast band, the strip above the bottom --space-4 margin
+   * where messages show. Every screen and window keeps it clear at all times,
+   * so a message there never hides a focused control, even one focused just
+   * before the message renders. A catalog message (at most 48 characters)
+   * wraps to two lines at a 320px viewport, about 66px tall: 10rem holds a
+   * status and an alert together, and 30vh keeps most of a short viewport
+   * usable while still holding one message from 256px tall and two from about
+   * 467px. A longer message continues below the band and comes into view as
+   * the page scrolls to its end.
+   */
+  --toast-band-block-size: min(10rem, 30vh);
 }
