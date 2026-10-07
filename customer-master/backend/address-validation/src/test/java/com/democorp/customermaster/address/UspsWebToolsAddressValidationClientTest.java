@@ -6,9 +6,9 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetAddress;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -20,9 +20,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -87,9 +93,10 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  * </ul>
  *
  * <p><b>Fake server.</b> A JDK {@link HttpServer} on {@code 127.0.0.1} and an ephemeral
- * port, with a cached thread pool so a handler that sleeps blocks nothing else. Each test
- * installs its own handler for {@code /ShippingAPI.dll}; {@code /redirected} counts the
- * hits a followed redirect would make.
+ * port, with a cached thread pool so a handler that waits on a latch blocks nothing else.
+ * Each test installs its own handler for {@code /ShippingAPI.dll}; {@code /redirected}
+ * counts the hits a followed redirect would make. The refused connection targets a
+ * {@code 127.0.0.1} port held for the whole case by a bound socket that never listens.
  *
  * <p><b>Test values.</b> The credentials {@code TESTUSER123} and {@code pl&ce"holder} are
  * fictitious placeholders; the password carries {@code &} and {@code "} so that its
@@ -142,17 +149,29 @@ class UspsWebToolsAddressValidationClientTest {
     private static final AddressValidationResult SUCCESS_ZIP4 =
             AddressValidationResult.success("STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234");
 
+    /** Connect timeout of every case except the timeout case. */
+    private static final Duration NORMAL_CONNECT_TIMEOUT = Duration.ofSeconds(5);
+
     /** Read timeout of every case except the timeout case. */
     private static final Duration NORMAL_READ_TIMEOUT = Duration.ofSeconds(5);
 
-    /** Read timeout of the timeout case, well below the handler's delay. */
+    /**
+     * Read timeout of the timeout case, whose handler withholds the response until the test
+     * has observed the fault.
+     */
     private static final Duration SHORT_READ_TIMEOUT = Duration.ofMillis(300);
 
-    /** How long the slow handler waits before answering. */
-    private static final long SLOW_HANDLER_DELAY_MILLIS = 2_000;
+    /**
+     * Connect timeout of the timeout case, longer than {@link #WATCHDOG}, so a fault raised
+     * within the watchdog comes from the read timeout and never from the connect timeout.
+     */
+    private static final Duration TIMEOUT_CASE_CONNECT_TIMEOUT = Duration.ofMinutes(2);
 
-    /** Upper bound on the timed-out call, comfortably below the handler's delay. */
-    private static final Duration TIMEOUT_CALL_BUDGET = Duration.ofMillis(1_500);
+    /**
+     * Bound on every wait of the timeout case, so a broken client fails the test instead of
+     * hanging it. It is a deadlock guard, not a performance limit.
+     */
+    private static final Duration WATCHDOG = Duration.ofSeconds(30);
 
     /** Body size limit of the client under test. */
     private static final int LIMIT = UspsWebToolsAddressValidationClient.MAX_BODY_BYTES;
@@ -327,35 +346,58 @@ class UspsWebToolsAddressValidationClientTest {
     }
 
     @Test
-    @DisplayName("a response slower than the read timeout is a fault, raised within the timeout")
-    void readTimeoutIsFault(CapturedOutput output) throws IOException {
+    @DisplayName("a response withheld past the read timeout is a fault, raised while the response is still withheld")
+    void readTimeoutIsFault(CapturedOutput output)
+            throws IOException, InterruptedException, ExecutionException, TimeoutException {
         byte[] body = fixture("success-zip4.xml");
+        CountDownLatch handlerEntered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch handlerDone = new CountDownLatch(1);
         handler.set(exchange -> {
             try {
                 exchange.getRequestBody().readAllBytes();
-                Thread.sleep(SLOW_HANDLER_DELAY_MILLIS);
+                handlerEntered.countDown();
+                // The response is withheld until the test has observed the fault; the
+                // watchdog only keeps a broken run from holding this thread forever.
+                release.await(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS);
                 respond(exchange, 200, body);
             } catch (InterruptedException stopped) {
-                // AfterEach shuts the executor down while the handler still sleeps.
+                // AfterEach shuts the executor down while the handler still waits.
                 Thread.currentThread().interrupt();
             } catch (IOException clientGone) {
                 // The client timed out and closed the connection: nothing is left to answer,
                 // and the test asserts on the client side only.
             } finally {
                 exchange.close();
+                handlerDone.countDown();
             }
         });
 
         Throwable thrown;
-        Duration elapsed;
-        try (UspsWebToolsAddressValidationClient client = client(SHORT_READ_TIMEOUT)) {
-            long start = System.nanoTime();
-            thrown = catchThrowable(() -> client.validate(REQUEST));
-            elapsed = Duration.ofNanos(System.nanoTime() - start);
+        ExecutorService validation = Executors.newSingleThreadExecutor();
+        try (UspsWebToolsAddressValidationClient client = client(TIMEOUT_CASE_CONNECT_TIMEOUT, SHORT_READ_TIMEOUT)) {
+            try {
+                Future<Throwable> call = validation.submit(() -> catchThrowable(() -> client.validate(REQUEST)));
+                // The handler has read the request, so the connection is established and the
+                // request sent: only the read timeout can end the call now.
+                assertThat(handlerEntered.await(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS))
+                        .withFailMessage("the fake endpoint never received the request")
+                        .isTrue();
+                thrown = call.get(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS);
+                assertThat(handlerDone.getCount())
+                        .withFailMessage("the handler answered before the client raised the fault")
+                        .isEqualTo(1);
+            } finally {
+                // Released before the client closes, because close() waits for any exchange
+                // still in flight.
+                release.countDown();
+                handlerDone.await(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS);
+                validation.shutdownNow();
+            }
         }
 
         assertTransportFault(thrown);
-        assertThat(elapsed).isLessThan(TIMEOUT_CALL_BUDGET);
+        assertThat(thrown).hasMessage("USPS address service I/O failure: HttpTimeoutException");
         assertNoCredentials(output, thrown);
     }
 
@@ -417,7 +459,9 @@ class UspsWebToolsAddressValidationClientTest {
     void bodyOverLimitIsFault(CapturedOutput output) throws IOException {
         // Trailing blanks after the root element keep the document well-formed, so only the
         // size limit can reject it.
-        byte[] body = padded(fixture("success-zip4.xml"), LIMIT + 1);
+        byte[] document = fixture("success-zip4.xml");
+        assertThat(document).hasSizeLessThan(LIMIT);
+        byte[] body = padded(document, LIMIT + 1);
         assertThat(body).hasSize(65_537);
         handler.set(exchange -> drainAndRespond(exchange, 200, body));
 
@@ -431,7 +475,9 @@ class UspsWebToolsAddressValidationClientTest {
     @Test
     @DisplayName("a 200 body of exactly the limit is accepted")
     void bodyAtLimitIsAccepted(CapturedOutput output) throws IOException {
-        byte[] body = padded(fixture("success-zip4.xml"), LIMIT);
+        byte[] document = fixture("success-zip4.xml");
+        assertThat(document).hasSizeLessThan(LIMIT);
+        byte[] body = padded(document, LIMIT);
         assertThat(body).hasSize(65_536);
         handler.set(exchange -> drainAndRespond(exchange, 200, body));
 
@@ -448,7 +494,9 @@ class UspsWebToolsAddressValidationClientTest {
     @Test
     @DisplayName("a chunked 200 body one byte over the limit is a fault without Content-Length")
     void chunkedBodyOverLimitIsFault(CapturedOutput output) throws IOException {
-        byte[] body = padded(fixture("success-zip4.xml"), LIMIT + 1);
+        byte[] document = fixture("success-zip4.xml");
+        assertThat(document).hasSizeLessThan(LIMIT);
+        byte[] body = padded(document, LIMIT + 1);
         assertThat(body).hasSize(65_537);
         handler.set(exchange -> {
             try {
@@ -498,18 +546,35 @@ class UspsWebToolsAddressValidationClientTest {
     @Test
     @DisplayName("a refused connection is a fault")
     void refusedConnectionIsFault(CapturedOutput output) throws IOException {
-        int closedPort;
-        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
-            closedPort = socket.getLocalPort();
-        }
-
         Throwable thrown;
-        try (UspsWebToolsAddressValidationClient client =
-                client("http://127.0.0.1:" + closedPort + ENDPOINT_PATH, NORMAL_READ_TIMEOUT)) {
-            thrown = catchThrowable(() -> client.validate(REQUEST));
+        Throwable direct;
+        // A bound socket that never listens or connects holds 127.0.0.1:<port> for the whole
+        // case: no other socket can bind it, and every connect to it is refused.
+        try (Socket reservation = new Socket()) {
+            reservation.setReuseAddress(false);
+            reservation.bind(new InetSocketAddress("127.0.0.1", 0));
+            InetSocketAddress reserved = new InetSocketAddress("127.0.0.1", reservation.getLocalPort());
+
+            try (UspsWebToolsAddressValidationClient client =
+                    client("http://127.0.0.1:" + reserved.getPort() + ENDPOINT_PATH, NORMAL_READ_TIMEOUT)) {
+                thrown = catchThrowable(() -> client.validate(REQUEST));
+            }
+
+            // Control: the reserved endpoint itself refuses a plain connect.
+            direct = catchThrowable(() -> {
+                try (Socket probe = new Socket()) {
+                    probe.connect(reserved, (int) NORMAL_CONNECT_TIMEOUT.toMillis());
+                }
+            });
         }
 
+        assertThat(direct).isInstanceOf(ConnectException.class);
         assertTransportFault(thrown);
+        // The JDK HttpClient reports a refused connect as a ConnectException caused by a
+        // ClosedChannelException, and the client names the root cause's class. That reason
+        // is the refused-connect signature, distinct from a timeout (HttpTimeoutException), a
+        // truncated body (EOFException) and an HTTP status.
+        assertThat(thrown).hasMessage("USPS address service I/O failure: ClosedChannelException");
         assertNoCredentials(output, thrown);
     }
 
@@ -589,7 +654,11 @@ class UspsWebToolsAddressValidationClientTest {
             maskedEntitiesEncoded = client.mask("x " + entitiesEncoded + " y");
         }
 
-        String passwordAttribute = attributeText(document, "PASSWORD");
+        Optional<String> passwordAttributeText = attributeText(document, "PASSWORD");
+        assertThat(passwordAttributeText)
+                .withFailMessage("decoded request document lacks a closed PASSWORD attribute")
+                .isPresent();
+        String passwordAttribute = passwordAttributeText.orElseThrow();
         assertThat(passwordAttribute.equals(UspsXmlCodec.attributeValue(APOSTROPHE_PASSWORD)))
                 .withFailMessage("PASSWORD attribute differs from UspsXmlCodec.attributeValue")
                 .isTrue();
@@ -618,7 +687,12 @@ class UspsWebToolsAddressValidationClientTest {
 
     /** Builds a client for the fake endpoint with the given read timeout. */
     private UspsWebToolsAddressValidationClient client(Duration readTimeout) {
-        return client("http://127.0.0.1:" + port + ENDPOINT_PATH, readTimeout);
+        return client(NORMAL_CONNECT_TIMEOUT, readTimeout);
+    }
+
+    /** Builds a client for the fake endpoint with the given connect and read timeouts. */
+    private UspsWebToolsAddressValidationClient client(Duration connectTimeout, Duration readTimeout) {
+        return client("http://127.0.0.1:" + port + ENDPOINT_PATH, PASSWORD, connectTimeout, readTimeout);
     }
 
     /** Builds a client for {@code baseUrl} with the placeholder credentials. */
@@ -629,11 +703,20 @@ class UspsWebToolsAddressValidationClientTest {
     /** Builds a client for {@code baseUrl} with the placeholder user id and {@code password}. */
     private static UspsWebToolsAddressValidationClient client(
             String baseUrl, String password, Duration readTimeout) {
+        return client(baseUrl, password, NORMAL_CONNECT_TIMEOUT, readTimeout);
+    }
+
+    /**
+     * Builds a client for {@code baseUrl} with the placeholder user id, {@code password} and
+     * the given connect and read timeouts.
+     */
+    private static UspsWebToolsAddressValidationClient client(
+            String baseUrl, String password, Duration connectTimeout, Duration readTimeout) {
         return new UspsWebToolsAddressValidationClient(new AddressValidationProperties(
                 true,
                 AddressValidationProperties.Client.USPS,
                 new AddressValidationProperties.Usps(
-                        baseUrl, USER_ID, password, Duration.ofSeconds(5), readTimeout)));
+                        baseUrl, USER_ID, password, connectTimeout, readTimeout)));
     }
 
     /**
@@ -652,17 +735,23 @@ class UspsWebToolsAddressValidationClientTest {
     }
 
     /**
-     * Returns the text between the quotes of attribute {@code name} in the decoded request
-     * document; failure messages name the attribute and never quote the document.
+     * Returns the text between the quotes of the first attribute {@code name} in the decoded
+     * request document, or an empty {@link Optional} when the document lacks a blank
+     * followed by {@code name="}, or that attribute lacks its closing quote. It asserts
+     * nothing; the caller asserts presence.
      */
-    private static String attributeText(String document, String name) {
+    private static Optional<String> attributeText(String document, String name) {
         String start = " " + name + "=\"";
         int from = document.indexOf(start);
-        assertThat(from).withFailMessage("decoded request document lacks the %s attribute", name).isNotNegative();
+        if (from < 0) {
+            return Optional.empty();
+        }
         int valueStart = from + start.length();
         int valueEnd = document.indexOf('"', valueStart);
-        assertThat(valueEnd).withFailMessage("the %s attribute is not closed", name).isNotNegative();
-        return document.substring(valueStart, valueEnd);
+        if (valueEnd < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(document.substring(valueStart, valueEnd));
     }
 
     /**
@@ -774,9 +863,12 @@ class UspsWebToolsAddressValidationClientTest {
         }
     }
 
-    /** Returns {@code document} followed by ASCII blanks up to exactly {@code size} bytes. */
+    /**
+     * Returns {@code document} followed by ASCII blanks up to exactly {@code size} bytes. It
+     * asserts nothing: {@code document} must be shorter than {@code size}, which each caller
+     * asserts before padding.
+     */
     private static byte[] padded(byte[] document, int size) {
-        assertThat(document.length).isLessThan(size);
         byte[] body = Arrays.copyOf(document, size);
         Arrays.fill(body, document.length, size, (byte) ' ');
         return body;
