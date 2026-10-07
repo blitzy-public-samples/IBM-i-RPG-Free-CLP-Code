@@ -17,11 +17,13 @@
  * );
  * ```
  *
- * Layering. This file imports nothing from `src/` (not even types from
- * `../api` or the generated `schema.d.ts`): the transport tests and the feature
- * tests import from here, so any import back would create a folder cycle. The
- * fixture types are therefore declared locally, with the property names of the
- * OpenAPI contract in `customer-master/openapi/customer-master-api.yaml`.
+ * Layering. The fixture and wire types are type-only aliases of the generated
+ * `../api/schema` (from `customer-master/openapi/customer-master-api.yaml`),
+ * the one source of API types, and are erased at compile time, so this file's
+ * only runtime import is `msw/http`. `schema.d.ts` imports nothing, so the
+ * tests that import this file form no import cycle with it. `UserFixture`, the
+ * demo credentials, is the one shape declared here, because it is test-only
+ * data.
  *
  * Fixture data. The states are the 58 rows of 5250_Subfile/States.sql; the
  * customers are the first 30 seed rows of 5250_Subfile/Custmast.sql after the
@@ -35,89 +37,54 @@
  * `setupServer` stays in `msw/node`, which only `server.ts` imports.
  */
 import { http, HttpResponse } from 'msw/http';
+import type { components } from '../api/schema';
 
 // ---------------------------------------------------------------------------
-// Fixture types (shaped by the OpenAPI schemas of the same purpose)
+// Fixture types (aliases of the generated OpenAPI schemas in ../api/schema)
 // ---------------------------------------------------------------------------
 
-/** A role as `GET /api/session` reports it. */
-export type Role = 'INQUIRY' | 'MAINTENANCE';
+/** The generated OpenAPI component schemas. */
+type Schemas = components['schemas'];
 
-/** One row of `GET /api/states` (schema `StateResponse`). */
-export interface StateFixture {
-  state: string;
-  name: string;
-}
+/** A role as `GET /api/session` reports it: an element of schema `SessionResponse`'s `roles`. */
+export type Role = Schemas['SessionResponse']['roles'][number];
 
-/** One search result row (schema `CustomerSummaryResponse`). */
-export interface CustomerSummaryFixture {
-  custId: string;
-  name: string;
-  city: string;
-  state: string;
-  zip5: string;
-  active: string;
-}
+/** One row of `GET /api/states`: alias of schema `StateResponse`. */
+export type StateFixture = Schemas['StateResponse'];
 
-/** The nine editable customer fields (schema `CustomerFields`). */
-export interface CustomerFieldsFixture {
-  name: string;
-  addr: string;
-  city: string;
-  state: string;
-  zip: string;
-  corpPhone: string;
-  acctMgr: string;
-  acctPhone: string;
-  active: string;
-}
+/** One search result row: alias of schema `CustomerSummaryResponse`. */
+export type CustomerSummaryFixture = Schemas['CustomerSummaryResponse'];
 
-/** A stored customer (schema `CustomerResponse`); `chgTime` is an ISO-8601 instant. */
-export interface CustomerResponseFixture extends CustomerFieldsFixture {
-  custId: string;
-  chgTime: string;
-  chgUser: string;
-  version: number;
-}
+/**
+ * The nine editable customer fields of schema `CustomerFields`, as schema
+ * `CustomerResponse` carries them: always present, never `null`.
+ */
+export type CustomerFieldsFixture = Pick<Schemas['CustomerResponse'], keyof Schemas['CustomerFields']>;
 
-/** One entry of a problem's `errors`; the first entry receives focus. */
-export interface FieldErrorFixture {
-  field: string;
-  code: string;
-  message: string;
-}
+/** A stored customer: alias of schema `CustomerResponse`; `chgTime` is an ISO-8601 instant or `null`. */
+export type CustomerResponseFixture = Schemas['CustomerResponse'];
 
-/** Optional members of a problem built by {@link problem}. */
-export interface ProblemExtra {
-  /** Substitution values for the catalog text; also sent as `args`. */
-  args?: string[];
-  /** The request path; defaults to `/api`. */
-  instance?: string;
-  /** Overrides the catalog text, e.g. for DEM9898's USPS description. */
-  detail?: string;
-  errors?: FieldErrorFixture[];
-  /** 409 DEM1002 only: the customer as now stored. */
-  current?: CustomerResponseFixture;
-  /** Review failures after the State rule passed. */
-  stateAccepted?: string;
-  /** 500 only. */
-  errorId?: string;
-}
+/** One entry of a problem's `errors`, the first receiving focus: alias of schema `FieldError`. */
+export type FieldErrorFixture = Schemas['FieldError'];
 
-/** The problem+json body, members in the order the backend writes them. */
-interface ProblemBody {
-  type: string;
-  title: string;
-  status: number;
-  instance: string;
-  detail: string;
-  code: string;
-  args: string[];
-  errors?: FieldErrorFixture[];
-  current?: CustomerResponseFixture;
-  stateAccepted?: string;
-  errorId?: string;
-}
+/** The problem+json body: alias of schema `Problem`. */
+type ProblemBody = Schemas['Problem'];
+
+/**
+ * Optional members of a problem built by {@link problem}, each typed as schema
+ * `Problem` declares it:
+ *
+ * - `args`: substitution values for the catalog text; also sent as `args`.
+ * - `instance`: the request path; defaults to `/api`.
+ * - `detail`: overrides the catalog text, e.g. for DEM9898's USPS description.
+ * - `errors`: the fields at fault.
+ * - `current`: 409 DEM1002 only, the customer as now stored.
+ * - `stateAccepted`: review failures after the State rule passed.
+ * - `errorId`: 500 only.
+ */
+export type ProblemExtra = Partial<
+  Pick<ProblemBody, 'args' | 'instance' | 'detail' | 'errors' | 'current' | 'stateAccepted' | 'errorId'>
+>;
 
 /** A demo user: the Compose defaults of `CM_INQUIRY_*` and `CM_MAINTENANCE_*`. */
 interface UserFixture {
@@ -126,11 +93,8 @@ interface UserFixture {
   roles: Role[];
 }
 
-/** A non-error message carried in a success payload (schema `Notice`). */
-interface NoticeFixture {
-  code: string;
-  message: string;
-}
+/** A non-error message carried in a success payload: alias of schema `Notice`. */
+type NoticeFixture = Schemas['Notice'];
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -260,7 +224,7 @@ export const users: readonly UserFixture[] = deepFreeze([
  * The demo user a request authenticates as, from its Basic `Authorization`
  * header, or `undefined` for a missing, malformed or unknown credential.
  */
-function principal(request: Request): { username: string; roles: Role[] } | undefined {
+function principal(request: Request): Schemas['SessionResponse'] | undefined {
   const header = request.headers.get('Authorization');
   const scheme = 'Basic ';
   if (header === null || !header.startsWith(scheme)) {

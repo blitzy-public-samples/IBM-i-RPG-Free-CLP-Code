@@ -869,7 +869,7 @@ function registerWindow(entry: OpenWindow): () => void {
  * const filterRef = useRef<HTMLInputElement>(null);
  * <Dialog open={open} labelledBy="state-picker-title" initialFocusRef={filterRef}
  *         className="state-picker">
- *   <ScreenHeader id="state-picker" title="USA States" user={username} />
+ *   <ScreenHeader id="state-picker" title="USA States" functionText="" user={username} />
  *   <FormField id="state-picker-name" label="Name Contains" inputRef={filterRef} … />
  * </Dialog>
  */

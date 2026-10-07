@@ -26,6 +26,7 @@
 //   formatChangeStamp('2026-10-05T14:03:09Z', 'sales')
 //     → '2026-Oct-05 at 14:03:09 by sales' in a UTC browser
 //   formatChangeStamp('2026-10-05T14:03:09Z', '*SYSTEM*') → null
+//   formatChangeStamp(null, 'sales') → null
 
 /** Users whose rows carry no visible stamp: seed and generator loads stamp '*SYSTEM*'. */
 const SYSTEM_USER = '*SYSTEM*';
@@ -64,15 +65,18 @@ function formatYear(year: number): string {
  * Formats a customer's last-change stamp as `YYYY-Mon-DD at HH:mm:ss by USER`
  * in browser-local time, with a 24-hour clock.
  *
- * @param chgTime ISO-8601 instant from `CustomerResponse.chgTime`.
+ * @param chgTime ISO-8601 instant from `CustomerResponse.chgTime`, or `null`
+ *   when the record carries no change time, which the contract allows; a
+ *   `null` time hides the stamp.
  * @param chgUser The user who made the last change, from `CustomerResponse.chgUser`.
  * @returns The stamp text, or `null` when the stamp is hidden: the user is
- *   blank or `*SYSTEM*`, or `chgTime` is not a parseable date.
+ *   blank or `*SYSTEM*`, or `chgTime` is `null` or not a parseable date.
  */
-export function formatChangeStamp(chgTime: string, chgUser: string): string | null {
-  // The values come from a JSON payload, so a missing member is guarded at
-  // run time as well: `new Date(null)` would otherwise yield the 1970 epoch and
-  // show a stamp the record never carried.
+export function formatChangeStamp(chgTime: string | null, chgUser: string): string | null {
+  // A `null` chgTime is the contract's own case and hides the stamp:
+  // `new Date(null)` would otherwise yield the 1970 epoch and show a stamp the
+  // record never carried. The typeof checks also guard a member missing from
+  // the JSON payload at run time, which no static type rules out.
   const user = typeof chgUser === 'string' ? chgUser.trim() : '';
   if (user === '' || user === SYSTEM_USER) {
     return null;
