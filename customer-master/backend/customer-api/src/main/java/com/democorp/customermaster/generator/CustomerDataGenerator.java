@@ -80,8 +80,8 @@ import java.util.Objects;
  * CustomerDataGenerator generator = new CustomerDataGenerator(
  *         NameGenerator.seeded(7), cszSource.load("classpath:generator/csz-sample.csv"),
  *         OffsetDateTime.now(clock).truncatedTo(ChronoUnit.MICROS));
- * Iterator<Customer> rows = generator.generate(CustomerId.parse("1001"), 1_000_000);
- * copyWriter.copy(connection, rows);   // rows 1001, 1002, ... built one at a time as COPY streams
+ * Iterator<Customer> rows = generator.generate(CustomerId.parse("AAAA"), 1_000_000);
+ * copyWriter.copy(connection, rows);   // rows AAAA, AAAB, ... built one at a time as COPY streams
  * }</pre>
  */
 public final class CustomerDataGenerator {

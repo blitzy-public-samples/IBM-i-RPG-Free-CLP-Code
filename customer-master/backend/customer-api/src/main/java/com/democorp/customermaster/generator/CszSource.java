@@ -51,7 +51,9 @@ import org.springframework.stereotype.Component;
  * </ul>
  *
  * <p><b>File format.</b> UTF-8 CSV per RFC 4180: comma-separated fields, optionally double-quoted;
- * inside quotes {@code ""} is one literal {@code "}, and commas and line breaks are literal. Lines may
+ * inside quotes {@code ""} is one literal {@code "}, and commas and line breaks are literal. A
+ * {@code "} inside an unquoted field, such as {@code TEST"VILLE}, is a malformed record and fails the
+ * load with a {@link CszFileException}; write it as {@code "TEST""VILLE"}. Lines may
  * end in {@code \n}, {@code \r\n} or {@code \r}. A leading byte-order mark is ignored, and blank lines
  * (including a trailing newline) are skipped. The first non-blank record is the header; column names
  * match case-insensitively after trimming:
@@ -436,7 +438,7 @@ public class CszSource {
     private enum FieldState {
         /** At the start of a field: a quote opens a quoted field, a comma ends an empty one. */
         FIELD_START,
-        /** Inside an unquoted field: a comma ends it; a quote is a literal character. */
+        /** Inside an unquoted field: a comma ends it; a quote makes the record malformed. */
         UNQUOTED,
         /** Inside a quoted field: {@code ""} is a quote, a lone quote closes the field. */
         QUOTED,
@@ -451,7 +453,9 @@ public class CszSource {
      * splits them. They are split on bytes, which is exact for UTF-8 because neither byte occurs inside
      * a multi-byte sequence, and each line is then decoded strictly, so a decoding error names the line
      * that holds it. A line break inside a quoted field is kept as {@code \n}. A blank record (no quote,
-     * no comma, only whitespace) is skipped, which also covers a trailing newline.
+     * no comma, only whitespace) is skipped, which also covers a trailing newline. A quote inside an
+     * unquoted field, or anything but blanks between a closing quote and the next comma or the end of
+     * the record, makes the record malformed; the failure names its start line and 1-based field number.
      *
      * <p>A physical line is limited to {@value #MAX_LINE_BYTES} bytes and a record to
      * {@value #MAX_RECORD_CHARS} characters, so a binary file or a quote that is never closed fails with
@@ -593,6 +597,10 @@ public class CszSource {
                             fields.add(field.toString());
                             field.setLength(0);
                             state = FieldState.FIELD_START;
+                        } else if (c == QUOTE) {
+                            throw new CszFileException(prefix(location) + " line " + start
+                                    + ": quote inside unquoted field " + (fields.size() + 1)
+                                    + "; enclose the field in double quotes and double each quote inside it");
                         } else {
                             field.append(c);
                         }
