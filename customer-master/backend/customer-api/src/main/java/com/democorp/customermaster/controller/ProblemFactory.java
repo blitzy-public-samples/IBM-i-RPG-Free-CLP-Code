@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.io.PrintWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -71,8 +70,12 @@ import org.springframework.stereotype.Component;
  * return problems.response(p);
  * }</pre>
  *
- * <p><b>Thread safety.</b> The bean holds only its two immutable collaborators, so it is safe to share
- * across request threads. Each {@code ProblemDetail} it returns is a new, request-local object.
+ * <p><b>Thread safety.</b> One instance serves every request thread without locking. Its only instance
+ * fields are two final collaborators. The {@link MessageCatalog} is immutable. The {@link ObjectMapper}
+ * is mutable, but Spring Boot configures it completely before injecting it here, and this class never
+ * reconfigures it; it only serializes with it, which Jackson supports concurrently once configuration
+ * is complete. Request data stays isolated because every {@code ProblemDetail} and {@link FieldProblem}
+ * this class builds is a new, request-local object that it never shares or retains.
  */
 @Component
 public class ProblemFactory {
@@ -106,6 +109,15 @@ public class ProblemFactory {
 
     /** The {@code Content-Type} header value written by {@link #write(HttpServletResponse, ProblemDetail)}. */
     private static final String PROBLEM_JSON_VALUE = MediaType.APPLICATION_PROBLEM_JSON_VALUE;
+
+    /**
+     * The headers that describe or frame a body. When {@link #write(HttpServletResponse, ProblemDetail)}
+     * has to reset a response, they go with the body it discards; names match without regard to case.
+     */
+    private static final List<String> BODY_HEADERS = List.of(HttpHeaders.CONTENT_TYPE,
+            HttpHeaders.CONTENT_LENGTH, HttpHeaders.CONTENT_ENCODING, HttpHeaders.CONTENT_LANGUAGE,
+            HttpHeaders.CONTENT_RANGE, HttpHeaders.CONTENT_LOCATION, HttpHeaders.CONTENT_DISPOSITION,
+            HttpHeaders.TRANSFER_ENCODING, HttpHeaders.ETAG, HttpHeaders.LAST_MODIFIED);
 
     /** Debug diagnostics only; error logging belongs to the callers, which hold the exception. */
     private static final Logger log = LoggerFactory.getLogger(ProblemFactory.class);
@@ -353,19 +365,25 @@ public class ProblemFactory {
     /**
      * Writes a problem straight to the servlet response, for code that runs outside Spring MVC's return
      * value handling: the ERROR dispatch controller and the security entry point and access-denied
-     * handler. Headers already set on the response, such as a {@code WWW-Authenticate} challenge, are
-     * kept.
+     * handler. Headers already set on the response, such as a {@code WWW-Authenticate} challenge or an
+     * {@code Allow} list, are kept.
      *
      * <p>The body is serialized first, with the Boot-configured mapper, so a serialization failure leaves
-     * the response untouched. Then any buffered content is discarded and the status,
-     * {@code Content-Type: application/problem+json}, UTF-8 encoding and content length are set,
-     * whatever the request's {@code Accept} header says. The stream is flushed but not closed; the
+     * the response untouched. Then any buffered content is discarded, and the body is always sent as its
+     * UTF-8 bytes through the output stream, with the status,
+     * {@code Content-Type: application/problem+json;charset=UTF-8} and its exact {@code Content-Length},
+     * whatever the request's {@code Accept} header says. When earlier code has already taken the writer,
+     * the response is reset first, so neither the writer's character encoding nor a length declared for
+     * the discarded body reaches the problem; the reset keeps every header that does not describe that
+     * body, such as {@code WWW-Authenticate} and {@code Allow}. The stream is flushed but not closed; the
      * container owns it. A response that is already committed cannot change its status or headers, so
      * it is left as it is.
      *
      * @param response the servlet response
      * @param problem the problem to send; its {@code status} becomes the response status
      * @throws IOException when writing to the client fails
+     * @throws IllegalStateException when earlier code has taken the writer and the response cannot be
+     *     reset, as for an included response
      * @throws NullPointerException when either argument is {@code null}
      */
     public void write(HttpServletResponse response, ProblemDetail problem) throws IOException {
@@ -381,23 +399,51 @@ public class ProblemFactory {
         // neither close nor half-write it.
         byte[] body = objectMapper.writeValueAsBytes(problem);
         response.resetBuffer();
+        ServletOutputStream out = outputStream(response);
         response.setStatus(problem.getStatus());
         response.setContentType(PROBLEM_JSON_VALUE);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-        ServletOutputStream out;
-        try {
-            out = response.getOutputStream();
-        } catch (IllegalStateException writerInUse) {
-            // Some earlier code obtained the writer, and the servlet API allows only one of the two.
-            // The writer then encodes the text itself, so no byte count is declared.
-            PrintWriter writer = response.getWriter();
-            writer.write(new String(body, StandardCharsets.UTF_8));
-            writer.flush();
-            return;
-        }
         response.setContentLength(body.length);
         out.write(body);
         out.flush();
+    }
+
+    /**
+     * Returns the output stream of a response, resetting the response first when earlier code has taken
+     * the writer, which the servlet API never hands out together with the stream. The reset keeps every
+     * header except those in {@link #BODY_HEADERS}: a {@code WWW-Authenticate} challenge, {@code Allow},
+     * {@code Set-Cookie}, {@code Vary}, {@code Cache-Control} and the security headers survive, each
+     * with all its values.
+     *
+     * @param response an uncommitted response whose buffer has been discarded
+     * @return the response's output stream
+     * @throws IOException when the container cannot provide the stream
+     * @throws IllegalStateException when the writer is in use and the response cannot be reset, as for
+     *     an included response, whose {@code reset()} is ignored
+     */
+    private static ServletOutputStream outputStream(HttpServletResponse response) throws IOException {
+        try {
+            return response.getOutputStream();
+        } catch (IllegalStateException writerInUse) {
+            // resetBuffer() keeps the writer, its character encoding and every header, so only reset()
+            // frees the stream; reset() also clears the headers, so the ones that outlive the body are
+            // copied first and restored. getHeaderNames() may list a name once per value, and
+            // getHeaders(name) already returns them all, so a name is copied only once.
+            HttpHeaders kept = new HttpHeaders();
+            for (String name : response.getHeaderNames()) {
+                if (kept.containsKey(name) || BODY_HEADERS.stream().anyMatch(name::equalsIgnoreCase)) {
+                    continue;
+                }
+                for (String value : response.getHeaders(name)) {
+                    if (value != null) {
+                        kept.add(name, value);
+                    }
+                }
+            }
+            response.reset();
+            kept.forEach((name, values) -> values.forEach(value -> response.addHeader(name, value)));
+            return response.getOutputStream();
+        }
     }
 
     /**
