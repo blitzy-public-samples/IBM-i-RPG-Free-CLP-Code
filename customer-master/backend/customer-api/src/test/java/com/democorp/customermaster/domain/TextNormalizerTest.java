@@ -8,6 +8,7 @@ import java.util.stream.Stream;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -36,9 +37,12 @@ import org.junit.jupiter.params.provider.MethodSource;
  * by its Unicode name in a comment, so the test does not depend on the source-file encoding. Parameterized
  * display names print the decoded characters at run time.
  *
- * <p>Pure JUnit 5 and AssertJ: no Spring context, no database, no Docker.
+ * <p>Pure JUnit 5 and AssertJ: no Spring context, no database, no Docker. The class is {@link Isolated}
+ * because one test changes the JVM-wide default locale, then restores the general, DISPLAY and FORMAT
+ * defaults.
  */
 @DisplayName("TextNormalizer: length-preserving uppercase with source trimming")
+@Isolated
 final class TextNormalizerTest {
 
     /**
@@ -292,7 +296,9 @@ final class TextNormalizerTest {
     @Test
     @DisplayName("the default locale never changes the result (Turkish dotted capital I)")
     void defaultLocaleIsNotUsed() {
-        final Locale original = Locale.getDefault();
+        final Locale originalDefault = Locale.getDefault();
+        final Locale originalDisplay = Locale.getDefault(Locale.Category.DISPLAY);
+        final Locale originalFormat = Locale.getDefault(Locale.Category.FORMAT);
         try {
             Locale.setDefault(Locale.forLanguageTag("tr-TR"));
             // Contrast: under a Turkish default locale plain uppercasing maps i to U+0130 (dotted capital I).
@@ -301,7 +307,11 @@ final class TextNormalizerTest {
             assertThat(TextNormalizer.field("istanbul")).isEqualTo("ISTANBUL");
             assertThat(TextNormalizer.filter(" i ")).isEqualTo("I");
         } finally {
-            Locale.setDefault(original);
+            // The general setter also overwrites the DISPLAY and FORMAT defaults, so it runs first and the
+            // two category defaults are then put back individually.
+            Locale.setDefault(originalDefault);
+            Locale.setDefault(Locale.Category.DISPLAY, originalDisplay);
+            Locale.setDefault(Locale.Category.FORMAT, originalFormat);
         }
     }
 
