@@ -95,7 +95,10 @@ public record AddressValidationProperties(
     /** Default read timeout of the USPS client ({@code 10s}). */
     public static final Duration DEFAULT_READ_TIMEOUT = Duration.ofSeconds(10);
 
-    /** Text shown in place of a configured credential by {@link Usps#toString()}. */
+    /**
+     * Text {@link Usps#toString()} shows in place of a configured user id or password
+     * and of the user-info and query of the base URL.
+     */
     static final String MASK = "****";
 
     /**
@@ -147,7 +150,8 @@ public record AddressValidationProperties(
      * falls back to {@link #DEFAULT_BASE_URL}. The password is sent with every request
      * even though the original service noted that USPS appeared to ignore it.
      *
-     * <p>{@link #toString()} never prints the user id or the password.
+     * <p>{@link #toString()} never prints the user id, the password, or the user-info
+     * or query of the base URL, any of which can carry a credential.
      *
      * @param baseUrl        endpoint of the Web Tools {@code ShippingAPI.dll}
      *                       ({@code USPS_BASE_URL}); an absolute {@code http} or
@@ -194,16 +198,21 @@ public record AddressValidationProperties(
         }
 
         /**
-         * Describes the settings with both credentials masked, so the record can appear
-         * in logs, failure analysis and test output without exposing them. A configured
-         * credential shows as {@value AddressValidationProperties#MASK}; an empty one
-         * shows as {@code ""}, which tells an operator that it is missing.
+         * Describes the settings with every credential masked, so the record can appear
+         * in logs, failure analysis and test output without exposing one. A configured
+         * user id or password shows as {@value AddressValidationProperties#MASK}; an
+         * empty one shows as {@code ""}, which tells an operator that it is missing. The
+         * base URL shows its scheme, host, port and path only: user-info, if present,
+         * shows as {@value AddressValidationProperties#MASK} before the {@code @}, and a
+         * query, even an empty one, as {@value AddressValidationProperties#MASK} after
+         * the {@code ?}, because either part can carry a gateway credential.
+         * {@link #baseUrl()} still returns the URL as configured.
          *
          * @return the masked description
          */
         @Override
         public String toString() {
-            return "Usps[baseUrl=" + baseUrl
+            return "Usps[baseUrl=" + redactUrl(baseUrl)
                     + ", userId=" + mask(userId)
                     + ", password=" + mask(password)
                     + ", connectTimeout=" + connectTimeout
@@ -218,6 +227,44 @@ public record AddressValidationProperties(
          */
         private static String mask(String credential) {
             return credential.isEmpty() ? "\"\"" : MASK;
+        }
+
+        /**
+         * Redacts the base URL for display. The scheme, the host (an IPv6 literal keeps
+         * its brackets), the port when one is set and the raw path are kept. User-info
+         * becomes {@value AddressValidationProperties#MASK} followed by {@code @}, and a
+         * query, including an empty one, becomes {@code ?} followed by
+         * {@value AddressValidationProperties#MASK}. A fragment never occurs, because
+         * {@link #requireHttpUrl(String)} rejects it.
+         *
+         * @param url the normalized and validated base URL
+         * @return the redacted URL, or {@value AddressValidationProperties#MASK} alone
+         *         when the value cannot be parsed into a scheme and a host, so the raw
+         *         value is never echoed
+         */
+        private static String redactUrl(String url) {
+            URI uri;
+            try {
+                uri = new URI(url);
+            } catch (URISyntaxException ex) {
+                return MASK;
+            }
+            if (uri.getScheme() == null || uri.getHost() == null) {
+                return MASK;
+            }
+            StringBuilder redacted = new StringBuilder(uri.getScheme()).append("://");
+            if (uri.getRawUserInfo() != null) {
+                redacted.append(MASK).append('@');
+            }
+            redacted.append(uri.getHost());
+            if (uri.getPort() != -1) {
+                redacted.append(':').append(uri.getPort());
+            }
+            redacted.append(uri.getRawPath());
+            if (uri.getRawQuery() != null) {
+                redacted.append('?').append(MASK);
+            }
+            return redacted.toString();
         }
 
         /**
@@ -239,7 +286,7 @@ public record AddressValidationProperties(
          * so the value must be an absolute {@code http}/{@code https} URL with a host and
          * no fragment. Checking it here fails startup instead of the first address
          * review. The value itself is left out of the message, because an operator could
-         * have placed credentials in its user-info part.
+         * have placed credentials in its user-info or query part.
          *
          * @param url the normalized base URL
          */

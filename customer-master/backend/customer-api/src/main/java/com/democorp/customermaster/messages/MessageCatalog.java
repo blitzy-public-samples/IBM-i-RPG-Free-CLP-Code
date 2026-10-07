@@ -54,8 +54,9 @@ import org.springframework.stereotype.Component;
  * <p><b>Loading.</b> The file is read once, in the constructor, as strict UTF-8 (malformed or
  * unmappable bytes fail rather than turning into replacement characters), with the JDK properties
  * syntax: {@code #} and {@code !} comments, blank lines, {@code =}, {@code :} or whitespace separators,
- * backslash line continuations and {@code \}{@code uXXXX} escapes. A missing file, an unreadable file
- * or a key that appears twice aborts application start-up with {@link IllegalStateException}; plain
+ * backslash line continuations and {@code \}{@code uXXXX} escapes. A missing file, an unreadable file,
+ * a malformed {@code \}{@code uXXXX} escape or a key that appears twice aborts application start-up
+ * with {@link IllegalStateException}, whose message names the file; plain
  * {@link Properties} would silently keep the last of two duplicate keys and lose the file order.
  *
  * <p><b>Order.</b> {@link #all()} keeps the file order, so {@code GET /api/messages} lists the
@@ -98,8 +99,8 @@ public final class MessageCatalog {
      * Loads the packaged catalog from {@value #LOCATION}. This is the constructor Spring uses, and the
      * only public one, so the choice is never ambiguous.
      *
-     * @throws IllegalStateException when the file is missing, cannot be read or decoded as UTF-8, or
-     *     contains a key twice
+     * @throws IllegalStateException when the file is missing, cannot be read or decoded as UTF-8,
+     *     holds a malformed {@code \}{@code uXXXX} escape, or contains a key twice
      */
     public MessageCatalog() {
         this(loadFromClasspath());
@@ -130,7 +131,8 @@ public final class MessageCatalog {
      * @param source properties text; must not be {@code null}
      * @return a catalog holding the entries of {@code source} in their order
      * @throws NullPointerException when {@code source} is {@code null}
-     * @throws IllegalStateException when the text cannot be read or contains a key twice
+     * @throws IllegalStateException when the text cannot be read, holds a malformed
+     *     {@code \}{@code uXXXX} escape, or contains a key twice
      */
     public static MessageCatalog fromReader(Reader source) {
         Objects.requireNonNull(source, "source");
@@ -220,7 +222,8 @@ public final class MessageCatalog {
      * Reads and parses the packaged catalog file.
      *
      * @return the entries in file order
-     * @throws IllegalStateException when the file is missing, unreadable, mis-encoded or has a duplicate key
+     * @throws IllegalStateException when the file is missing, unreadable, mis-encoded, has a malformed
+     *     {@code \}{@code uXXXX} escape or has a duplicate key
      */
     private static Map<String, String> loadFromClasspath() {
         ClassLoader loader = Objects.requireNonNullElseGet(
@@ -249,7 +252,8 @@ public final class MessageCatalog {
      * @param reader the text to parse; not closed here
      * @param sourceName the location named in error messages
      * @return the entries in file order
-     * @throws IllegalStateException when the text cannot be read or contains a key twice
+     * @throws IllegalStateException when the text cannot be read, holds a malformed
+     *     {@code \}{@code uXXXX} escape, or contains a key twice; each message names {@code sourceName}
      */
     private static Map<String, String> parse(Reader reader, String sourceName) {
         DuplicateRejectingProperties properties = new DuplicateRejectingProperties(sourceName);
@@ -257,6 +261,11 @@ public final class MessageCatalog {
             properties.load(reader);
         } catch (IOException e) {
             throw new IllegalStateException("Message catalog " + sourceName + " could not be read", e);
+        } catch (IllegalArgumentException e) {
+            // Properties.load reports a malformed backslash-u escape this way. The duplicate-key
+            // IllegalStateException is not a subtype, so it still passes through unchanged.
+            throw new IllegalStateException(
+                    "Message catalog " + sourceName + " is malformed: " + e.getMessage(), e);
         }
         return properties.entriesInOrder();
     }
