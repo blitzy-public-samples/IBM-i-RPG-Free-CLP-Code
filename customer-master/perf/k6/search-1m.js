@@ -326,7 +326,8 @@ export function setup() {
   const deepItems = itemsOf(body);
   collectIds(deepItems);
 
-  // Data-set guard: the 300 seed rows end the chain at page 25 and abort here.
+  // Data-set guard: the seed rows (226 active of 300) end the chain on page 19, so the loop above
+  // aborts at page 20, never here. It rejects a failed or empty page 50 and empty prefix/id pools.
   if (deepCursor === null || deepItems.length === 0 || namePrefixes.size === 0 || cityPrefixes.size === 0 ||
       custIds.size === 0) {
     exec.test.abort(TOO_SMALL);
