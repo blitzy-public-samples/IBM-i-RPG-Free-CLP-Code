@@ -1,5 +1,6 @@
 package com.democorp.customermaster.controller.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
@@ -20,11 +21,14 @@ import jakarta.validation.constraints.Size;
  * <p><b>The contract is the component list.</b> The nine data fields come first, in
  * {@code CustomerFields} order and with its limits, which are the MTNCUSTD field lengths
  * [5250_Subfile/MTNCUSTD.DSPF:61-125]; {@code version} follows. The component order is the JSON
- * member order and the OpenAPI property order, so it must not change without regenerating the
- * committed OpenAPI snapshot and the frontend's {@code src/api/schema.d.ts}. The record is flat
- * by declaration rather than through {@code @JsonUnwrapped}, carries no serialization or OpenAPI
- * annotation, and its one mapping method, {@link #fields()}, follows no getter convention, so
- * neither Jackson nor springdoc sees a property beyond these ten.
+ * member order. The committed OpenAPI snapshot and the frontend's {@code src/api/schema.d.ts}
+ * list the properties alphabetically instead, because {@code application.yml} sets
+ * {@code springdoc.writer-with-order-by-keys: true}; adding, removing or renaming a component
+ * changes both, which must then be regenerated. The record is flat by declaration rather than
+ * through {@code @JsonUnwrapped}, carries no serialization annotation, and its one mapping
+ * method, {@link #fields()}, follows no getter convention, so neither Jackson nor springdoc sees
+ * a property beyond these ten. As in {@code CustomerFields}, each data field's
+ * documentation-only {@code @Schema} publishes it as an optional string or {@code null}.
  *
  * <p><b>What a client cannot send.</b> {@code custId} is taken from the path, and
  * {@code chgTime}, {@code chgUser} and {@code rowVersion} are set by the service from the clock,
@@ -34,13 +38,19 @@ import jakarta.validation.constraints.Size;
  *
  * <p><b>Validation.</b>
  * <ul>
- *   <li>Each data field carries only {@link Size}, as in {@code CustomerFields}: a longer value is
- *       rejected with 400 APP0400, while a blank or missing value reaches
+ *   <li>Each data field carries only {@link Size} and {@link StorableText}, as in
+ *       {@code CustomerFields}: a longer value, or one containing U+0000 (NUL), which a PostgreSQL
+ *       text column cannot hold, is rejected with 400 APP0400 and an {@code errors[]} entry on the
+ *       property, while a blank or missing value reaches
  *       {@code service/CustomerValidator}, which reports it as 422 DEM0501, DEM0502 or DEM0503 in
  *       source order.</li>
  *   <li>{@code version} is a boxed {@link Long} marked {@link NotNull}, so a body without it
  *       deserializes to {@code null} and fails validation with 400 APP0400 instead of silently
- *       becoming 0. Its value is not compared here: the database verifies it.</li>
+ *       becoming 0. It binds only from an exact integral JSON number such as {@code 0}: a fraction
+ *       or exponent ({@code 0.9}, {@code 1.0}, {@code 1e0}), a string ({@code "0"}), a boolean
+ *       and any content after the body's JSON object are rejected with 400 APP0400 before the
+ *       service runs ({@code spring.jackson} in {@code application.yml}). Its value is not compared
+ *       here: the database verifies it.</li>
  * </ul>
  *
  * <p>Example:
@@ -67,15 +77,15 @@ import jakarta.validation.constraints.Size;
  * @param version   the row version the client read; required
  */
 public record CustomerUpdateRequest(
-        @Size(max = 40) String name,
-        @Size(max = 40) String addr,
-        @Size(max = 20) String city,
-        @Size(max = 2) String state,
-        @Size(max = 10) String zip,
-        @Size(max = 20) String corpPhone,
-        @Size(max = 40) String acctMgr,
-        @Size(max = 20) String acctPhone,
-        @Size(max = 1) String active,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active,
         @NotNull Long version) {
 
     /**

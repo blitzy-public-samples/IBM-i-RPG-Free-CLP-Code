@@ -1,5 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
+
 /**
  * The result of a successful review on the wire, the 200 body of
  * {@code POST /api/customers/review}: {@code {customer, standardized, notice}}.
@@ -42,11 +44,14 @@ package com.democorp.customermaster.controller.dto;
  * result into this record, so the record has no factory, no compact constructor and no logic, and
  * depends on no service or repository type.
  *
- * <p><b>The contract is the component list.</b> The record carries no serialization or OpenAPI
- * annotations, in particular no {@code @JsonInclude(NON_NULL)}, so every component is always
- * serialized. The component order is the JSON and OpenAPI property order, so it must not change
- * without regenerating the committed OpenAPI snapshot and the frontend's
- * {@code src/api/schema.d.ts}.
+ * <p><b>The contract is the component list.</b> The record carries no serialization annotation,
+ * in particular no {@code @JsonInclude(NON_NULL)}, so every component is always serialized. Its
+ * {@code @Schema} annotations are documentation only and publish all three as {@code required};
+ * {@code controller/DtoSchemaCustomizer} also publishes the nine fields of {@code customer} as
+ * required here, while {@code CustomerFields} as a request body keeps them optional. The
+ * component order is the JSON member order. The committed OpenAPI snapshot and the frontend's
+ * {@code src/api/schema.d.ts} list the properties alphabetically instead, because
+ * {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}.
  *
  * <p>Example, an edit review with standardization succeeding:
  * <pre>{@code
@@ -67,5 +72,8 @@ package com.democorp.customermaster.controller.dto;
  * @param standardized {@code true} when address standardization ran and succeeded
  * @param notice       the confirmation message, DEM0000 for an edit or DEM0009 for an add
  */
-public record ReviewResponse(CustomerFields customer, boolean standardized, Notice notice) {
+public record ReviewResponse(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) CustomerFields customer,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) boolean standardized,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) Notice notice) {
 }

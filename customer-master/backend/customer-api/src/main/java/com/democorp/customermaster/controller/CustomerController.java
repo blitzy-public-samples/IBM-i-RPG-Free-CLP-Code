@@ -25,10 +25,8 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Size;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.MediaType;
-import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -85,12 +83,18 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>Errors.</b> Every failure propagates as an exception to {@link ApiExceptionHandler}, which
  * writes the {@code application/problem+json} body; nothing here builds an error response.
  * <ul>
- *   <li>The request-shape checks declared here, a {@code name} or {@code city} longer than 13
- *       characters ({@code SC_NAME 13A}, {@code SC_CITY 13A}, {@code 5250_Subfile/PMTCUSTD.DSPF},
- *       lines 95-97) and a {@code custId} path segment that is not 4 characters of {@code [A-Z0-9]},
- *       are checked by Spring's built-in method validation, which raises
- *       {@code HandlerMethodValidationException}: 400 APP0400. A lower-case id is rejected, not
+ *   <li>The one request-shape check declared here, a {@code custId} path segment that is not 4
+ *       characters of {@code [A-Z0-9]}, is checked by Spring's built-in method validation, which
+ *       raises {@code HandlerMethodValidationException}: 400 APP0400. A lower-case id is rejected, not
  *       uppercased: ids are issued in upper case, and an API client must send them as issued.</li>
+ *   <li>A {@code name} or {@code city} longer than 13 characters ({@code SC_NAME 13A},
+ *       {@code SC_CITY 13A}, {@code 5250_Subfile/PMTCUSTD.DSPF}, lines 95-97) is rejected by
+ *       {@link CustomerSearchService}, which counts code points: 400 APP0400 on the field. The two
+ *       parameters only publish that width as the OpenAPI {@code maxLength}; a Bean Validation
+ *       {@code @Size} here would count UTF-16 units and reject a 13-character entry that holds
+ *       supplementary characters. Likewise {@code size} only publishes its range and default
+ *       (minimum 1, maximum 100, default 12): the service applies the configured default and
+ *       answers 400 APP0400 on {@code size} outside that range.</li>
  *   <li>Body limits ({@code @Size} per column, {@code @NotNull version} on update, {@code @NotNull
  *       purpose} on review) are checked through {@link Valid}: 400 APP0400. On {@code PUT}, whose
  *       path variable is constrained too, those body errors arrive inside the same
@@ -118,8 +122,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>OpenAPI.</b> The annotations feed the committed springdoc snapshot
  * ({@code customer-master/openapi/customer-master-api.yaml}, compared by {@code OpenApiSnapshotIT})
  * and the frontend types generated from it, so operation ids, summaries, parameter descriptions and
- * response declarations are fixed text. Each operation declares exactly the statuses it can answer
- * besides 500; the catch-all 500 DEM9999 is not declared per operation.
+ * response declarations are fixed text. Each operation declares the statuses of its own outcomes;
+ * the statuses every operation shares, the catch-all 500 DEM9999 and the framework's 405, 406 and,
+ * with a request body, 415 APP0400, are added by {@link ProblemResponsesCustomizer} and are not
+ * declared per operation. Every error response references the {@code Problem} schema, described by
+ * {@code ProblemSchema}, which types {@code errors}, {@code current} and {@code stateAccepted}.
  *
  * <p>The controller holds only its two thread-safe services and is itself thread-safe.
  */
@@ -133,11 +140,19 @@ public class CustomerController {
     /** The collection path; also the prefix of the {@code Location} of an added customer. */
     static final String BASE_PATH = "/api/customers";
 
-    /** Width of the "Name starts with" and "City starts with" entries, {@code SC_NAME 13A}, {@code SC_CITY 13A}. */
+    /**
+     * Width of the "Name starts with" and "City starts with" entries, {@code SC_NAME 13A},
+     * {@code SC_CITY 13A}, in characters; published as the OpenAPI {@code maxLength} of both
+     * parameters and enforced, in code points, by {@link CustomerSearchService}.
+     */
     static final int FILTER_MAX_LENGTH = 13;
 
-    /** Format of a customer id path segment: 4 characters of the base-36 digit alphabet, upper case. */
-    static final String CUST_ID_PATTERN = "[A-Z0-9]{4}";
+    /**
+     * Format of a customer id path segment: 4 characters of the base-36 digit alphabet, upper case.
+     * Anchored because the OpenAPI {@code pattern} it is also published as matches anywhere in the
+     * value; {@code @Pattern} matches the whole value either way.
+     */
+    static final String CUST_ID_PATTERN = "^[A-Z0-9]{4}$";
 
     /** OpenAPI description of the {@code custId} path variable, shared by get and update. */
     private static final String CUST_ID_DESCRIPTION = "4-character base-36 customer id";
@@ -188,24 +203,28 @@ public class CustomerController {
                     schema = @Schema(implementation = SearchResponse.class)))
     @ApiResponse(
             responseCode = "400",
-            description = "APP0400 (cursor, size, lengths) or DEM0007 (state)",
+            description = "APP0400 (cursor, size, lengths, U+0000) or DEM0007 (state)",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public SearchResponse search(
-            @Parameter(description = "Name starts with (at most 13 characters)")
+            // Width documented, not constrained: @Size counts UTF-16 units, while the 13-character
+            // limit counts code points; the service enforces it and answers APP0400 on the field.
+            @Parameter(
+                    description = "Name starts with (at most 13 characters)",
+                    schema = @Schema(maxLength = FILTER_MAX_LENGTH))
             @RequestParam(required = false)
-            @Size(max = FILTER_MAX_LENGTH)
             String name,
-            @Parameter(description = "City starts with (at most 13 characters)")
+            @Parameter(
+                    description = "City starts with (at most 13 characters)",
+                    schema = @Schema(maxLength = FILTER_MAX_LENGTH))
             @RequestParam(required = false)
-            @Size(max = FILTER_MAX_LENGTH)
             String city,
             // No size constraint: a value that is neither blank nor 2 characters must reach the
             // service, which answers DEM0007 on field state, as PMTCUSTR does.
@@ -215,7 +234,17 @@ public class CustomerController {
             @Parameter(description = "Include inactive customers (F9)")
             @RequestParam(defaultValue = "false")
             boolean includeInactive,
-            @Parameter(description = "Page size 1–100, default 12")
+            // Range and default documented only: the service applies the configured default and
+            // answers APP0400 on size outside 1 to 100. The type is explicit because an annotated
+            // schema without one is published as a string.
+            @Parameter(
+                    description = "Page size 1–100, default 12",
+                    schema = @Schema(
+                            type = "integer",
+                            format = "int32",
+                            minimum = "1",
+                            maximum = "100",
+                            defaultValue = "12"))
             @RequestParam(required = false)
             Integer size,
             @Parameter(description = "Opaque cursor from nextCursor")
@@ -248,21 +277,26 @@ public class CustomerController {
             description = "APP0400 (id format)",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "404",
             description = "DEM0599",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public CustomerResponse get(
-            @Parameter(description = CUST_ID_DESCRIPTION)
+            @Parameter(
+                    description = CUST_ID_DESCRIPTION,
+                    schema = @Schema(
+                            pattern = CUST_ID_PATTERN,
+                            minLength = CustomerId.LENGTH,
+                            maxLength = CustomerId.LENGTH))
             @PathVariable
             @Pattern(regexp = CUST_ID_PATTERN)
             String custId) {
@@ -300,31 +334,32 @@ public class CustomerController {
             description = "APP0400",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "403",
             description = "APP0403",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "422",
-            description = "DEM0501, DEM0502, DEM0503, DEM9898 (stateAccepted when the State rule passed)",
+            description = "DEM0501, DEM0502, DEM0503, DEM9898; errors names the fields at fault, and "
+                    + "stateAccepted carries the normalized State when the State rule passed",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "502",
-            description = "APP0502 (stateAccepted when the State rule passed)",
+            description = "APP0502; stateAccepted carries the normalized State when the State rule passed",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public ReviewResponse review(@Valid @RequestBody ReviewRequest request) {
         CustomerMaintenanceService.ReviewResult result =
                 maintenanceService.review(request.purpose(), request.fields().toDraft());
@@ -362,37 +397,37 @@ public class CustomerController {
             description = "APP0400",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "403",
             description = "APP0403",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "409",
             description = "DEM1001",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "422",
             description = "DEM0501, DEM0502, DEM0503",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "503",
             description = "APP0503",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public ResponseEntity<CustomerResponse> add(@Valid @RequestBody CustomerFields fields) {
         Customer saved = maintenanceService.add(fields.toDraft());
         // Relative on purpose: the browser reaches the API through a same-origin proxy, so a URL
@@ -430,39 +465,45 @@ public class CustomerController {
             description = "APP0400 (including missing version)",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "403",
             description = "APP0403",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "404",
             description = "DEM0599",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "409",
-            description = "DEM1002 with current, or DEM1001",
+            description = "DEM1002 (stale version), whose current carries the customer as now stored, "
+                    + "including its version; or DEM1001 (row locked), without current",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "422",
             description = "DEM0501, DEM0502, DEM0503",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public CustomerResponse update(
-            @Parameter(description = CUST_ID_DESCRIPTION)
+            @Parameter(
+                    description = CUST_ID_DESCRIPTION,
+                    schema = @Schema(
+                            pattern = CUST_ID_PATTERN,
+                            minLength = CustomerId.LENGTH,
+                            maxLength = CustomerId.LENGTH))
             @PathVariable
             @Pattern(regexp = CUST_ID_PATTERN)
             String custId,

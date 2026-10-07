@@ -5,6 +5,7 @@ import java.util.Objects;
 import com.democorp.customermaster.domain.Address;
 import com.democorp.customermaster.domain.Customer;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Size;
 
 /**
@@ -41,14 +42,22 @@ import jakarta.validation.constraints.Size;
  *       <td>1</td></tr>
  * </table>
  *
- * <p><b>The contract is the component list.</b> The component order is the JSON member order
- * and the OpenAPI property order, so it must not change without regenerating the committed
- * OpenAPI snapshot and the frontend's {@code src/api/schema.d.ts}. The component names are
- * also the {@code errors[].field} values of problem+json responses, which the UI matches to
- * its inputs, so they must not be renamed. The record carries no serialization or OpenAPI
- * annotation and is flat, and its two mapping methods, {@link #toDraft()} and
- * {@link #from(Customer)}, follow no getter convention, so neither Jackson nor springdoc
- * sees a property beyond the nine. A {@code null} value serializes as {@code null}.
+ * <p><b>The contract is the component list.</b> The component order is the JSON member order.
+ * The committed OpenAPI snapshot and the frontend's {@code src/api/schema.d.ts} list the
+ * properties alphabetically instead, because {@code application.yml} sets
+ * {@code springdoc.writer-with-order-by-keys: true}; adding or removing a component changes
+ * both, which must then be regenerated. The component names are also the
+ * {@code errors[].field} values of problem+json responses, which the UI matches to its inputs,
+ * so they must not be renamed. The record carries no serialization annotation and is flat, and
+ * its two mapping methods, {@link #toDraft()} and {@link #from(Customer)}, follow no getter
+ * convention, so neither Jackson nor springdoc sees a property beyond the nine. A {@code null}
+ * value serializes as {@code null}.
+ *
+ * <p><b>Published schema.</b> Each component's documentation-only {@code @Schema} declares it a
+ * string or {@code null}, and none is {@code required}: a client may omit a field or send JSON
+ * {@code null}, and both reach the service as {@code null}. As the {@code customer} member of
+ * {@code ReviewResponse}, {@code controller/DtoSchemaCustomizer} publishes this schema with all
+ * nine properties required, because a successful review returns every field.
  *
  * <p><b>What a client cannot send.</b> {@code custId}, {@code chgTime}, {@code chgUser},
  * {@code rowVersion} and {@code version} are deliberately absent: the id is allocated on add
@@ -57,11 +66,15 @@ import jakarta.validation.constraints.Size;
  * With {@code spring.jackson.deserialization.fail-on-unknown-properties} enabled, any such
  * member in a request body is rejected with 400 APP0400.
  *
- * <p><b>Validation stops at the column size.</b> Each component carries only {@link Size},
- * which the controller enforces with {@code @Valid}: a longer value fails as
- * {@code MethodArgumentNotValidException} and becomes 400 APP0400, the API counterpart of the
- * display field that cannot hold more characters. {@code @Size} counts UTF-16 code units,
- * so it never admits a value longer than the column, which counts characters. No component is
+ * <p><b>Validation stops at what the column can store.</b> Each component carries only
+ * {@link Size} and {@link StorableText}, which the controller enforces with {@code @Valid}: a
+ * longer value fails as {@code MethodArgumentNotValidException} and becomes 400 APP0400 with an
+ * {@code errors[]} entry on the property, the API counterpart of the display field that cannot
+ * hold more characters. {@code @Size} counts UTF-16 code units, so it never admits a value
+ * longer than the column, which counts characters. A value containing U+0000 (NUL), which a
+ * PostgreSQL text column cannot hold, is rejected the same way by {@link StorableText} before
+ * the service runs, so it never reaches the database as 500 DEM9999 or uses up a customer id;
+ * no format rule is added, and {@code null} passes both constraints. No component is
  * {@code @NotNull} or {@code @NotBlank}: a blank or missing value is a business-rule failure
  * that {@code service/CustomerValidator} reports as 422 DEM0501, DEM0502 or DEM0503, in the
  * source order and stopping at the first, as {@code EditUpdData} does. An absent
@@ -95,15 +108,15 @@ import jakarta.validation.constraints.Size;
  * @param active    the active code, one character; {@code Y} or {@code N} once validated
  */
 public record CustomerFields(
-        @Size(max = 40) String name,
-        @Size(max = 40) String addr,
-        @Size(max = 20) String city,
-        @Size(max = 2) String state,
-        @Size(max = 10) String zip,
-        @Size(max = 20) String corpPhone,
-        @Size(max = 40) String acctMgr,
-        @Size(max = 20) String acctPhone,
-        @Size(max = 1) String active) {
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active) {
 
     /**
      * Builds a new customer draft from these fields, with no id, change stamp or version.

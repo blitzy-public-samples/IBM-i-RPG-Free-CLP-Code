@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.domain.SearchPage;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 /**
  * An informational message on the wire: {@code {code, message}}, the {@code notice} member of
@@ -32,10 +33,12 @@ import com.democorp.customermaster.domain.SearchPage;
  * the client shows exactly the text the server resolved and can still identify the message by
  * its key.
  *
- * <p>The component order is the JSON and OpenAPI property order, so it must not change without
- * regenerating the committed OpenAPI snapshot and the frontend's {@code src/api/schema.d.ts}. The
- * record carries no serialization or OpenAPI annotations: a page or review without a notice is
- * represented by the owning response holding {@code null}, which serializes as
+ * <p>The component order is the JSON member order. The committed OpenAPI snapshot and the
+ * frontend's {@code src/api/schema.d.ts} list the properties alphabetically instead, because
+ * {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}. Both members
+ * are always present, which the documentation-only {@code @Schema} annotations publish as
+ * {@code required}. The record carries no serialization annotation: a search page without a
+ * notice is represented by the owning response holding {@code null}, which serializes as
  * {@code "notice": null}.
  *
  * <p>Example, the notice of a search that matches nothing:
@@ -50,7 +53,9 @@ import com.democorp.customermaster.domain.SearchPage;
  * @param code    the message catalog key, for example {@code "DEM0002"}
  * @param message the resolved catalog text for {@code code}
  */
-public record Notice(String code, String message) {
+public record Notice(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String code,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String message) {
 
     /**
      * Maps the domain notice to its wire form, member for member.

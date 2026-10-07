@@ -118,9 +118,10 @@ import org.springframework.data.relational.core.mapping.Table;
  * edited.rowVersion();                                   // 1
  * }</pre>
  *
- * <p><b>Logging.</b> {@link #toString()} lists every field, customer data included. The
- * write log line of {@code CustomerMaintenanceService} carries only the id, the user and the
- * version, so services must not log this object.
+ * <p><b>Logging.</b> {@link #toString()} names only the id and the row version, never
+ * customer data, because Spring Data JDBC quotes it in the exception of a failed write. The
+ * write log line of {@code CustomerMaintenanceService} likewise carries only the id, the user
+ * and the version; a log line must not add the field values through the accessors.
  *
  * <p>Instances are immutable: every {@code with...} method returns a new instance and leaves
  * this one unchanged. Every property type ({@link CustomerId}, {@link Address},
@@ -495,23 +496,19 @@ public final class Customer {
     }
 
     /**
-     * Lists all ten properties, customer data included, for tests and debugging. Not for
-     * logs: the write log line carries only the id, the user and the version.
+     * Identifies the aggregate by its id and row version only; no customer data (name,
+     * address, phones, account manager, active flag, change stamp) is ever included.
+     * Spring Data JDBC writes this text into the message of the
+     * {@code DbActionExecutionException} of a failed insert or update, so anything it
+     * contained would reach every log and tool that prints that exception. Both values are
+     * system-assigned and printable: the id is four characters of {@code [A-Z0-9]} and the
+     * version a number, either one {@code null} in a draft.
      *
-     * @return a text such as {@code Customer[custId=EEEF, name=ACME INC, ...]}
+     * @return a text such as {@code Customer[custId=EEEF, rowVersion=0]}, or
+     *     {@code Customer[custId=null, rowVersion=null]} for a draft
      */
     @Override
     public String toString() {
-        return "Customer[custId=" + custId
-                + ", name=" + name
-                + ", address=" + address
-                + ", corpPhone=" + corpPhone
-                + ", acctMgr=" + acctMgr
-                + ", acctPhone=" + acctPhone
-                + ", active=" + active
-                + ", chgTime=" + chgTime
-                + ", chgUser=" + chgUser
-                + ", rowVersion=" + rowVersion
-                + "]";
+        return "Customer[custId=" + custId + ", rowVersion=" + rowVersion + "]";
     }
 }

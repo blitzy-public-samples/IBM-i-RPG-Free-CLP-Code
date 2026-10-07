@@ -16,7 +16,6 @@ paths:
         schema:
           type: string
           maxLength: 13
-          minLength: 0
       - description: City starts with (at most 13 characters)
         in: query
         name: city
@@ -24,7 +23,6 @@ paths:
         schema:
           type: string
           maxLength: 13
-          minLength: 0
       - description: Two-letter state code; blank = all
         in: query
         name: state
@@ -45,6 +43,9 @@ paths:
         schema:
           type: integer
           format: int32
+          default: 12
+          maximum: 100
+          minimum: 1
       - description: Opaque cursor from nextCursor
         in: query
         name: cursor
@@ -62,14 +63,33 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
-          description: "APP0400 (cursor, size, lengths) or DEM0007 (state)"
+                $ref: "#/components/schemas/Problem"
+          description: "APP0400 (cursor, size, lengths, U+0000) or DEM0007 (state)"
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       security:
       - basicAuth: []
       summary: "Search customers by name, city and state"
@@ -100,37 +120,63 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0400
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
         "403":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0403
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
         "409":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: DEM1001
+        "415":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (unsupported media type; Accept lists the supported
+            type)
         "422":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: "DEM0501, DEM0502, DEM0503"
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
         "503":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0503
       security:
       - basicAuth: []
@@ -157,33 +203,61 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0400
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
         "403":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0403
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "415":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (unsupported media type; Accept lists the supported
+            type)
         "422":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
-          description: "DEM0501, DEM0502, DEM0503, DEM9898 (stateAccepted when the\
-            \ State rule passed)"
+                $ref: "#/components/schemas/Problem"
+          description: "DEM0501, DEM0502, DEM0503, DEM9898; errors names the fields\
+            \ at fault, and stateAccepted carries the normalized State when the State\
+            \ rule passed"
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
         "502":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
-          description: APP0502 (stateAccepted when the State rule passed)
+                $ref: "#/components/schemas/Problem"
+          description: APP0502; stateAccepted carries the normalized State when the
+            State rule passed
       security:
       - basicAuth: []
       summary: Validate and standardize a customer before saving
@@ -199,7 +273,9 @@ paths:
         required: true
         schema:
           type: string
-          pattern: "[A-Z0-9]{4}"
+          maxLength: 4
+          minLength: 4
+          pattern: "^[A-Z0-9]{4}$"
       responses:
         "200":
           content:
@@ -211,20 +287,39 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0400 (id format)
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
         "404":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: DEM0599
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       security:
       - basicAuth: []
       summary: Read one customer
@@ -239,7 +334,9 @@ paths:
         required: true
         schema:
           type: string
-          pattern: "[A-Z0-9]{4}"
+          maxLength: 4
+          minLength: 4
+          pattern: "^[A-Z0-9]{4}$"
       requestBody:
         content:
           application/json:
@@ -257,38 +354,66 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0400 (including missing version)
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
         "403":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0403
         "404":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: DEM0599
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
         "409":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
-          description: "DEM1002 with current, or DEM1001"
+                $ref: "#/components/schemas/Problem"
+          description: "DEM1002 (stale version), whose current carries the customer\
+            \ as now stored, including its version; or DEM1001 (row locked), without\
+            \ current"
+        "415":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (unsupported media type; Accept lists the supported
+            type)
         "422":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: "DEM0501, DEM0502, DEM0503"
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       security:
       - basicAuth: []
       summary: Change a customer at the version read
@@ -306,6 +431,25 @@ paths:
                 additionalProperties:
                   type: string
           description: OK
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       summary: Message catalog keyed by message id
       tags:
       - Messages
@@ -323,8 +467,27 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       security:
       - basicAuth: []
       summary: Signed-in user and roles
@@ -341,7 +504,6 @@ paths:
         schema:
           type: string
           maxLength: 10
-          minLength: 0
       - description: "Order of the list: by name (default) or by code"
         in: query
         name: sort
@@ -365,14 +527,33 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0400
         "401":
           content:
             application/problem+json:
               schema:
-                $ref: "#/components/schemas/ProblemDetail"
+                $ref: "#/components/schemas/Problem"
           description: APP0401
+        "405":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (method not allowed; Allow lists the supported methods)
+        "406":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0400 (not acceptable)
+        "500":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: DEM9999 (unexpected failure; errorId matches the server's ERROR
+            log line)
       security:
       - basicAuth: []
       summary: "USA states, optionally filtered by name"
@@ -384,39 +565,57 @@ components:
       type: object
       properties:
         acctMgr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         acctPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         active:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 1
           minLength: 0
         addr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         city:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         corpPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         name:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         state:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 2
           minLength: 0
         zip:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 10
           minLength: 0
     CustomerResponse:
@@ -431,7 +630,9 @@ components:
         addr:
           type: string
         chgTime:
-          type: string
+          type:
+          - string
+          - "null"
           format: date-time
         chgUser:
           type: string
@@ -450,6 +651,20 @@ components:
           format: int64
         zip:
           type: string
+      required:
+      - acctMgr
+      - acctPhone
+      - active
+      - addr
+      - chgTime
+      - chgUser
+      - city
+      - corpPhone
+      - custId
+      - name
+      - state
+      - version
+      - zip
     CustomerSummaryResponse:
       type: object
       properties:
@@ -465,50 +680,99 @@ components:
           type: string
         zip5:
           type: string
+      required:
+      - active
+      - city
+      - custId
+      - name
+      - state
+      - zip5
     CustomerUpdateRequest:
       type: object
       properties:
         acctMgr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         acctPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         active:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 1
           minLength: 0
         addr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         city:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         corpPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         name:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         state:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 2
           minLength: 0
         version:
           type: integer
           format: int64
         zip:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 10
           minLength: 0
       required:
       - version
+    FieldError:
+      type: object
+      description: One field at fault in a problem's errors
+      properties:
+        code:
+          type: string
+          description: The catalog key
+          example: DEM0502
+        field:
+          type: string
+          description: "The request body's JSON property (name, addr, city, state,\
+            \ zip, corpPhone, acctMgr, acctPhone, active; version on update; purpose\
+            \ on review) or the path or query parameter (custId; name, city, state,\
+            \ includeInactive, size, cursor on search; nameContains, sort on the state\
+            \ list) at fault"
+          example: name
+        message:
+          type: string
+          description: The catalog text with the arguments substituted
+          example: "Name: Must not be blank"
+      required:
+      - code
+      - field
+      - message
     Notice:
       type: object
       properties:
@@ -516,62 +780,127 @@ components:
           type: string
         message:
           type: string
-    ProblemDetail:
+      required:
+      - code
+      - message
+    Problem:
       type: object
+      description: "RFC 9457 problem: the body of every error response. type, title,\
+        \ status, detail, code and args are always present; the other members only\
+        \ in the cases their descriptions name."
       properties:
+        args:
+          type: array
+          description: "The values substituted into the catalog text, as strings;\
+            \ empty when there are none"
+          items:
+            type: string
+        code:
+          type: string
+          description: "The catalog key, for example APP0400, DEM0502 or DEM1002"
+          example: DEM1002
+        current:
+          $ref: "#/components/schemas/CustomerResponse"
+          description: "409 DEM1002 only: the customer as now stored, including its\
+            \ version"
         detail:
-          type:
-          - string
-          - "null"
+          type: string
+          description: The catalog text of code with args substituted
+          example: Someone else changed record. Review data.
+        errorId:
+          type: string
+          format: uuid
+          description: "500 DEM9999 only: the correlation id, also written to the\
+            \ server's ERROR log line"
+        errors:
+          type: array
+          description: "The fields at fault; the first entry receives focus. Present\
+            \ when the failure names a request property or parameter: 400 APP0400\
+            \ on a body property or a path or query parameter, 400 DEM0007 on state,\
+            \ 422 DEM0501, DEM0502 or DEM0503 on the field whose rule failed, and\
+            \ 422 DEM9898 on addr, city, state and zip, in that order. Absent when\
+            \ it names none, as for a malformed body, an unknown property, content\
+            \ after the JSON value, an unknown route, 405, 406, 415, 401, 403, 404\
+            \ DEM0599, 409, 502, 503 and 500"
+          items:
+            $ref: "#/components/schemas/FieldError"
+          minItems: 1
         instance:
-          type:
-          - string
-          - "null"
-          format: uri
-        properties:
-          type:
-          - object
-          - "null"
-          additionalProperties: {}
+          type: string
+          format: uri-reference
+          description: The request path; absent only when the path is not a usable
+            URI reference
+          example: /api/customers/EEEF
+        stateAccepted:
+          type: string
+          description: "Failures of POST /api/customers/review only (422 and 502):\
+            \ the normalized State, present when the State rule passed before the\
+            \ failure and absent when the failure is at the State rule or before it"
+          example: ME
         status:
           type: integer
           format: int32
+          description: The HTTP status of the response
+          example: 409
         title:
-          type:
-          - string
-          - "null"
+          type: string
+          description: The HTTP reason phrase of status
+          example: Conflict
         type:
           type: string
           format: uri
+          description: "urn:customer-master:problem: followed by the catalog key"
+          example: urn:customer-master:problem:DEM1002
+      required:
+      - args
+      - code
+      - detail
+      - status
+      - title
+      - type
     ReviewRequest:
       type: object
       properties:
         acctMgr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         acctPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         active:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 1
           minLength: 0
         addr:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         city:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         corpPhone:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 20
           minLength: 0
         name:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 40
           minLength: 0
         purpose:
@@ -580,11 +909,15 @@ components:
           - ADD
           - EDIT
         state:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 2
           minLength: 0
         zip:
-          type: string
+          type:
+          - string
+          - "null"
           maxLength: 10
           minLength: 0
       required:
@@ -593,11 +926,26 @@ components:
       type: object
       properties:
         customer:
-          $ref: "#/components/schemas/CustomerFields"
+          allOf:
+          - $ref: "#/components/schemas/CustomerFields"
+          required:
+          - acctMgr
+          - acctPhone
+          - active
+          - addr
+          - city
+          - corpPhone
+          - name
+          - state
+          - zip
         notice:
           $ref: "#/components/schemas/Notice"
         standardized:
           type: boolean
+      required:
+      - customer
+      - notice
+      - standardized
     SearchResponse:
       type: object
       properties:
@@ -608,9 +956,18 @@ components:
         limitReached:
           type: boolean
         nextCursor:
-          type: string
+          type:
+          - string
+          - "null"
         notice:
-          $ref: "#/components/schemas/Notice"
+          oneOf:
+          - $ref: "#/components/schemas/Notice"
+          - type: "null"
+      required:
+      - items
+      - limitReached
+      - nextCursor
+      - notice
     SessionResponse:
       type: object
       properties:
@@ -618,8 +975,14 @@ components:
           type: array
           items:
             type: string
+            enum:
+            - INQUIRY
+            - MAINTENANCE
         username:
           type: string
+      required:
+      - roles
+      - username
     StateResponse:
       type: object
       properties:
@@ -627,6 +990,9 @@ components:
           type: string
         state:
           type: string
+      required:
+      - name
+      - state
   securitySchemes:
     basicAuth:
       scheme: basic

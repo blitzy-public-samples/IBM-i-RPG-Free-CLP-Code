@@ -1,5 +1,8 @@
 package com.democorp.customermaster.controller.dto;
 
+import com.democorp.customermaster.security.Role;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.List;
 
 /**
@@ -23,11 +26,21 @@ import java.util.List;
  * reported as {@code ["MAINTENANCE"]}, not {@code ["MAINTENANCE", "INQUIRY"]}. Selection mode is not a
  * role and never appears here; it is the customer picker's context, available to any signed-in user.
  *
+ * <p>The {@code @Schema} and {@code @ArraySchema} annotations are documentation only: they publish
+ * both members as {@code required} and each role as one of the {@link Role} constant names, the
+ * only values a configured user can be granted. The wire type stays a list of strings.
+ *
  * @param username the authenticated principal's name, the same value stamped into {@code chguser}
  * @param roles    the granted role names, for example {@code ["INQUIRY"]} or {@code ["MAINTENANCE"]};
  *                 never {@code null} and unmodifiable
  */
-public record SessionResponse(String username, List<String> roles) {
+public record SessionResponse(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
+        String username,
+        @ArraySchema(
+                arraySchema = @Schema(requiredMode = Schema.RequiredMode.REQUIRED),
+                schema = @Schema(implementation = Role.class))
+        List<String> roles) {
 
     /**
      * Normalizes {@code roles}: {@code null} becomes an empty list, and any other list is copied into

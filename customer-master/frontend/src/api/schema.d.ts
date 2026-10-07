@@ -113,102 +113,159 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         CustomerFields: {
-            acctMgr?: string;
-            acctPhone?: string;
-            active?: string;
-            addr?: string;
-            city?: string;
-            corpPhone?: string;
-            name?: string;
-            state?: string;
-            zip?: string;
+            acctMgr?: string | null;
+            acctPhone?: string | null;
+            active?: string | null;
+            addr?: string | null;
+            city?: string | null;
+            corpPhone?: string | null;
+            name?: string | null;
+            state?: string | null;
+            zip?: string | null;
         };
         CustomerResponse: {
-            acctMgr?: string;
-            acctPhone?: string;
-            active?: string;
-            addr?: string;
+            acctMgr: string;
+            acctPhone: string;
+            active: string;
+            addr: string;
             /** Format: date-time */
-            chgTime?: string;
-            chgUser?: string;
-            city?: string;
-            corpPhone?: string;
-            custId?: string;
-            name?: string;
-            state?: string;
-            /** Format: int64 */
-            version?: number;
-            zip?: string;
-        };
-        CustomerSummaryResponse: {
-            active?: string;
-            city?: string;
-            custId?: string;
-            name?: string;
-            state?: string;
-            zip5?: string;
-        };
-        CustomerUpdateRequest: {
-            acctMgr?: string;
-            acctPhone?: string;
-            active?: string;
-            addr?: string;
-            city?: string;
-            corpPhone?: string;
-            name?: string;
-            state?: string;
+            chgTime: string | null;
+            chgUser: string;
+            city: string;
+            corpPhone: string;
+            custId: string;
+            name: string;
+            state: string;
             /** Format: int64 */
             version: number;
-            zip?: string;
+            zip: string;
+        };
+        CustomerSummaryResponse: {
+            active: string;
+            city: string;
+            custId: string;
+            name: string;
+            state: string;
+            zip5: string;
+        };
+        CustomerUpdateRequest: {
+            acctMgr?: string | null;
+            acctPhone?: string | null;
+            active?: string | null;
+            addr?: string | null;
+            city?: string | null;
+            corpPhone?: string | null;
+            name?: string | null;
+            state?: string | null;
+            /** Format: int64 */
+            version: number;
+            zip?: string | null;
+        };
+        /** @description One field at fault in a problem's errors */
+        FieldError: {
+            /**
+             * @description The catalog key
+             * @example DEM0502
+             */
+            code: string;
+            /**
+             * @description The request body's JSON property (name, addr, city, state, zip, corpPhone, acctMgr, acctPhone, active; version on update; purpose on review) or the path or query parameter (custId; name, city, state, includeInactive, size, cursor on search; nameContains, sort on the state list) at fault
+             * @example name
+             */
+            field: string;
+            /**
+             * @description The catalog text with the arguments substituted
+             * @example Name: Must not be blank
+             */
+            message: string;
         };
         Notice: {
-            code?: string;
-            message?: string;
+            code: string;
+            message: string;
         };
-        ProblemDetail: {
-            detail?: string | null;
-            /** Format: uri */
-            instance?: string | null;
-            properties?: {
-                [key: string]: unknown;
-            } | null;
-            /** Format: int32 */
-            status?: number;
-            title?: string | null;
-            /** Format: uri */
-            type?: string;
+        /** @description RFC 9457 problem: the body of every error response. type, title, status, detail, code and args are always present; the other members only in the cases their descriptions name. */
+        Problem: {
+            /** @description The values substituted into the catalog text, as strings; empty when there are none */
+            args: string[];
+            /**
+             * @description The catalog key, for example APP0400, DEM0502 or DEM1002
+             * @example DEM1002
+             */
+            code: string;
+            /** @description 409 DEM1002 only: the customer as now stored, including its version */
+            current?: components["schemas"]["CustomerResponse"];
+            /**
+             * @description The catalog text of code with args substituted
+             * @example Someone else changed record. Review data.
+             */
+            detail: string;
+            /**
+             * Format: uuid
+             * @description 500 DEM9999 only: the correlation id, also written to the server's ERROR log line
+             */
+            errorId?: string;
+            /** @description The fields at fault; the first entry receives focus. Present when the failure names a request property or parameter: 400 APP0400 on a body property or a path or query parameter, 400 DEM0007 on state, 422 DEM0501, DEM0502 or DEM0503 on the field whose rule failed, and 422 DEM9898 on addr, city, state and zip, in that order. Absent when it names none, as for a malformed body, an unknown property, content after the JSON value, an unknown route, 405, 406, 415, 401, 403, 404 DEM0599, 409, 502, 503 and 500 */
+            errors?: components["schemas"]["FieldError"][];
+            /**
+             * Format: uri-reference
+             * @description The request path; absent only when the path is not a usable URI reference
+             * @example /api/customers/EEEF
+             */
+            instance?: string;
+            /**
+             * @description Failures of POST /api/customers/review only (422 and 502): the normalized State, present when the State rule passed before the failure and absent when the failure is at the State rule or before it
+             * @example ME
+             */
+            stateAccepted?: string;
+            /**
+             * Format: int32
+             * @description The HTTP status of the response
+             * @example 409
+             */
+            status: number;
+            /**
+             * @description The HTTP reason phrase of status
+             * @example Conflict
+             */
+            title: string;
+            /**
+             * Format: uri
+             * @description urn:customer-master:problem: followed by the catalog key
+             * @example urn:customer-master:problem:DEM1002
+             */
+            type: string;
         };
         ReviewRequest: {
-            acctMgr?: string;
-            acctPhone?: string;
-            active?: string;
-            addr?: string;
-            city?: string;
-            corpPhone?: string;
-            name?: string;
+            acctMgr?: string | null;
+            acctPhone?: string | null;
+            active?: string | null;
+            addr?: string | null;
+            city?: string | null;
+            corpPhone?: string | null;
+            name?: string | null;
             /** @enum {string} */
             purpose: "ADD" | "EDIT";
-            state?: string;
-            zip?: string;
+            state?: string | null;
+            zip?: string | null;
         };
         ReviewResponse: {
-            customer?: components["schemas"]["CustomerFields"];
-            notice?: components["schemas"]["Notice"];
-            standardized?: boolean;
+            customer: WithRequired<components["schemas"]["CustomerFields"], "acctMgr" | "acctPhone" | "active" | "addr" | "city" | "corpPhone" | "name" | "state" | "zip">;
+            notice: components["schemas"]["Notice"];
+            standardized: boolean;
         };
         SearchResponse: {
-            items?: components["schemas"]["CustomerSummaryResponse"][];
-            limitReached?: boolean;
-            nextCursor?: string;
-            notice?: components["schemas"]["Notice"];
+            items: components["schemas"]["CustomerSummaryResponse"][];
+            limitReached: boolean;
+            nextCursor: string | null;
+            notice: components["schemas"]["Notice"] | null;
         };
         SessionResponse: {
-            roles?: string[];
-            username?: string;
+            roles: ("INQUIRY" | "MAINTENANCE")[];
+            username: string;
         };
         StateResponse: {
-            name?: string;
-            state?: string;
+            name: string;
+            state: string;
         };
     };
     responses: never;
@@ -250,13 +307,13 @@ export interface operations {
                     "application/json": components["schemas"]["SearchResponse"];
                 };
             };
-            /** @description APP0400 (cursor, size, lengths) or DEM0007 (state) */
+            /** @description APP0400 (cursor, size, lengths, U+0000) or DEM0007 (state) */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -265,7 +322,34 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -300,7 +384,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -309,7 +393,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0403 */
@@ -318,7 +402,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description DEM1001 */
@@ -327,7 +429,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (unsupported media type; Accept lists the supported type) */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description DEM0501, DEM0502, DEM0503 */
@@ -336,7 +447,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0503 */
@@ -345,7 +465,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -378,7 +498,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -387,7 +507,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0403 */
@@ -396,25 +516,61 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description DEM0501, DEM0502, DEM0503, DEM9898 (stateAccepted when the State rule passed) */
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (unsupported media type; Accept lists the supported type) */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM0501, DEM0502, DEM0503, DEM9898; errors names the fields at fault, and stateAccepted carries the normalized State when the State rule passed */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description APP0502 (stateAccepted when the State rule passed) */
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0502; stateAccepted carries the normalized State when the State rule passed */
             502: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -446,7 +602,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -455,7 +611,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description DEM0599 */
@@ -464,7 +620,34 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -500,7 +683,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -509,7 +692,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0403 */
@@ -518,7 +701,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description DEM0599 */
@@ -527,16 +710,43 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description DEM1002 with current, or DEM1001 */
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM1002 (stale version), whose current carries the customer as now stored, including its version; or DEM1001 (row locked), without current */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (unsupported media type; Accept lists the supported type) */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description DEM0501, DEM0502, DEM0503 */
@@ -545,7 +755,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -568,6 +787,33 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -596,7 +842,34 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
@@ -630,7 +903,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0401 */
@@ -639,9 +912,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (method not allowed; Allow lists the supported methods) */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description APP0400 (not acceptable) */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description DEM9999 (unexpected failure; errorId matches the server's ERROR log line) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };
     };
 }
+type WithRequired<T, K extends keyof T> = T & {
+    [P in K]-?: T[P];
+};

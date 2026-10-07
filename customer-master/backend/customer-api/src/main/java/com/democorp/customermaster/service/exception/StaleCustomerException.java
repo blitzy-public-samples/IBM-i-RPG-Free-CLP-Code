@@ -35,9 +35,9 @@ import java.util.Objects;
  * ("Refresh", the source behaviour) or re-applies the user's edits onto it with its version.
  *
  * <p><b>What never travels.</b> The exception message is the catalog code {@code DEM1002} alone. It
- * holds no SQL text, no SQLSTATE and no customer data: {@link Customer#toString()} lists every field, so
- * the stored row is kept out of {@link #getMessage()} and {@link #toString()}, and a log line written for
- * this exception records no customer data. The row reaches the client only through the explicit
+ * holds no SQL text, no SQLSTATE and no customer data: neither {@link #getMessage()} nor
+ * {@link #toString()} renders the stored row, so a log line written for this exception records no
+ * customer data. The row reaches the client only through the explicit
  * {@code current} member the handler builds.
  *
  * <p>The package depends only on the JDK and the domain types, which import nothing from the service

@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.domain.SearchPage;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.List;
 import java.util.Objects;
 
@@ -37,13 +38,20 @@ import java.util.Objects;
  * catalog. This record copies those values into the wire shape and never builds, decodes or
  * inspects the cursor, so the cursor stays opaque to every layer above the service.
  *
- * <p><b>Nulls are part of the contract.</b> The record carries no serialization or OpenAPI
- * annotations, in particular no {@code @JsonInclude(NON_NULL)}: the bottom page serializes
+ * <p><b>Nulls are part of the contract.</b> The record carries no serialization annotation, in
+ * particular no {@code @JsonInclude(NON_NULL)}: the bottom page serializes
  * {@code "nextCursor": null} and a page without a message serializes {@code "notice": null}, so
  * the client tells "no next page" and "no message" from an explicit value rather than from a
- * missing member. The component order is the JSON and OpenAPI property order, so it must not
- * change without regenerating the committed OpenAPI snapshot and the frontend's
- * {@code src/api/schema.d.ts}.
+ * missing member. Its {@code @Schema} annotations are documentation only and publish that shape:
+ * all four members are {@code required}, and {@code nextCursor} is a string or {@code null}.
+ * {@code controller/DtoSchemaCustomizer} publishes {@code notice} as a {@link Notice} or
+ * {@code null}, a form swagger-core cannot derive from an annotation.
+ *
+ * <p><b>Member order.</b> The component order is the JSON member order. The committed OpenAPI
+ * snapshot and the frontend's {@code src/api/schema.d.ts} list the properties alphabetically
+ * instead, because {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}.
+ * Reordering the components changes only the JSON; adding, removing or renaming one also changes
+ * the snapshot and the types, which must then be regenerated.
  *
  * <p>Example, a search that matches nothing:
  * <pre>{@code
@@ -66,9 +74,13 @@ import java.util.Objects;
  *                     {@code null} for none
  */
 public record SearchResponse(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         List<CustomerSummaryResponse> items,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, types = {"string", "null"})
         String nextCursor,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         boolean limitReached,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED)
         Notice notice) {
 
     /**

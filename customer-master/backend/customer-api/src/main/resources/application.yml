@@ -38,6 +38,15 @@ spring:
     deserialization:
       # Unknown JSON properties (custId on add, chgUser, ...) are rejected: 400 APP0400.
       fail-on-unknown-properties: true
+      # A fraction or exponent (version 0.9, 1.0, 1e0) is not truncated to an integer: 400 APP0400.
+      accept-float-as-int: false
+      # An enum binds by constant name only, never by ordinal (purpose 0, "1"): 400 APP0400.
+      fail-on-numbers-for-enums: true
+      # Content after the request's JSON value (`{...} {}`, `{...} x`) is rejected: 400 APP0400.
+      fail-on-trailing-tokens: true
+    mapper:
+      # A JSON string is not coerced to a number or boolean (version "5"): 400 APP0400.
+      allow-coercion-of-scalars: false
 
 server:
   error:

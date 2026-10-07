@@ -29,14 +29,19 @@ import org.springframework.web.bind.annotation.RequestMapping;
  * (the security chain included), a {@code response.sendError(...)} call made by any component, and a
  * failure before a handler is mapped. The container forwards each of them to {@code /error} with the
  * {@code jakarta.servlet.error.*} request attributes set, and this controller turns them into the same
- * problem bodies the rest of the API sends, built by {@link ProblemFactory}.
+ * problem bodies the rest of the API sends, built by {@link ProblemFactory}. An exception escaping the
+ * filter chain reaches the container through {@link ErrorDispatchFilter}, which sets the exception
+ * attribute and calls {@code sendError(500)} instead of rethrowing, so the container logs nothing and
+ * this controller writes the only ERROR line of the failure.
  *
  * <p><b>What it replaces.</b> On the IBM i, a "never should happen" failure went through
  * {@code SQLProblem} ({@code SRV_SQL}): {@code GET DIAGNOSTICS} read the SQLSTATE and message text,
  * {@code DUMP(A)} dumped the program, and a CPF9898 escape message carrying the SQLSTATE and SQL text
  * ended it. Here such a failure becomes a 500 {@code DEM9999} ("Program Error! Please contact IT now.",
  * from {@code CUSTMSGF}) with a random {@code errorId}; the exception and its SQLSTATE go only to the
- * ERROR log line that carries the same {@code errorId}, never into the body.
+ * ERROR log line that carries the same {@code errorId}, never into the body. That line logs the
+ * exception as its {@link RedactedThrowable} copy, types and stack frames with every message withheld,
+ * so no customer value, SQL text or control character of a message reaches the log.
  *
  * <p><b>Status map</b> (the same map {@code ApiExceptionHandler} and the security handlers apply):
  * <table>
@@ -134,7 +139,9 @@ public class ProblemErrorController implements ErrorController {
      * <p>The container's attributes are read first: {@link RequestDispatcher#ERROR_STATUS_CODE},
      * {@link RequestDispatcher#ERROR_EXCEPTION} and {@link RequestDispatcher#ERROR_REQUEST_URI}. A
      * response that is already committed can no longer take a status or a body, so it is left as it is
-     * with a DEBUG line only; the container has logged the exception of such a failure itself.
+     * with a DEBUG line only: an exception from the filter chain was logged at ERROR, with an
+     * {@code errorId}, by {@link ErrorDispatchFilter} before the container closed the connection, and
+     * any other failure the container brings here was logged by the container.
      *
      * @param request the dispatched request, carrying the container's error attributes
      * @param response the response of the failed request
@@ -148,7 +155,7 @@ public class ProblemErrorController implements ErrorController {
         String uri = originalUri(request);
         if (response.isCommitted()) {
             log.debug("Response already committed; error dispatch not answered status={} uri={}",
-                    status == null ? ABSENT : status, uri, failure);
+                    status == null ? ABSENT : status, uri, RedactedThrowable.of(failure));
             return;
         }
         problemFactory.write(response, problemFor(status, failure, uri));
@@ -158,8 +165,9 @@ public class ProblemErrorController implements ErrorController {
      * Applies the status map to the container's error attributes.
      *
      * <p>The 500 branch draws a new {@code errorId} and writes the one ERROR line for it, carrying the
-     * status, the URI, the SQLSTATE found in the cause chain ({@code -} when there is none) and the
-     * exception with its stack trace. None of these reaches the body except the {@code errorId}.
+     * status, the URI, the SQLSTATE found in the cause chain of the original failure ({@code -} when
+     * there is none) and the {@link RedactedThrowable} copy of the failure: exception types and stack
+     * frames with every message withheld. None of these reaches the body except the {@code errorId}.
      *
      * @param status the {@code jakarta.servlet.error.status_code} attribute as set, normally an
      *     {@link Integer}; {@code null} when absent
@@ -190,7 +198,7 @@ public class ProblemErrorController implements ErrorController {
         String errorId = ProblemFactory.newErrorId();
         log.error("Unhandled error errorId={} status={} uri={} sqlState={}", errorId,
                 status == null ? ABSENT : status, uri, ProblemFactory.findSqlState(failure).orElse(ABSENT),
-                failure);
+                RedactedThrowable.of(failure));
         ProblemDetail problem = problemFactory.create(HttpStatus.INTERNAL_SERVER_ERROR, CODE_PROGRAM_ERROR,
                 List.of(), uri);
         return problemFactory.withErrorId(problem, errorId);

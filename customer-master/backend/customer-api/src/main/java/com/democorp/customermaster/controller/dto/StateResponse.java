@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.domain.State;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 /**
  * One element of the {@code GET /api/states} body: a USA state, territory or military postal
@@ -36,7 +37,9 @@ import com.democorp.customermaster.domain.State;
  * @param name  the state's name as stored, at most 30 characters, for example
  *              {@code "North Carolina"}
  */
-public record StateResponse(String state, String name) {
+public record StateResponse(
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String state,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String name) {
 
     /**
      * Maps a stored state row to its response element, copying both values as they are.

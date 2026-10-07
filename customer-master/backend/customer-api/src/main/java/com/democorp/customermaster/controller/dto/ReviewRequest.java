@@ -1,7 +1,9 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.service.CustomerMaintenanceService;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
@@ -25,20 +27,25 @@ import jakarta.validation.constraints.Size;
  *   <tr><th>Property</th><th>Source</th><th>Rule here</th></tr>
  *   <tr><td>{@code purpose}</td><td>The MTNCUSTR function code: {@code E} (editing) or
  *       {@code A} (adding) [5250_Subfile/MTNCUSTR.SQLRPGLE:176-297]</td>
- *       <td>Required; {@code "ADD"} or {@code "EDIT"}</td></tr>
+ *       <td>Required; exactly {@code "ADD"} or {@code "EDIT"}</td></tr>
  *   <tr><td>{@code name} .. {@code active}</td><td>The MTNCUSTD input fields
  *       [5250_Subfile/MTNCUSTD.DSPF:61-120]</td>
- *       <td>The {@code CustomerFields} limits: 40, 40, 20, 2, 10, 20, 40, 20, 1</td></tr>
+ *       <td>The {@code CustomerFields} limits: 40, 40, 20, 2, 10, 20, 40, 20, 1; no U+0000</td></tr>
  * </table>
  *
  * <p><b>The contract is the component list.</b> {@code purpose} comes first, then the nine data
  * fields in {@code CustomerFields} order and with its limits, which are the MTNCUSTD field
- * lengths. The component order is the JSON member order and the OpenAPI property order, so it
- * must not change without regenerating the committed OpenAPI snapshot and the frontend's
- * {@code src/api/schema.d.ts}. The record is flat by declaration rather than through
- * {@code @JsonUnwrapped}, carries no serialization or OpenAPI annotation, and its one mapping
- * method, {@link #fields()}, follows no getter convention, so neither Jackson nor springdoc sees a
- * property beyond these ten.
+ * lengths. The component order is the JSON member order. The committed OpenAPI snapshot and the
+ * frontend's {@code src/api/schema.d.ts} list the properties alphabetically instead, because
+ * {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}; adding,
+ * removing or renaming a component changes both, which must then be regenerated. The record is
+ * flat by declaration rather than through {@code @JsonUnwrapped}, carries one serialization
+ * annotation, the {@link JsonDeserialize} that binds {@code purpose} through
+ * {@link PurposeDeserializer} and leaves its schema the enum's {@code [ADD, EDIT]}, and its one
+ * mapping method, {@link #fields()}, follows no getter convention, so neither Jackson nor
+ * springdoc sees a property beyond these ten. As in {@code CustomerFields}, each data field's
+ * documentation-only {@code @Schema} publishes it as an optional string or {@code null};
+ * {@code purpose} stays a required {@code ADD}/{@code EDIT} string.
  *
  * <p><b>What a client cannot send.</b> {@code custId}, {@code chgTime}, {@code chgUser},
  * {@code rowVersion} and {@code version} are deliberately absent: a review stores nothing, the id
@@ -49,12 +56,20 @@ import jakarta.validation.constraints.Size;
  *
  * <p><b>Validation.</b>
  * <ul>
- *   <li>{@code purpose} is the service's {@link CustomerMaintenanceService.Purpose}, which Jackson
- *       binds by constant name. An unknown value such as {@code "DELETE"} fails deserialization
- *       ({@code HttpMessageNotReadableException}), and a missing one deserializes to {@code null}
- *       and fails {@link NotNull}; both become 400 APP0400.</li>
- *   <li>Each data field carries only {@link Size}, as in {@code CustomerFields}: a longer value is
- *       rejected with 400 APP0400, while a blank or missing value reaches
+ *   <li>{@code purpose} is the service's {@link CustomerMaintenanceService.Purpose}, which
+ *       {@link PurposeDeserializer} binds only from a JSON string exactly equal to {@code "ADD"} or
+ *       {@code "EDIT"}: same case, nothing before or after it, no blank, tab or line break trimmed.
+ *       Any other string, such as {@code "DELETE"}, {@code "add"}, {@code " ADD"} or
+ *       {@code "EDIT\n"}, a number or quoted index ({@code 0}, {@code "1"}), a fraction, a boolean,
+ *       an object or an array fails deserialization on {@code purpose}, as does any content after
+ *       the body's JSON object ({@code HttpMessageNotReadableException}; {@code spring.jackson} in
+ *       {@code application.yml}); a JSON {@code null} or a missing one deserializes to {@code null}
+ *       and fails {@link NotNull}; all become 400 APP0400 with an {@code errors[]} entry on
+ *       {@code purpose}, except trailing content, which names no field.</li>
+ *   <li>Each data field carries only {@link Size} and {@link StorableText}, as in
+ *       {@code CustomerFields}: a longer value, or one containing U+0000 (NUL), which a PostgreSQL
+ *       text column cannot hold and a later save could never store, is rejected with 400 APP0400
+ *       and an {@code errors[]} entry on the property, while a blank or missing value reaches
  *       {@code service/CustomerValidator}, which reports it as 422 DEM0501, DEM0502 or DEM0503 in
  *       source order. An absent {@code active} must reach the service as {@code null}, so that an
  *       {@code ADD} review defaults it to {@code Y} [5250_Subfile/MTNCUSTR.SQLRPGLE:251-255].</li>
@@ -86,16 +101,16 @@ import jakarta.validation.constraints.Size;
  * @param active    the active code, one character; {@code Y} or {@code N} once validated
  */
 public record ReviewRequest(
-        @NotNull CustomerMaintenanceService.Purpose purpose,
-        @Size(max = 40) String name,
-        @Size(max = 40) String addr,
-        @Size(max = 20) String city,
-        @Size(max = 2) String state,
-        @Size(max = 10) String zip,
-        @Size(max = 20) String corpPhone,
-        @Size(max = 40) String acctMgr,
-        @Size(max = 20) String acctPhone,
-        @Size(max = 1) String active) {
+        @NotNull @JsonDeserialize(using = PurposeDeserializer.class) CustomerMaintenanceService.Purpose purpose,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active) {
 
     /**
      * Returns the nine data fields of this request, without the purpose.

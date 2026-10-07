@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.domain.Customer;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.time.Instant;
 import java.util.Objects;
 
@@ -49,22 +50,26 @@ import java.util.Objects;
  *       <td>The optimistic-concurrency token</td></tr>
  * </table>
  *
- * <p><b>Property order is a contract.</b> The component order is the JSON and OpenAPI property
- * order. The committed OpenAPI snapshot, checked by {@code OpenApiSnapshotIT}, and the frontend's
- * generated {@code src/api/schema.d.ts} both follow it, so it must not change without regenerating
- * them. The nine data fields come first, in {@code CustomerFields} order, followed by the stored
- * id, the change stamp and the version. The record is flat by declaration rather than through
- * {@code @JsonUnwrapped}, so the springdoc schema and the serialized body list the same thirteen
- * properties.
+ * <p><b>Member order.</b> The component order is the JSON member order: {@code custId} first,
+ * then the nine data fields in {@code CustomerFields} order, then {@code chgTime},
+ * {@code chgUser} and {@code version}. The committed OpenAPI snapshot, checked by
+ * {@code OpenApiSnapshotIT}, and the frontend's generated {@code src/api/schema.d.ts} list the
+ * properties alphabetically instead, because {@code application.yml} sets
+ * {@code springdoc.writer-with-order-by-keys: true}; adding, removing or renaming a component
+ * changes both, which must then be regenerated. The record is flat by declaration rather than
+ * through {@code @JsonUnwrapped}, so the springdoc schema and the serialized body list the same
+ * thirteen properties.
  *
  * <p><b>Change stamp.</b>
  * <ul>
  *   <li>{@code chgTime} is a {@link Instant}. With Spring Boot's Jackson defaults (the JSR-310
  *       module registered and {@code WRITE_DATES_AS_TIMESTAMPS} off) it serializes as an ISO-8601
  *       instant, for example {@code "2026-10-05T14:03:09.123456Z"}, and the OpenAPI schema
- *       declares it {@code string}/{@code date-time}. The source displayed a zone-less local
- *       timestamp formatted on the server; the client's {@code formatChangeStamp} now renders the
- *       instant in browser-local time as {@code YYYY-Mon-DD at HH:mm:ss}.</li>
+ *       declares it a {@code string}/{@code date-time} or {@code null}, the value
+ *       {@link #from} gives a stored aggregate that carries no time. The source displayed a
+ *       zone-less local timestamp formatted on the server; the client's
+ *       {@code formatChangeStamp} now renders the instant in browser-local time as
+ *       {@code YYYY-Mon-DD at HH:mm:ss}.</li>
  *   <li>{@code chgUser} carries the full stored value of up to 18 characters, where the source's
  *       {@code SD_CHGUSER} showed only 15 [5250_Subfile/MTNCUSTD.DSPF:132]. This is an
  *       intentional difference recorded in the Deviations document.</li>
@@ -79,9 +84,12 @@ import java.util.Objects;
  * [5250_Subfile/MTNCUSTR.SQLRPGLE:576-591]. It is a primitive {@code long}, so it is never
  * {@code null} on the wire and the OpenAPI schema declares it {@code integer}/{@code int64}.
  *
- * <p>The record carries values only. It holds no serialization, validation or OpenAPI
- * annotations, because it is a response body that is never deserialized from a client: the
- * fields a client may send are {@code CustomerFields} and {@code CustomerUpdateRequest}.
+ * <p>The record carries values only. It holds no serialization or validation annotations,
+ * because it is a response body that is never deserialized from a client: the fields a client
+ * may send are {@code CustomerFields} and {@code CustomerUpdateRequest}. Its {@code @Schema}
+ * annotations are documentation only. They publish all thirteen members as {@code required},
+ * because each is always serialized, and {@code chgTime} as a string or {@code null}; with no
+ * {@code @JsonInclude}, a {@code null} {@code chgTime} is still sent.
  *
  * <p>Example, the first customer added on a fresh database by user {@code sales}:
  * <pre>{@code
@@ -111,19 +119,21 @@ import java.util.Objects;
  * @param version   the stored row version, sent back on {@code PUT}
  */
 public record CustomerResponse(
-        String custId,
-        String name,
-        String addr,
-        String city,
-        String state,
-        String zip,
-        String corpPhone,
-        String acctMgr,
-        String acctPhone,
-        String active,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String custId,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String name,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String addr,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String city,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String state,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String zip,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String corpPhone,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String acctMgr,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String acctPhone,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String active,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, types = {"string", "null"},
+                format = "date-time")
         Instant chgTime,
-        String chgUser,
-        long version) {
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String chgUser,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) long version) {
 
     /**
      * Maps a stored customer to its JSON body, property for property.

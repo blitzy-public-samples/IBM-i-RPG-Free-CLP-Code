@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller.dto;
 
 import com.democorp.customermaster.domain.CustomerSummary;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.Objects;
 
 /**
@@ -26,10 +27,10 @@ import java.util.Objects;
  *       under indicator 83</td></tr>
  * </table>
  *
- * <p>The component order is the JSON and OpenAPI property order, so it must not change
- * without regenerating the committed OpenAPI snapshot and the frontend's
- * {@code src/api/schema.d.ts}. The input option field {@code SF_OPT} has no counterpart:
- * the browser owns the per-row option.
+ * <p>The component order is the JSON member order. The committed OpenAPI snapshot and the
+ * frontend's {@code src/api/schema.d.ts} list the properties alphabetically instead, because
+ * {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}. The input
+ * option field {@code SF_OPT} has no counterpart: the browser owns the per-row option.
  *
  * <p>Every property is a string. {@code custId} is the id's text form, not an object, and
  * {@code active} stays the stored {@code Y}/{@code N} flag rather than a boolean, so the
@@ -37,8 +38,10 @@ import java.util.Objects;
  * {@code isActive()} method for the same reason: Jackson would prefer a boolean
  * {@code isActive()} over {@link #active()} and serialize the flag as {@code true}/{@code false}.
  *
- * <p>The record carries values only. It holds no serialization, validation or OpenAPI
- * annotations, because it is a response body that is never deserialized from a client.
+ * <p>The record carries values only. It holds no serialization or validation annotations,
+ * because it is a response body that is never deserialized from a client. Its {@code @Schema}
+ * annotations are documentation only: they publish every member as {@code required}, since
+ * each is always serialized.
  *
  * <p>Example, seed customer {@code AAAD}:
  * <pre>{@code
@@ -59,12 +62,12 @@ import java.util.Objects;
  * @param active stored active flag, {@code "Y"} or {@code "N"}
  */
 public record CustomerSummaryResponse(
-        String custId,
-        String name,
-        String city,
-        String state,
-        String zip5,
-        String active) {
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String custId,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String name,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String city,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String state,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String zip5,
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String active) {
 
     /**
      * Maps one search row to its JSON item, component for component.

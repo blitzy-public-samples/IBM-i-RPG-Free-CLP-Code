@@ -13,10 +13,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.validation.constraints.Size;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.MediaType;
-import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -45,12 +43,13 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>Response.</b> {@code 200 [{"state": "NC", "name": "North Carolina"}, ...]}, all 58 rows when the
  * filter is blank, an empty array when nothing matches. Errors are {@code application/problem+json}:
  * <ul>
- *   <li>400 {@code APP0400} for a {@code nameContains} longer than 10 characters, raised by the
- *       {@link Size} constraint through Spring's built-in method validation
- *       ({@code HandlerMethodValidationException}), and for a {@code nameContains} containing U+0000
- *       or a {@code sort} other than {@code name} or {@code code}, raised by
- *       {@link StateService#list(String, String)} as {@code InvalidSearchCriteriaException};
- *       {@link ApiExceptionHandler} maps both;</li>
+ *   <li>400 {@code APP0400} for a {@code nameContains} longer than 10 characters, counted in code
+ *       points, or containing U+0000, and for a {@code sort} other than {@code name} or
+ *       {@code code}, all raised by {@link StateService#list(String, String)} as
+ *       {@code InvalidSearchCriteriaException} on the offending field and mapped by
+ *       {@link ApiExceptionHandler}. The parameter only publishes the width as the OpenAPI
+ *       {@code maxLength}; a Bean Validation {@code @Size} here would count UTF-16 units and reject
+ *       a 10-character fragment that holds supplementary characters;</li>
  *   <li>401 {@code APP0401} without valid credentials, answered by the security filter chain before
  *       the request reaches this class.</li>
  * </ul>
@@ -68,9 +67,10 @@ import org.springframework.web.bind.annotation.RestController;
  * APP0400 problem naming the field {@code sort}, with the service. The OpenAPI document still lists the
  * two allowed values.
  *
- * <p><b>No {@code @Validated}.</b> Spring Framework 6.2 validates the constrained
- * {@code @RequestParam} itself and raises {@code HandlerMethodValidationException}, which
- * {@link ApiExceptionHandler} turns into APP0400. Adding {@code @Validated} would switch to AOP method
+ * <p><b>No constraints, no {@code @Validated}.</b> Both request rules are the service's, so no
+ * parameter carries a Bean Validation constraint. Spring Framework 6.2 validates a constrained handler
+ * parameter itself and raises {@code HandlerMethodValidationException}, which
+ * {@link ApiExceptionHandler} turns into APP0400; {@code @Validated} would switch to AOP method
  * validation, whose {@code ConstraintViolationException} would bypass that mapping.
  *
  * <p><b>Web contexts only.</b> The controller exists only in a servlet application context; the
@@ -86,7 +86,11 @@ import org.springframework.web.bind.annotation.RestController;
 @SecurityRequirement(name = "basicAuth")
 public class StateController {
 
-    /** Width of the "Name Contains" filter field {@code SC_NAME} in PMTSTATED. */
+    /**
+     * Width of the "Name Contains" filter field {@code SC_NAME} in PMTSTATED, in characters; published
+     * as the OpenAPI {@code maxLength} of {@code nameContains} and enforced, in code points, by
+     * {@link StateService}.
+     */
     static final int NAME_CONTAINS_MAX_LENGTH = 10;
 
     /** The state list and its filter and sort rules. */
@@ -124,17 +128,20 @@ public class StateController {
             description = "APP0400",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @ApiResponse(
             responseCode = "401",
             description = "APP0401",
             content = @Content(
                     mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
-                    schema = @Schema(implementation = ProblemDetail.class)))
+                    schema = @Schema(implementation = ProblemSchema.class)))
     public List<StateResponse> list(
-            @Parameter(description = "Case-insensitive name fragment, at most 10 characters")
+            // Width documented, not constrained: @Size counts UTF-16 units, while the 10-character
+            // limit counts code points; the service enforces it and answers APP0400 on the field.
+            @Parameter(
+                    description = "Case-insensitive name fragment, at most 10 characters",
+                    schema = @Schema(maxLength = NAME_CONTAINS_MAX_LENGTH))
             @RequestParam(required = false)
-            @Size(max = NAME_CONTAINS_MAX_LENGTH)
             String nameContains,
             @Parameter(
                     description = "Order of the list: by name (default) or by code",

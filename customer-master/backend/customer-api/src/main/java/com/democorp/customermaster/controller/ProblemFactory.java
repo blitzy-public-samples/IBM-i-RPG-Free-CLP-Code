@@ -9,8 +9,10 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
@@ -57,7 +59,9 @@ import org.springframework.stereotype.Component;
  * when a helper sets them, {@code errors}, {@code current}, {@code stateAccepted} and {@code errorId}.
  * The properties appear as top-level members because the Boot-configured {@link ObjectMapper} carries
  * Spring's {@code ProblemDetailJacksonMixin}; a plain {@code new ObjectMapper()} would nest them under
- * {@code properties}, so this class always serializes with the injected mapper.
+ * {@code properties}, so this class always serializes with the injected mapper. The OpenAPI document
+ * describes this shape as the {@code Problem} schema, from the documentation-only {@code ProblemSchema}
+ * record, which changes whenever this shape does.
  *
  * <p>Example:
  * <pre>{@code
@@ -140,10 +144,11 @@ public class ProblemFactory {
     }
 
     /**
-     * One {@code errors[]} item: the JSON property or query parameter at fault, the catalog key and the
-     * resolved message. Field names are the JSON property names ({@code name}, {@code addr},
-     * {@code city}, {@code state}, {@code zip}, {@code corpPhone}, {@code acctMgr}, {@code acctPhone},
-     * {@code active}) or a query parameter such as {@code state} or {@code nameContains}.
+     * One {@code errors[]} item: the JSON property, or the path or query parameter, at fault, the catalog
+     * key and the resolved message. Field names are the request body's JSON property names
+     * ({@code name}, {@code addr}, {@code city}, {@code state}, {@code zip}, {@code corpPhone},
+     * {@code acctMgr}, {@code acctPhone}, {@code active}, {@code version} or {@code purpose}) or a path or
+     * query parameter such as {@code custId}, {@code size} or {@code nameContains}.
      *
      * @param field the property or parameter name
      * @param code the catalog key
@@ -210,7 +215,7 @@ public class ProblemFactory {
      * Builds one {@code errors[]} item, resolving its message with the same argument rule as
      * {@link #create(HttpStatusCode, String, List, String)}.
      *
-     * @param field the JSON property or query parameter name
+     * @param field the JSON property, or the path or query parameter, name
      * @param code the catalog key
      * @param args the substitution values; {@code null} or empty for none
      * @return the item
@@ -301,25 +306,44 @@ public class ProblemFactory {
      * Finds the SQLSTATE behind a failure, for server-side logging only; it never goes into a body.
      * This is the counterpart of SQLProblem's {@code GET DIAGNOSTICS ... RETURNED_SQLSTATE}.
      *
-     * <p>The cause chain is walked from {@code failure} outwards to its root, and the first
-     * {@link SQLException} with a non-blank {@link SQLException#getSQLState()} wins, so a Spring
-     * {@code DataAccessException} wrapping a driver exception yields the driver's state. The walk stops
-     * at a cause already seen (a cyclic chain) and after 20 levels.
+     * <p>The graph behind {@code failure} is walked breadth-first along two links: every throwable's
+     * {@link Throwable#getCause()} and, for an {@link SQLException}, its
+     * {@link SQLException#getNextException()}, which is queued ahead of the cause. The first
+     * {@link SQLException} in that order with a non-blank {@link SQLException#getSQLState()} wins, and an
+     * {@code SQLException}'s own state is read before anything it links to. So a Spring
+     * {@code DataAccessException} wrapping a driver exception yields the driver's state, and a stateless
+     * {@code SQLException}, such as a batch failure, yields the state of the exception chained behind it.
+     * Each throwable is inspected at most once, compared by identity, so a cycle through either link
+     * ends; the walk stops after 20 throwables.
      *
      * @param failure the failure to inspect; may be {@code null}
      * @return the trimmed SQLSTATE, or empty when there is none
      */
     public static Optional<String> findSqlState(@Nullable Throwable failure) {
-        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
-        Throwable current = failure;
-        for (int depth = 0; current != null && depth < MAX_CAUSE_DEPTH && seen.add(current); depth++) {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Deque<Throwable> pending = new ArrayDeque<>();
+        if (failure != null) {
+            pending.add(failure);
+        }
+        while (!pending.isEmpty() && visited.size() < MAX_CAUSE_DEPTH) {
+            Throwable current = pending.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
             if (current instanceof SQLException sqlException) {
                 String state = sqlException.getSQLState();
                 if (state != null && !state.isBlank()) {
                     return Optional.of(state.trim());
                 }
+                SQLException next = sqlException.getNextException();
+                if (next != null) {
+                    pending.add(next);
+                }
             }
-            current = current.getCause();
+            Throwable cause = current.getCause();
+            if (cause != null) {
+                pending.add(cause);
+            }
         }
         return Optional.empty();
     }
