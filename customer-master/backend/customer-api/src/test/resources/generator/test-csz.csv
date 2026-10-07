@@ -1,0 +1,15 @@
+zip,type,primary_city,state,county
+501,UNIQUE,Testville,NY,Suffolk County
+10013,STANDARD,Test Harbor,NY,New York County
+90210,STANDARD,Testhaven,CA,Los Angeles County
+94105,PO BOX,Test Bay,CA,San Francisco County
+73301,UNIQUE,Testmont,TX,Travis County
+77001,STANDARD,Test Junction,TX,Harris County
+20001,STANDARD,Testington Crossroad,DC,District of Columbia
+20090,PO BOX,Test Capitol,DC,District of Columbia
+00601,STANDARD,Test Mesa,PR,Adjuntas Municipio
+00936,PO BOX,Testbridge,PR,San Juan Municipio
+33101,STANDARD,Test Bayou,FL,Miami-Dade County
+60601,STANDARD,Testlake City,IL,Cook County
+99999,STANDARD,Test Nowhere,ZZ,Unknown County
+98101,STANDARD,Testington Crossroads,WA,King County
