@@ -123,13 +123,19 @@ public record AddressValidationRequest(
      * Returns {@code value}, or {@code ""} for {@code null}, after checking that it holds
      * at most {@code width} code points.
      *
+     * <p>This is the single width and default check of the {@code USAdrValDS} template,
+     * shared by this record and {@link AddressValidationResult}. It is package-local so
+     * that both records keep one rule: {@code null} becomes {@code ""}, the width is
+     * counted in code points on the value as given, and the exception message names the
+     * component and width, never the value.
+     *
      * @param component component name used in the exception message
      * @param value     the value as supplied by the caller, unmodified
      * @param width     the maximum number of code points allowed
      * @return the value as given, or {@code ""} when {@code value} is {@code null}
      * @throws IllegalArgumentException if the value is wider than {@code width}
      */
-    private static String withinWidth(String component, String value, int width) {
+    static String withinWidth(String component, String value, int width) {
         if (value == null) {
             return "";
         }

@@ -21,25 +21,37 @@ import java.util.random.RandomGenerator;
  *
  * <h2>Random policy</h2>
  * <p>{@code Rand_Int} scales Db2 {@code RANDOM()}, which returns a value r with
- * 0 &le; r &le; 1, as {@code %int(r * (p_High - p_Low) + p_Low)}. The result is
- * {@code low..high-1} uniformly for r &lt; 1, and {@code high} only when r is
- * exactly 1, which the source documents as "p_High is much less frequently
- * returned". Both halves are kept on purpose:
+ * 0 &le; r &le; 1, as {@code %int(r * (p_High - p_Low) + p_Low)}. In exact
+ * arithmetic the result is {@code low..high-1} uniformly for r &lt; 1, and
+ * {@code high} only when r is exactly 1, which the source documents as
+ * "p_High is much less frequently returned". The expression is evaluated in
+ * IEEE double, as the source's {@code float(8)} is, so for some ranges an r
+ * within a few ulps of 1 also rounds up to {@code high}, for example (5, 11) at
+ * {@code Math.nextDown(1.0)}; {@link #randInt(int, int)} gives the details.
+ * Both halves are kept on purpose:
  * <ul>
  *   <li>The unit source is <em>inclusive</em> of 1. {@link #inclusiveUnit(RandomGenerator)}
  *       draws k/2<sup>53</sup> for k in 0..2<sup>53</sup>, so r = 1 is reachable and
  *       rare. {@link RandomGenerator#nextDouble()} and PostgreSQL {@code random()}
- *       cover [0, 1) and would make every high bound unreachable, so neither is
- *       used.</li>
+ *       cover [0, 1) and omit the exact r = 1 endpoint, so {@code high} would be
+ *       unreachable in every range where only r = 1 yields it, such as the
+ *       generator's ranges (5, 28), (1, 21), (1, 28), (1, 5000), (100, 900),
+ *       (1, 998), (1, 9900) and (1, 45). Neither is used.</li>
  *   <li>The scaling truncates toward zero, as {@code %int} does, through a plain
  *       {@code (int)} cast of the whole expression.</li>
  * </ul>
  *
  * <h2>Determinism</h2>
  * <p>Every public method consumes unit values in a fixed, documented order, so
- * an instance built by {@link #seeded(long)} yields the same sequence of words
- * and phone numbers on every JVM for the same seed. The generator's
- * {@code --seed} option relies on this to make a load reproducible.
+ * instances built by {@link #seeded(long)} with the same seed yield the same
+ * sequence of draws, words and phone numbers on the same Java runtime,
+ * including in separate runs of the generator, each in its own JVM process.
+ * The generator's {@code --seed} option relies on this to make a load
+ * reproducible on the project's pinned runtime. The promise stops at that
+ * runtime: the JDK specifies {@link SplittableRandom}'s repeatability only for
+ * the same seed within the same program, not a fixed algorithm across JDK
+ * implementations or releases, so a different Java runtime may produce a
+ * different sequence for the same seed.
  *
  * <h2>Thread safety</h2>
  * <p>Instances are <strong>not</strong> thread-safe. The JDK generators behind
@@ -77,7 +89,11 @@ public final class NameGenerator {
     /** 2^-53, the spacing between consecutive unit values. */
     private static final double UNIT_SCALE = 0x1.0p-53;
 
-    /** Longest word {@link #genWord(int, int)} produces for the source's bounds; sizes the buffer. */
+    /**
+     * Initial capacity of the {@link #genWord(int, int)} buffer. The source's bounds
+     * produce at most 12 letters, so 16 leaves spare room and the builder never grows
+     * for them; wider caller bounds still grow it.
+     */
     private static final int WORD_CAPACITY = 16;
 
     private final DoubleSupplier unit;
@@ -116,11 +132,16 @@ public final class NameGenerator {
 
     /**
      * Creates a reproducible generator. Two instances built with the same seed
-     * produce identical sequences on every JVM, because {@link SplittableRandom}
-     * defines its algorithm exactly.
+     * produce identical sequences on the same Java runtime, in one JVM process
+     * or in separate ones, which is what makes a {@code --seed} load repeatable.
+     * The JDK specifies {@link SplittableRandom}'s repeatability only for the
+     * same seed within the same program and does not fix its algorithm across
+     * JDK implementations or releases, so another Java runtime may produce a
+     * different sequence for the same seed.
      *
      * @param seed the seed given by the generator's {@code --seed} option
-     * @return a generator whose output depends only on {@code seed}
+     * @return a generator whose output, for a given Java runtime, depends only
+     *         on {@code seed}
      */
     public static NameGenerator seeded(long seed) {
         return new NameGenerator(inclusiveUnit(new SplittableRandom(seed)));

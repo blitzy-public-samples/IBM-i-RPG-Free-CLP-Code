@@ -139,14 +139,21 @@ public record AddressValidationResult(
      *                                  names the component and the width, never the value
      */
     public AddressValidationResult {
-        address1 = withinWidth("address1", address1, AddressValidationRequest.ADDRESS1_WIDTH);
-        address2 = withinWidth("address2", address2, AddressValidationRequest.ADDRESS2_WIDTH);
-        city = withinWidth("city", city, AddressValidationRequest.CITY_WIDTH);
-        state = withinWidth("state", state, AddressValidationRequest.STATE_WIDTH);
-        zip5 = withinWidth("zip5", zip5, AddressValidationRequest.ZIP5_WIDTH);
-        zip4 = withinWidth("zip4", zip4, AddressValidationRequest.ZIP4_WIDTH);
-        errorSource = withinWidth("errorSource", errorSource, ERROR_SOURCE_WIDTH);
-        errorDescription = withinWidth(
+        address1 = AddressValidationRequest.withinWidth(
+                "address1", address1, AddressValidationRequest.ADDRESS1_WIDTH);
+        address2 = AddressValidationRequest.withinWidth(
+                "address2", address2, AddressValidationRequest.ADDRESS2_WIDTH);
+        city = AddressValidationRequest.withinWidth(
+                "city", city, AddressValidationRequest.CITY_WIDTH);
+        state = AddressValidationRequest.withinWidth(
+                "state", state, AddressValidationRequest.STATE_WIDTH);
+        zip5 = AddressValidationRequest.withinWidth(
+                "zip5", zip5, AddressValidationRequest.ZIP5_WIDTH);
+        zip4 = AddressValidationRequest.withinWidth(
+                "zip4", zip4, AddressValidationRequest.ZIP4_WIDTH);
+        errorSource = AddressValidationRequest.withinWidth(
+                "errorSource", errorSource, ERROR_SOURCE_WIDTH);
+        errorDescription = AddressValidationRequest.withinWidth(
                 "errorDescription", errorDescription, ERROR_DESCRIPTION_WIDTH);
     }
 
@@ -230,25 +237,5 @@ public record AddressValidationResult(
      */
     public boolean standardized() {
         return !city.isBlank();
-    }
-
-    /**
-     * Returns {@code value}, or {@code ""} for {@code null}, after checking that it holds
-     * at most {@code width} code points.
-     *
-     * @param component component name used in the exception message
-     * @param value     the value as supplied by the caller, unmodified
-     * @param width     the maximum number of code points allowed
-     * @return the value as given, or {@code ""} when {@code value} is {@code null}
-     * @throws IllegalArgumentException if the value is wider than {@code width}
-     */
-    private static String withinWidth(String component, String value, int width) {
-        if (value == null) {
-            return "";
-        }
-        if (value.codePointCount(0, value.length()) > width) {
-            throw new IllegalArgumentException(component + " exceeds " + width + " characters");
-        }
-        return value;
     }
 }
