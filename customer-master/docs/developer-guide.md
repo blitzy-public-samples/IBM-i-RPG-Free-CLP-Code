@@ -213,7 +213,7 @@ All settings live in `resources/application.yml` (plus `application-generator.ym
 | `CM_MAINTENANCE_USER`/`CM_MAINTENANCE_PASSWORD` | `sales`/`sales-demo` (Compose only, demo) | Role MAINTENANCE |
 | `ADDRESS_VALIDATION_ENABLED`, `ADDRESS_VALIDATION_CLIENT` | `true`, `stub` | Address auto-configuration |
 | `USPS_BASE_URL`, `USPS_USER_ID`, `USPS_PASSWORD`, `USPS_CONNECT_TIMEOUT`, `USPS_READ_TIMEOUT` | `https://secure.shippingapis.com/ShippingAPI.dll`, empty, empty, `5s`, `10s` | `AddressValidationProperties` (startup fails when `client=usps` and the user id is empty) |
-| `GENERATOR_COUNT`, `GENERATOR_START_ID`, `GENERATOR_CSZ_FILE`, `GENERATOR_SEED` (flags `--count`, `--start-id`, `--csz-file`, `--seed`) | `300`, empty (automatic rule), `classpath:generator/csz-sample.csv`, empty (random) | `GeneratorProperties`; flag beats variable beats default; unknown options exit 1 with `Unknown option --<name>` |
+| `GENERATOR_COUNT`, `GENERATOR_START_ID`, `GENERATOR_CSZ_FILE`, `GENERATOR_SEED` (flags `--count`, `--start-id`, `--csz-file`, `--seed`) | `300`, empty (automatic rule), `classpath:generator/csz-sample.csv`, empty (random) | `GeneratorProperties`; flag beats variable beats default; unknown options exit 1 with `Unknown option --<name>`, and a flag or `--customer-master.generator.*` option given without a value (a bare `--seed`, unlike `--seed=`) exits 1 with `Option --<name> requires a value` before any read or write |
 | `FRONTEND_PORT`, `API_PORT` | `8080`, `8081` | Host ports |
 | `BASE_URL` | `http://frontend` in Compose `e2e`, else `http://localhost:8080` | Playwright |
 | `K6_BASE_URL`, `K6_USER`, `K6_PASSWORD` | `http://app:8080`, the inquiry user | k6 |

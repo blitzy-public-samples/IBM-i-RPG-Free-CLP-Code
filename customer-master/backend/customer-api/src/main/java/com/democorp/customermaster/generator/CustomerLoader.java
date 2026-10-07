@@ -58,10 +58,14 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * </ol>
  *
  * <p><b>Atomicity.</b> Any exception after the truncate (from the COPY, the row-count check, the
- * restart, a checkpoint or the commit) rolls the transaction back. PostgreSQL's {@code TRUNCATE} and
- * {@code ALTER SEQUENCE ... RESTART} are both transactional, so the previous rows and the previous next
- * id return together and a later add cannot collide with a restored row. The method itself never calls
- * {@code nextval}, {@code setval} or {@code ALTER SEQUENCE}: every sequence access goes through
+ * restart or a checkpoint) rolls the transaction back, and so does a {@code COMMIT} the server rejects.
+ * PostgreSQL's {@code TRUNCATE} and {@code ALTER SEQUENCE ... RESTART} are both transactional, so a
+ * confirmed rollback returns the previous rows and the previous next id together and a later add cannot
+ * collide with a restored row. A {@code COMMIT} whose result never reaches the caller, for example
+ * because the connection is lost before the server acknowledges it, leaves the outcome unknown to the
+ * caller: the new rows and the restarted sequence are committed together or not at all, and only the
+ * database can tell which. The method itself never calls {@code nextval}, {@code setval} or
+ * {@code ALTER SEQUENCE}: every sequence access goes through
  * {@link CustomerIdAllocator}. A load whose last id is {@code 9999} ({@code nextOrdinal()} =
  * {@value CustomerIdAllocator#EXHAUSTED_NEXT_ORDINAL}) leaves the sequence exhausted through the
  * allocator's exhausted branch, so the next add fails with 503 APP0503.
@@ -164,8 +168,10 @@ public class CustomerLoader {
      * <p>The steps and their order are those of the class description. When the method returns, the
      * transaction commits: the new rows become visible, the table lock is released and the next add
      * receives {@link Plan#nextOrdinal()}, or 503 APP0503 when the load ended at {@code 9999}. When it
-     * throws, the transaction rolls back and the table, the sequence and the next id are exactly as
-     * they were before the call.
+     * throws before the commit, the transaction never commits, so the table, the sequence and the next
+     * id stay exactly as they were before the call. When the commit itself fails without the server's
+     * answer reaching the caller, the outcome is unknown. The exception's type does not tell the two
+     * apart, so a caller verifies {@code custmast} and {@code custmast_id_seq} before retrying.
      *
      * @param plan the first id, the row count and the generator of the rows
      * @return the number of rows the server copied, always {@link Plan#count()}
@@ -177,7 +183,14 @@ public class CustomerLoader {
      *                                             within {@value #LOCK_TIMEOUT}, because an add, an
      *                                             update or another load holds it; nothing has changed
      * @throws DataAccessException                 if a statement or the {@code COPY} fails, for example
-     *                                             on a constraint violation; rolled back
+     *                                             on a constraint violation; rolled back. Also thrown
+     *                                             when the commit or the rollback fails; after a failed
+     *                                             commit the outcome may be unknown (see the class
+     *                                             description)
+     * @throws org.springframework.transaction.TransactionSystemException if the commit or the rollback
+     *                                             fails and the exception translator has no category
+     *                                             for it; after a failed commit the outcome may be
+     *                                             unknown
      * @throws IllegalStateException               if the server copied a different number of rows than
      *                                             the plan holds, or the allocator's exhausted branch
      *                                             fails its own check; rolled back

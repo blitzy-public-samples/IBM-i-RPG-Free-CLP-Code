@@ -33,10 +33,20 @@ import org.springframework.transaction.annotation.Transactional;
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:625-665]. The target keeps no open cursor between requests, so
  * each page is one statement that restarts after the last row served.
  *
- * <p><b>The statement.</b>
+ * <p><b>The statement.</b> Without a literal lead, one ordered {@code SELECT}:
  * <pre>
  * SELECT custid, name, city, state, left(zip, 5) AS zip5, active FROM custmast
  * [WHERE &lt;name&gt; AND &lt;city&gt; AND &lt;state&gt; AND &lt;active&gt; AND &lt;keyset&gt;]
+ * ORDER BY name, city, state, custid LIMIT :limit
+ * </pre>
+ * When the name or city pattern has a literal lead (one that yields an index prefix; see "Name and
+ * city patterns" below), the same select list and predicates, that lead's among them, form a
+ * materialized candidate set, and the page is ordered and limited outside it:
+ * <pre>
+ * WITH candidates AS MATERIALIZED (
+ *   SELECT custid, name, city, state, left(zip, 5) AS zip5, active FROM custmast
+ *   WHERE &lt;name and/or city&gt; [AND &lt;state&gt; AND &lt;active&gt; AND &lt;keyset&gt;])
+ * SELECT custid, name, city, state, zip5, active FROM candidates
  * ORDER BY name, city, state, custid LIMIT :limit
  * </pre>
  * Each bracketed predicate is added only when its input is present, so the planner never sees an
@@ -47,6 +57,24 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code FOR FETCH ONLY}. Every value is a bound parameter; no filter or cursor text is ever placed
  * in the SQL, so names such as {@code URNA \NUNC\ COMPANY} and {@code NIBH L'LOR COMPANY} match
  * literally and nothing a user types can alter the statement.
+ *
+ * <p><b>Why a literal lead is fenced.</b> {@code name} is the leading key of the {@code ORDER BY}
+ * and of {@code custmast_search_keyset}. In one statement the planner can cost an ordered walk of
+ * that index with the {@code LIKE} predicates as filters, assuming the matches are spread evenly
+ * through the order so that 13 arrive early. A name lead's matches are instead clustered at the
+ * lead's position in the leading key, so for a late lead such as {@code Z} the walk examines almost
+ * the whole table before its first match. A city lead's matches arrive early in that walk only if
+ * they are in fact spread evenly through the name order, so the walk's cost rests on the planner's
+ * estimate rather than on the lead. {@code MATERIALIZED} stops the planner from pushing the
+ * {@code ORDER BY} and {@code LIMIT} into the candidate scan: the candidate set is bounded by the
+ * lead's matches, which {@code custmast_name} or {@code custmast_city} returns, the {@code rpad}
+ * check (when issued) filters them, and a top-N sort keeps the page. Inside the fence the planner
+ * still chooses the access path, for example the narrower of two leads, an index or bitmap scan, or
+ * a {@code BitmapAnd} with the keyset position. Only a search with no literal lead in either
+ * pattern keeps the single statement and the ordered walk (for a state filter,
+ * {@code custmast_state} when the planner costs it lower): no filter, the state and active filters,
+ * a keyset position alone, and patterns that start with a wildcard, which are evaluated over the
+ * walk as the source scans.
  *
  * <table>
  *   <caption>Predicates, in the order they are added</caption>
@@ -96,20 +124,23 @@ import org.springframework.transaction.annotation.Transactional;
  *   <caption>Filters and the fragments they produce</caption>
  *   <tr><th>Filter</th><th>Pattern</th><th>Fragments</th><th>Result</th></tr>
  *   <tr><td>{@code ABC}</td><td>{@code ABC%}</td><td>{@code name LIKE :namePattern}</td>
- *       <td>Index scan on {@code custmast_name}, no {@code rpad}</td></tr>
+ *       <td>Fenced: {@code custmast_name} serves the candidate set (index or bitmap scan, the
+ *       planner's choice), then a top-N sort; no {@code rpad}</td></tr>
  *   <tr><td>{@code AB_}</td><td>{@code AB_%}</td>
  *       <td>{@code rpad(name, 40) LIKE 'AB_%'} and {@code name LIKE 'AB%'}</td>
- *       <td>Finds {@code AB}: the {@code _} matches a pad blank</td></tr>
+ *       <td>Fenced on lead {@code AB}; finds {@code AB}: the {@code _} matches a pad
+ *       blank</td></tr>
  *   <tr><td>{@code AB}, ten blanks, {@code %}</td><td>The same 13 characters</td>
- *       <td>{@code rpad} and prefix {@code AB%}</td><td>Finds {@code AB}, not {@code ABX}</td></tr>
+ *       <td>{@code rpad} and prefix {@code AB%}</td><td>Fenced on lead {@code AB}; finds
+ *       {@code AB}, not {@code ABX}</td></tr>
  *   <tr><td>{@code ABCDEFGHIJKLM}</td><td>{@code ABCDEFGHIJKLM}, no wildcard</td>
- *       <td>{@code rpad} and prefix {@code ABCDEFGHIJKLM%}</td><td>Finds nothing (preserved
- *       defect)</td></tr>
+ *       <td>{@code rpad} and prefix {@code ABCDEFGHIJKLM%}</td><td>Fenced; finds nothing
+ *       (preserved defect)</td></tr>
  *   <tr><td>{@code %ONE}</td><td>{@code %ONE%}</td><td>{@code rpad} only</td>
- *       <td>No literal lead, so no index aid; evaluated over the ordered walk, as the source
- *       scans</td></tr>
+ *       <td>No literal lead, so no index aid; alone it is not fenced and is evaluated over the
+ *       ordered walk, as the source scans</td></tr>
  *   <tr><td>{@code URNA \NUNC}</td><td>{@code URNA \\NUNC%}</td><td>{@code name LIKE :namePattern}</td>
- *       <td>Matches {@code URNA \NUNC\ COMPANY} literally</td></tr>
+ *       <td>Fenced; matches {@code URNA \NUNC\ COMPANY} literally</td></tr>
  * </table>
  *
  * <p><b>Planning.</b> {@link #find(SearchCriteria, int)} runs in a read-only transaction that first
@@ -153,6 +184,19 @@ public class CustomerSearchRepository {
     private static final String SELECT_FROM =
             "SELECT custid, name, city, state, left(zip, 5) AS zip5, active FROM custmast";
 
+    /**
+     * Opens the materialized candidate set of a name or city filter with a literal lead; the select
+     * list, table and predicates follow unchanged.
+     */
+    private static final String CANDIDATES_OPEN = "WITH candidates AS MATERIALIZED (";
+
+    /**
+     * Closes the candidate set and selects the page from it, under the labels of
+     * {@link #SELECT_FROM}; the {@code ORDER BY} and {@code LIMIT} follow.
+     */
+    private static final String CANDIDATES_CLOSE =
+            ") SELECT custid, name, city, state, zip5, active FROM candidates";
+
     /** Exact state; the cast keeps the varchar bind typed as the {@code char(2)} column. */
     private static final String STATE_PREDICATE = "state = CAST(:state AS char(2))";
 
@@ -160,9 +204,10 @@ public class CustomerSearchRepository {
     private static final String ACTIVE_ONLY_PREDICATE = "active = 'Y'";
 
     /**
-     * Keyset position after the last row served. The row comparison matches the ORDER BY and is a
-     * single index condition on {@code custmast_search_keyset}, so a deep page costs what the first
-     * does. The casts keep the binds typed as the {@code char} columns.
+     * Keyset position after the last row served. The row comparison matches the ORDER BY. In the
+     * single statement it is one index condition on {@code custmast_search_keyset}, so a deep page
+     * costs what the first does; inside the candidate set of a literal lead it keeps only the lead's
+     * matches after that row. The casts keep the binds typed as the {@code char} columns.
      */
     private static final String KEYSET_PREDICATE = "(name, city, state, custid) > "
             + "(:kName, :kCity, CAST(:kState AS char(2)), CAST(:kId AS char(4)))";
@@ -259,7 +304,11 @@ public class CustomerSearchRepository {
      * <p>Predicates are added in the order name, city, state, active, keyset, each only when its
      * input is present; with none, the statement has no {@code WHERE}. A blank filter (see
      * {@link SearchCriteria#hasName()}, {@link SearchCriteria#hasCity()} and
-     * {@link SearchCriteria#hasState()}) adds nothing.
+     * {@link SearchCriteria#hasState()}) adds nothing. When the literal lead of the name or city
+     * pattern yields an index prefix, that {@code SELECT} with all its predicates becomes the
+     * materialized candidate set {@code candidates}, and the {@code ORDER BY} and {@code LIMIT}
+     * apply to it (see "The statement" on the class); otherwise they close the {@code SELECT}
+     * itself.
      *
      * @param c     the normalized criteria
      * @param limit the {@code LIMIT}, at least 1
@@ -275,12 +324,17 @@ public class CustomerSearchRepository {
         }
         List<String> predicates = new ArrayList<>(6);
         Map<String, Object> params = new LinkedHashMap<>();
+        boolean fenced = false;
 
         if (c.hasName()) {
-            LikeColumn.NAME.addTo(likeParts(c.name()), predicates, params);
+            LikeParts name = likeParts(c.name());
+            LikeColumn.NAME.addTo(name, predicates, params);
+            fenced = name.prefix() != null;
         }
         if (c.hasCity()) {
-            LikeColumn.CITY.addTo(likeParts(c.city()), predicates, params);
+            LikeParts city = likeParts(c.city());
+            LikeColumn.CITY.addTo(city, predicates, params);
+            fenced = fenced || city.prefix() != null;
         }
         if (c.hasState()) {
             predicates.add(STATE_PREDICATE);
@@ -299,9 +353,16 @@ public class CustomerSearchRepository {
         }
         params.put(PARAM_LIMIT, Integer.valueOf(limit));
 
-        StringBuilder sql = new StringBuilder(SELECT_FROM);
+        StringBuilder sql = new StringBuilder();
+        if (fenced) {
+            sql.append(CANDIDATES_OPEN);
+        }
+        sql.append(SELECT_FROM);
         if (!predicates.isEmpty()) {
             sql.append(WHERE).append(String.join(AND, predicates));
+        }
+        if (fenced) {
+            sql.append(CANDIDATES_CLOSE);
         }
         sql.append(ORDER_AND_LIMIT);
         return new SqlQuery(sql.toString(), params);

@@ -4,7 +4,14 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Pattern;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.ConfigurationPropertiesBindHandlerAdvisor;
+import org.springframework.boot.context.properties.bind.AbstractBindHandler;
+import org.springframework.boot.context.properties.bind.BindContext;
+import org.springframework.boot.context.properties.bind.BindHandler;
+import org.springframework.boot.context.properties.bind.BindResult;
+import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.DefaultValue;
+import org.springframework.boot.context.properties.source.ConfigurationPropertyName;
 import org.springframework.validation.annotation.Validated;
 
 /**
@@ -48,24 +55,33 @@ import org.springframework.validation.annotation.Validated;
  * fully qualified {@code --customer-master.generator.count=N} also works, because command-line
  * properties outrank the profile file. An empty bridge value means "not given": {@code startId}
  * binds as {@code ""}, and {@code seed} binds as {@code null}, because Spring's String-to-Number
- * conversion maps an empty string to null. {@code CustomerGeneratorRunner} rejects every other
- * command-line option before any write.
+ * conversion maps an empty string to null. A {@code count} that resolves to an empty or
+ * whitespace-only value, as {@code GENERATOR_COUNT=} or {@code --count=} gives, binds as the
+ * default 300: the bridge falls back only when a variable is absent, and the null that conversion
+ * would make of the blank cannot be assigned to the primitive {@code int}, so
+ * {@code BlankCountAdvisor} leaves the key unbound and the {@code @DefaultValue} applies. A flag or
+ * qualified property that carries a number still wins over a blank {@code GENERATOR_COUNT}.
+ * {@code CustomerGeneratorRunner} rejects every other command-line option before any write.
  *
  * <p><b>Validation.</b> Validation is part of binding: a {@code count} outside
  * 1..{@value #MAX_COUNT}, a {@code startId} that is neither empty nor four characters of
- * {@code [A-Z0-9]} (for example a lower-case {@code b000}, or blanks only), or a {@code count} or
- * {@code seed} that is not a number fails context startup, and the generator process exits with a
- * non-zero status before it touches the database. Whether {@code startId} plus {@code count} fits
- * the id space is a cross-field rule that {@code CustomerGeneratorRunner} checks after binding.
+ * {@code [A-Z0-9]} (for example a lower-case {@code b000}, or blanks only), a non-blank
+ * {@code count} that is not a number (for example {@code abc}), or a {@code seed} that is not a
+ * number fails context startup with a message naming the key, such as
+ * {@code customer-master.generator.count}, and the generator process exits with a non-zero status
+ * before it touches the database. Only a blank {@code count} is treated as "not given". Whether
+ * {@code startId} plus {@code count} fits the id space is a cross-field rule that
+ * {@code CustomerGeneratorRunner} checks after binding.
  *
  * <p><b>Registration.</b> The record carries no stereotype annotation, and the application declares
  * no {@code @ConfigurationPropertiesScan}. {@code CustomerGeneratorRunner}, which exists only under
  * the {@code generator} profile, is its only registrar through
- * {@code @EnableConfigurationProperties(GeneratorProperties.class)}, so the web application and the
- * test contexts never bind or validate it.
+ * {@code @EnableConfigurationProperties(GeneratorProperties.class)}, next to which it imports
+ * {@code BlankCountAdvisor}, so the web application and the test contexts never bind or validate it
+ * and never contain the advisor.
  *
  * @param count   {@code customer-master.generator.count}: rows to generate, 1..{@value #MAX_COUNT};
- *                default 300
+ *                default 300, also when the resolved value is empty or whitespace only
  * @param startId {@code customer-master.generator.start-id}: first customer id, four characters of
  *                {@code [A-Z0-9]}; null or empty selects the automatic start
  * @param cszFile {@code customer-master.generator.csz-file}: location of the city/state/ZIP CSV,
@@ -118,5 +134,66 @@ public record GeneratorProperties(
             return DEFAULT_CSZ_FILE;
         }
         return cszFile.trim();
+    }
+
+    /**
+     * Makes a blank {@code customer-master.generator.count} mean "not given", so that the record's
+     * {@code @DefaultValue("300")} applies.
+     *
+     * <p><b>Why.</b> The bridge {@code ${count:${GENERATOR_COUNT:300}}} falls back only when a name
+     * is absent, so a present but empty {@code GENERATOR_COUNT} (or {@code --count=}) resolves to
+     * {@code ""}. Spring's String-to-Number conversion maps that to null, and a null cannot be
+     * assigned to the primitive {@code int count}, so binding would fail before the constructor
+     * default is reached.
+     *
+     * <p><b>How.</b> The handler acts in {@code onStart} of that one key only. It binds the key as
+     * a {@code String} through {@link BindContext#getBinder()}, that is with the binder's own
+     * property sources, precedence and placeholder resolution, so it sees exactly the value the
+     * count would be converted from (the raw configuration property still holds the unresolved
+     * bridge). When that value is empty or whitespace only it returns null, which binds nothing,
+     * and the value-object binder then uses the default. Every other value, key and properties
+     * class binds unchanged: a non-blank {@code abc} still fails conversion, and {@code 0} or
+     * {@code 1679617} still fail validation.
+     *
+     * <p><b>Registration.</b> {@code CustomerGeneratorRunner} imports this class next to its
+     * {@code @EnableConfigurationProperties(GeneratorProperties.class)}, so the advisor exists only
+     * in the {@code generator} profile context, the only one that binds this record. It is a
+     * dependency-free class rather than a {@code @Bean} method of the runner, because the runner
+     * itself needs the bound record, while advisors are looked up as soon as the context binds its
+     * first properties class.
+     */
+    static final class BlankCountAdvisor implements ConfigurationPropertiesBindHandlerAdvisor {
+
+        /** The one key this advisor handles. */
+        static final ConfigurationPropertyName COUNT =
+                ConfigurationPropertyName.of(PREFIX + ".count");
+
+        @Override
+        public BindHandler apply(BindHandler bindHandler) {
+            return new BlankCountBindHandler(bindHandler);
+        }
+
+        /** Skips {@link #COUNT} when its resolved value is blank and delegates everything else. */
+        private static final class BlankCountBindHandler extends AbstractBindHandler {
+
+            BlankCountBindHandler(BindHandler parent) {
+                super(parent);
+            }
+
+            @Override
+            public <T> Bindable<T> onStart(ConfigurationPropertyName name, Bindable<T> target,
+                    BindContext context) {
+                if (COUNT.equals(name) && isBlank(name, context)) {
+                    return null;
+                }
+                return super.onStart(name, target, context);
+            }
+
+            private static boolean isBlank(ConfigurationPropertyName name, BindContext context) {
+                BindResult<String> resolved =
+                        context.getBinder().bind(name, Bindable.of(String.class));
+                return resolved.isBound() && resolved.get().isBlank();
+            }
+        }
     }
 }

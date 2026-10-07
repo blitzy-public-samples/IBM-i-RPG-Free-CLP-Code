@@ -33,15 +33,18 @@
  *    reports the composition key code 229, nothing happens: input methods use
  *    Enter and, for Japanese, F6–F10 to build text.
  * 2. **Chords pass through.** With Ctrl, Alt or Meta held nothing happens, so
- *    Ctrl+F5, Alt+F4 and every browser or system shortcut keep working.
+ *    Ctrl+F5, Alt+F4 and every browser or system shortcut keep working. Shift
+ *    makes a chord too, except with F1–F12 (step 3): Shift+Enter,
+ *    Shift+PageUp, Shift+PageDown, Shift+Escape and Shift with a physical
+ *    F13–F24 key are never prevented and never dispatched.
  * 3. **Command keys.** F1–F24 by their `key` names; with Shift, F1–F12 arrive
  *    as F13–F24, the 5250 keyboard convention; Escape arrives as F12, so one
  *    F12 binding cancels for both keys; Enter, PageUp and PageDown arrive as
- *    themselves, with Shift ignored. Every other key (Tab, Shift+Tab, the
- *    arrow keys, Home, End, Backspace, Delete, printable characters) is never
- *    prevented and never dispatched, so focus navigation and text entry work as
- *    in any web form. Home (AID x'F8') is a navigation key here, and the
- *    5250 mouse AIDs ME00–ME14 have no counterpart.
+ *    themselves. Every other key (Tab, Shift+Tab, the arrow keys, Home, End,
+ *    Backspace, Delete, printable characters) is never prevented and never
+ *    dispatched, so focus navigation and text entry work as in any web form.
+ *    Home (AID x'F8') is a navigation key here, and the 5250 mouse AIDs
+ *    ME00–ME14 have no counterpart.
  * 4. **No scope, no action.** With an empty stack nothing happens.
  * 5. **Topmost only.** Only the most recently pushed scope receives keys; every
  *    scope beneath it is suspended until the scopes above it are removed. A
@@ -157,8 +160,19 @@ const IME_PROCESS_KEY_CODE = 229;
 /**
  * Maps a keydown's `key` and Shift state to the command key it stands for, or
  * `null` when the key is not a command key and must pass through.
+ *
+ * Shift takes part only in the 5250 alias Shift+F1–F12 as F13–F24. Held with
+ * any other key it makes a modifier chord, which passes through: Shift+Enter,
+ * Shift+PageUp, Shift+PageDown, Shift+Escape and Shift with a physical
+ * F13–F24 key all map to `null`.
  */
 function toCommandKey(key: string, shiftKey: boolean): CommandKey | null {
+  const index = FUNCTION_KEY_INDEX.get(key);
+  if (shiftKey) {
+    return index !== undefined && index < SHIFT_OFFSET
+      ? (FUNCTION_KEYS[index + SHIFT_OFFSET] ?? null)
+      : null;
+  }
   switch (key) {
     case 'Escape':
       return 'F12';
@@ -169,12 +183,10 @@ function toCommandKey(key: string, shiftKey: boolean): CommandKey | null {
     default:
       break;
   }
-  const index = FUNCTION_KEY_INDEX.get(key);
   if (index === undefined) {
     return null;
   }
-  const effective = shiftKey && index < SHIFT_OFFSET ? index + SHIFT_OFFSET : index;
-  return FUNCTION_KEYS[effective] ?? null;
+  return FUNCTION_KEYS[index] ?? null;
 }
 
 /** Whether `key` is one of F1–F24 rather than Enter, PageUp or PageDown. */
@@ -210,12 +222,14 @@ function dispatchKeyDown(
     return;
   }
 
-  // 2. Browser and system shortcuts keep working.
+  // 2. Browser and system shortcuts keep working. Shift chords other than
+  //    Shift+F1–F12 are left untouched by `toCommandKey` below.
   if (event.ctrlKey || event.altKey || event.metaKey) {
     return;
   }
 
-  // 3. Only command keys go further; everything else is untouched.
+  // 3. Only command keys go further; everything else, Shift chords included,
+  //    is untouched.
   const key = toCommandKey(event.key, event.shiftKey);
   if (key === null) {
     return;

@@ -24,6 +24,7 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.ExitCodeGenerator;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -63,7 +64,12 @@ import org.springframework.stereotype.Component;
  *       order, prints {@code Unknown option --<name>}; failing that, the first non-option argument
  *       prints {@code Unknown option <arg>}. Spring Boot's own {@code --debug} and {@code --trace} are
  *       rejected too; {@code --logging.level...} likewise. Logging can still be tuned through
- *       {@code LOGGING_LEVEL_*} environment variables.</li>
+ *       {@code LOGGING_LEVEL_*} environment variables. Once every argument is accepted, the first
+ *       flag or {@code --customer-master.generator.*} option given without a value, in sorted order,
+ *       prints {@code Option --<name> requires a value}: a bare {@code --seed} would otherwise bind
+ *       as empty and select a default. An explicitly empty value ({@code --start-id=},
+ *       {@code --csz-file=}, {@code --seed=}) still selects the automatic start, the bundled sample or
+ *       a random seed, and a bare {@code --spring.*} option is accepted.</li>
  *   <li><b>Start id.</b> {@link #resolveStart(String, int)}: the given {@code --start-id}, otherwise
  *       {@code 1001} as LOADCUSTR, or {@code AAAA} when {@code count} exceeds the
  *       {@value #AUTO_AAAA_THRESHOLD} ids that remain from {@code 1001}.</li>
@@ -77,7 +83,9 @@ import org.springframework.stereotype.Component;
  *       {@link Clock}, truncated to microseconds, the precision of {@code chgtime timestamptz(6)}.</li>
  *   <li><b>Load.</b> {@link CustomerLoader#load(CustomerLoader.Plan)} replaces the table and restarts
  *       the id sequence in one transaction, which has committed when it returns. A lock not granted
- *       within the loader's 5-second {@code lock_timeout} prints {@code Cannot allocate CUSTMAST}.</li>
+ *       within the loader's 5-second {@code lock_timeout} prints {@code Cannot allocate CUSTMAST}; any
+ *       other load failure prints {@code Load failed: <cause>; verify custmast and custmast_id_seq before
+ *       retrying}.</li>
  *   <li><b>Statistics.</b> {@code ANALYZE custmast}, after the commit, as an auto-commit statement:
  *       this class is not transactional. A failure is logged at WARN and the run still succeeds,
  *       because the rows are committed.</li>
@@ -87,9 +95,15 @@ import org.springframework.stereotype.Component;
  * </ol>
  *
  * <p><b>Failure contract.</b> {@link #execute(ApplicationArguments)} never throws. Every failure
- * before step 6 has written nothing, and every failure in step 6 has been rolled back by the loader,
- * so the table, the sequence and the next interactive id are as they were. Printed lines never carry
- * a stack trace; the details go to the log. Nothing printed or logged carries a credential.
+ * before step 6 has written nothing. In step 6, a lock not granted and an invalid plan leave the
+ * table, the sequence and the next interactive id as they were, and so does every failure the loader's
+ * transaction rolled back, which restores the rows and the sequence together. A failure of the
+ * {@code COMMIT} itself, such as a connection lost before the commit was acknowledged, leaves the
+ * outcome unknown: the new rows and the restarted sequence may already be committed. Its exception
+ * type does not set it apart from a rolled-back statement failure, so every other step-6 failure is
+ * reported without a claim about the table, advising to verify {@code custmast} (row count, first and
+ * last {@code custid}) and {@code custmast_id_seq} before retrying. Printed lines never carry a stack
+ * trace; the details go to the log. Nothing printed or logged carries a credential.
  *
  * <p><b>Scope.</b> The runner touches the database only through {@link CustomerLoader} and the one
  * {@code ANALYZE}; id allocation and the sequence reset belong to {@code CustomerIdAllocator}, reached
@@ -100,12 +114,15 @@ import org.springframework.stereotype.Component;
  * <p><b>Registration.</b> The bean exists only under profile {@value #PROFILE}, and it is the only
  * registrar of {@link GeneratorProperties}, through {@link EnableConfigurationProperties}: the
  * application declares no properties scan, so the web and test contexts neither bind nor validate the
- * generator options. Tests may construct the runner directly and call
+ * generator options. Next to it, {@link Import} brings in {@code GeneratorProperties.BlankCountAdvisor},
+ * which binds an empty or whitespace-only count as the default 300, so that advisor too exists only
+ * in this context. Tests may construct the runner directly and call
  * {@link #execute(ApplicationArguments)} with {@code new DefaultApplicationArguments(...)}.
  */
 @Component
 @Profile(CustomerGeneratorRunner.PROFILE)
 @EnableConfigurationProperties(GeneratorProperties.class)
+@Import(GeneratorProperties.BlankCountAdvisor.class)
 public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGenerator {
 
     /** The Spring profile that turns the application into the generator CLI. */
@@ -154,8 +171,17 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     /** At most this many throwables of a cause graph are inspected, so a cyclic graph ends. */
     private static final int MAX_CAUSE_DEPTH = 64;
 
-    /** A line break with the blanks around it, replaced by one space in printed messages. */
+    /**
+     * A line break ({@code \R}: CR, LF, CR LF, VT, FF, NEL, U+2028 or U+2029) with the blanks around it,
+     * which {@link #oneLine(String)} folds into one space before it replaces the remaining controls.
+     */
     private static final Pattern LINE_BREAK = Pattern.compile("\\s*\\R\\s*");
+
+    /** U+2028, which some viewers render as a line break although it is no control character. */
+    private static final char LINE_SEPARATOR = '\u2028';
+
+    /** U+2029, which some viewers render as a line break although it is no control character. */
+    private static final char PARAGRAPH_SEPARATOR = '\u2029';
 
     /** Nanoseconds per second, for the elapsed time of the report line. */
     private static final double NANOS_PER_SECOND = 1_000_000_000.0;
@@ -241,8 +267,9 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     /**
      * Validates the options, loads the customers and prints exactly one outcome line.
      *
-     * @param args the parsed command line; its option names and non-option arguments are checked,
-     *             while the values themselves arrive already bound in {@link GeneratorProperties}
+     * @param args the parsed command line; its option names, its non-option arguments and whether
+     *             each generator option carries a value are checked, while the values themselves
+     *             arrive already bound in {@link GeneratorProperties}
      * @return {@value #EXIT_SUCCESS} when the rows are committed, otherwise {@value #EXIT_FAILURE};
      *         never throws
      */
@@ -302,10 +329,14 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     private int executeSteps(ApplicationArguments args) {
         Objects.requireNonNull(args, "args");
 
-        // 1. Strict options, before any work.
+        // 1. Strict options, before any work: unknown options and arguments first, then valueless ones.
         Optional<String> unknown = firstUnknownOption(args);
         if (unknown.isPresent()) {
             return fail("Unknown option " + unknown.get());
+        }
+        Optional<String> valueless = firstValuelessOption(args);
+        if (valueless.isPresent()) {
+            return fail("Option " + valueless.get() + " requires a value");
         }
 
         // 2. Start id: explicit, else 1001, else AAAA for a load that cannot fit above 1001.
@@ -323,9 +354,12 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
                     + (CustomerId.CAPACITY - start.toOrdinal()) + " ids remain through 9999");
         }
 
+        // The location comes from the command line or the environment: the raw value opens the file,
+        // and only its one-line form reaches the log and the outcome line.
         final String location = properties.cszLocation();
+        final String shownLocation = oneLine(location);
         LOG.info("generator.options count={} start={} cszFile={} mode={}",
-                count, start, location, properties.seed() != null ? "seeded" : "random");
+                count, start, shownLocation, properties.seed() != null ? "seeded" : "random");
 
         final long began = System.nanoTime();
         final long loaded;
@@ -334,7 +368,7 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
             // 4. City/state/ZIP rows, already filtered to cities of at most 20 and known states.
             List<CszSource.CszRow> rows = cszSource.load(location);
             if (rows.isEmpty()) {
-                return fail("CSZ file " + location + " has no usable rows");
+                return fail("CSZ file " + shownLocation + " has no usable rows");
             }
 
             // 5. The row generator, seeded when asked, stamping the load start.
@@ -381,6 +415,29 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
+     * Finds the first generator option given without a value, such as a bare {@code --seed}. Spring Boot
+     * binds a bare option as an empty value, which would select the automatic start id, the bundled
+     * sample or a random seed instead of the value the operator left out. An explicitly empty value
+     * such as {@code --seed=} carries a value and still selects that default, and a bare
+     * {@code --spring.*} option is not judged here.
+     *
+     * @param args the parsed command line
+     * @return {@code --<name>} for the first flag or fully qualified generator property, in sorted
+     *         order, that has no value, otherwise empty
+     */
+    static Optional<String> firstValuelessOption(ApplicationArguments args) {
+        for (String name : new TreeSet<>(args.getOptionNames())) {
+            if (isGeneratorOption(name)) {
+                List<String> values = args.getOptionValues(name);
+                if (values == null || values.isEmpty()) {
+                    return Optional.of("--" + oneLine(name));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Whether an option name is one of the four flags, a fully qualified generator property or a Spring
      * property.
      *
@@ -388,13 +445,38 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
      * @return {@code true} when the option is accepted
      */
     static boolean isAcceptedOption(String name) {
-        return FLAGS.contains(name)
-                || name.startsWith(GENERATOR_OPTION_PREFIX)
-                || name.startsWith(SPRING_OPTION_PREFIX);
+        return isGeneratorOption(name) || name.startsWith(SPRING_OPTION_PREFIX);
     }
 
     /**
-     * Maps a failure of steps 4 to 6 to its outcome line. The loader has rolled back, so nothing changed.
+     * Whether an option name sets a generator option: one of the four flags or a fully qualified
+     * generator property.
+     *
+     * @param name the option name without its leading {@code --}
+     * @return {@code true} for {@link #FLAGS} and names under {@value #GENERATOR_OPTION_PREFIX}
+     */
+    static boolean isGeneratorOption(String name) {
+        return FLAGS.contains(name) || name.startsWith(GENERATOR_OPTION_PREFIX);
+    }
+
+    /**
+     * Maps a failure of steps 4 to 6 to its outcome line. Only three failures are known to leave the
+     * table, the sequence and the next id as they were, and they print their own message:
+     * <ul>
+     *   <li>a {@link CszSource.CszFileException}, raised before any write;</li>
+     *   <li>a lock wait, which the server reports before any commit: the loader's
+     *       {@code ACCESS EXCLUSIVE} lock was not granted, so nothing was truncated, or a later
+     *       statement's wait expired and Spring rolled the transaction back; it prints
+     *       {@value #LOCK_FAILURE_MESSAGE};</li>
+     *   <li>an {@link IllegalArgumentException}, raised before the load or inside its transaction, which
+     *       Spring then rolled back: a rollback that fails surfaces as its own exception instead.</li>
+     * </ul>
+     * Any other failure may come from the {@code COMMIT} itself, and its type does not tell: a connection
+     * lost before the commit was acknowledged leaves the outcome unknown, so the new rows and the
+     * restarted sequence may already be committed. It is logged at ERROR with the exception, claiming
+     * nothing about the table, and both that log line and the printed
+     * {@code Load failed: <cause>; verify custmast and custmast_id_seq before retrying} advise checking
+     * the database before a retry.
      *
      * @param failure the exception the CSZ read, the generator setup or the load raised
      * @return the line to print
@@ -412,8 +494,13 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
         if (failure instanceof IllegalArgumentException) {
             return messageOf(failure);
         }
-        LOG.error("generator.load failed; custmast and its id sequence are unchanged", failure);
-        return "Load failed: " + rootMessage(failure);
+        // By type, a statement failure the loader rolled back looks the same as a failed COMMIT, whose
+        // result is unknown when the acknowledgement was lost; so claim nothing about the table here.
+        LOG.error("generator.load failed; if the COMMIT itself failed, for example on a connection lost before"
+                + " the commit was acknowledged, the outcome is unknown and the new rows and the restarted id"
+                + " sequence may already be committed; verify custmast (row count, first and last custid) and"
+                + " custmast_id_seq against this run's count and start before retrying", failure);
+        return "Load failed: " + rootMessage(failure) + "; verify custmast and custmast_id_seq before retrying";
     }
 
     /**
@@ -483,12 +570,15 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
-     * Prints one outcome line and flushes it, so it is visible before the JVM exits.
+     * Prints one outcome line and flushes it, so it is visible before the JVM exits. This is the printed
+     * boundary: the line passes through {@link #oneLine(String)} here, so whatever option, location or
+     * exception text it embeds, exactly one line reaches the stream and it carries no control character.
+     * A line without control characters prints unchanged.
      *
-     * @param line the line, already free of line breaks
+     * @param line the outcome line
      */
     private void report(String line) {
-        out.println(line);
+        out.println(oneLine(line));
         out.flush();
     }
 
@@ -496,20 +586,23 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
      * Returns a throwable's own message on one line.
      *
      * @param failure the throwable
-     * @return its message with line breaks replaced by spaces, or its root-cause message when it has none
+     * @return its message through {@link #oneLine(String)}, or its root-cause message when it has none
+     *         or nothing is left of it on one line
      */
     static String messageOf(Throwable failure) {
         String message = failure.getMessage();
-        return message == null || message.isBlank() ? rootMessage(failure) : oneLine(message);
+        String line = message == null ? "" : oneLine(message);
+        return line.isEmpty() ? rootMessage(failure) : line;
     }
 
     /**
      * Returns the message of the deepest cause on one line: the root cause names what actually failed,
-     * for example the PostgreSQL error behind Spring's wrapper. When the root has no message, the
-     * nearest throwable above it that has one is used, and failing that the root's simple class name.
+     * for example the PostgreSQL error behind Spring's wrapper. When nothing is left of the root's
+     * message on one line, the nearest throwable above it with such a message is used, and failing that
+     * the root's simple class name.
      *
      * @param failure the throwable
-     * @return a non-blank single-line message
+     * @return a non-blank single-line message, free of control characters
      */
     static String rootMessage(Throwable failure) {
         Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -525,20 +618,36 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
         Throwable root = chain.peek();
         for (Throwable candidate : chain) {
             String message = candidate.getMessage();
-            if (message != null && !message.isBlank()) {
-                return oneLine(message);
+            String line = message == null ? "" : oneLine(message);
+            if (!line.isEmpty()) {
+                return line;
             }
         }
         return root.getClass().getSimpleName();
     }
 
     /**
-     * Replaces every line break, with the blanks around it, by one space and trims the result.
+     * Puts text on one line for a log argument or a printed line, so that neither can be split, forged
+     * or turned into a terminal control sequence, whatever a file name, option or exception message
+     * holds. Every line break, with the blanks around it, becomes one space; every remaining ISO control
+     * character ({@link Character#isISOControl(char)}: U+0000 to U+001F and U+007F to U+009F, so TAB,
+     * ESC, NUL and the C1 controls such as CSI) and U+2028 or U+2029 becomes a space, the rule
+     * {@code CszSource} applies to its messages; leading and trailing blanks are stripped. Other
+     * characters are kept, so text without control characters changes only by that strip.
      *
      * @param text the text
-     * @return the text on one line
+     * @return the text on one line, free of control characters; empty when nothing else is left
      */
     static String oneLine(String text) {
-        return LINE_BREAK.matcher(text).replaceAll(" ").strip();
+        final String folded = LINE_BREAK.matcher(text).replaceAll(" ");
+        final StringBuilder line = new StringBuilder(folded.length());
+        for (int i = 0; i < folded.length(); i++) {
+            final char c = folded.charAt(i);
+            final boolean lineBreaking = Character.isISOControl(c)
+                    || c == LINE_SEPARATOR
+                    || c == PARAGRAPH_SEPARATOR;
+            line.append(lineBreaking ? ' ' : c);
+        }
+        return line.toString().strip();
     }
 }

@@ -110,9 +110,10 @@ button {
  *   browser. max-inline-size only stops overflow on narrow screens.
  * - No CSS case transform: src/components/upperField.ts uppercases the real
  *   value as it is typed, so what is shown is exactly what is submitted.
- * - :where() keeps this rule at element specificity, so .read-only and the
- *   [aria-invalid] reverse image below override it by source order alone.
- *   Checkboxes and radios keep their native rendering.
+ * - :where() keeps this rule at element specificity, so .read-only,
+ *   input[readonly], textarea[readonly] and the [aria-invalid] reverse image
+ *   below override it on specificity, wherever they sit. Checkboxes and
+ *   radios keep their native rendering.
  */
 input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])),
 select,
@@ -176,6 +177,29 @@ button:not(:disabled):active {
   background: var(--color-surface);
   cursor: not-allowed;
   opacity: 1;
+}
+
+/*
+ * Enabled editable fields. Hover (only where a real pointer hovers, so touch
+ * taps leave no sticky state) darkens the outline to --color-fg (15.8:1 on
+ * bg, 14.84:1 on surface), as button hover does; pressed turns the outline to
+ * --color-accent (7.59:1 / 7.13:1), distinct from hover and from the
+ * --color-focus ring. The pressed rule follows the hover rule, so a press
+ * under the pointer shows the pressed image. The zero-specificity :where()
+ * exclusions leave only :hover or :active in the specificity and skip
+ * disabled, read-only and reverse-image ([aria-invalid]) fields, so their own
+ * treatment holds in every state. The universal :focus-visible ring is
+ * untouched; text colour and background do not change. Checkboxes and radios
+ * stay native.
+ */
+@media (hover: hover) {
+  :where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):where(:not(:disabled, [readonly], .read-only, [aria-invalid="true"])):hover {
+    border-color: var(--color-fg);
+  }
+}
+
+:where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):where(:not(:disabled, [readonly], .read-only, [aria-invalid="true"])):active {
+  border-color: var(--color-accent);
 }
 
 /* The underline keeps colour from being the only sign of a link. */
@@ -551,6 +575,7 @@ dialog::backdrop {
 /*
  * Protected values (DSPATR(PR) + HI): display mode and the confirmation
  * panel. Read-only inputs stay focusable, so the focus ring still applies.
+ * resize: none drops a protected textarea's grip; nothing else here resizes.
  */
 .read-only,
 input[readonly],
@@ -560,6 +585,7 @@ textarea[readonly] {
   color: var(--color-fg);
   background: transparent;
   border-color: transparent;
+  resize: none;
 }
 
 /*
