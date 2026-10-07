@@ -1,0 +1,18 @@
+# Profile "test" overlay of application.yml; the database URL and credentials come from Testcontainers @ServiceConnection.
+customer-master:
+  security:
+    users:
+      - username: inq
+        password: inq-pw
+        role: INQUIRY
+      - username: maint
+        password: maint-pw
+        role: MAINTENANCE
+      - username: maint2
+        password: maint2-pw
+        role: MAINTENANCE
+  address:
+    enabled: true
+    client: stub
+  db:
+    lock-timeout: 1s

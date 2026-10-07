@@ -16,22 +16,27 @@
 -- Definition: the ICU root collation ('und') with one tailoring rule,
 --   &[before 1]α<0<1<2<3<4<5<6<7<8<9
 -- which gives the ASCII digits 0..9, in that order, primary weights after
--- every Latin letter and before Greek (α) and Cyrillic. Only the ASCII digits
--- move: other digit forms (superscript, Arabic-Indic, fullwidth) keep their
--- ICU root position before letters. The α stays a literal character, because
--- ICU tailoring rules read the escape \u03B1 as the text u03B1.
+-- every Latin letter and before Greek (α) and Cyrillic. The α stays a literal
+-- character, because ICU tailoring rules read the escape \u03B1 as the text
+-- u03B1.
 --
 -- Contract: comparison (=, <, >, row comparisons), ORDER BY and B-tree index
 -- order give one order, with the ASCII digits after every Latin letter.
 -- Keyset pagination (the row comparison over custmast_search_keyset) and
 -- index scans depend on comparison and sort order agreeing.
 --
--- The reorder locale 'und-u-kr-latn-digit' is not used: with ICU 76.1 in the
--- pinned postgres:18.6 image, its comparison of text in U+0000..U+017F skips
--- the digit reorder that its sort keys apply, so comparisons, row comparisons
--- and B-tree order put digits before letters while ORDER BY puts them after.
--- Check: under a collation with that locale, 'A' < '0' is false, yet ORDER BY
--- puts 'A' first.
+-- The reorder locale 'und-u-kr-latn-digit' named in the design is not used:
+-- with ICU 76.1 in the pinned postgres:18.6 image, its comparison of text in
+-- U+0000..U+017F skips the digit reorder that its sort keys apply, so
+-- comparisons, row comparisons and B-tree order put digits before letters
+-- while ORDER BY puts them after. Under a collation with that locale,
+-- 'A' < '0', 'ZZZZ' < '0000' and '101A' < '1010' are all false although
+-- ORDER BY puts the left value first, and the primary-key range
+-- WHERE custid > 'ZZZZ' returns no rows instead of 0000, 101A, 1010.
+--
+-- Verification: a check of this collation must cover '<' comparisons, row
+-- comparisons and an index range scan as well as ORDER BY, because the
+-- reorder locale passes an ORDER BY check and fails the others.
 --
 -- Deterministic on purpose (the default): the regex CHECK on custid (V3) and
 -- LIKE prefix scans over the varchar_pattern_ops indexes need a deterministic
@@ -42,8 +47,15 @@
 -- customer_sort columns, then run ALTER COLLATION customer_sort REFRESH VERSION.
 -- The pinned postgres:18.6 image prevents unplanned drift.
 --
--- Known difference: among punctuation, ICU order differs from EBCDIC code-point
--- order (recorded in docs/deviations-and-open-questions.md).
+-- Known differences, recorded in docs/deviations-and-open-questions.md
+-- (intentional differences) and in the ICU note of docs/developer-guide.md:
+--   - This rules-based definition replaces the reorder locale (see above).
+--   - Only the ASCII digits move. Non-ASCII digits (fullwidth, Arabic-Indic,
+--     superscript) keep their ICU root position before Latin letters, while
+--     ORDER BY under the reorder locale puts them after. Measured on
+--     postgres:18.6: customer_sort orders ０ ١ ² ９ A Z 0 Ω, the reorder
+--     locale A Z 0 ０ ١ ² ９ Ω.
+--   - Among punctuation, ICU order differs from EBCDIC code-point order.
 --
 -- The name is unqualified: Flyway creates it in the migration schema (DB_SCHEMA).
 
