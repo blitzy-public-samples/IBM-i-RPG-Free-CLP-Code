@@ -17,12 +17,22 @@ spring:
     # The schema comes from DB_SCHEMA; no SQL script selects a library or schema.
     url: jdbc:postgresql://${DB_HOST:db}:${DB_PORT:5432}/${DB_NAME:customermaster}?currentSchema=${DB_SCHEMA:customer_master}
     # One role runs Flyway, the API and the generator, and owns custmast_id_seq.
+    # No default: config.DataSourceCredentialsGuard stops startup when either is empty.
     username: ${DB_USER:}
     password: ${DB_PASSWORD:}
     hikari:
       # Keeps unqualified names resolving when Testcontainers @ServiceConnection
       # replaces the URL with one that carries no currentSchema.
       schema: ${DB_SCHEMA:customer_master}
+      # Longest wait, in ms, for a pooled connection (Hikari's default is 30000).
+      # It bounds the borrow of the db check of /actuator/health/readiness while
+      # PostgreSQL is unreachable.
+      connection-timeout: 5000
+      # Longest aliveness check, in ms, of a connection: the pool's check before it
+      # hands one out, and the db check's own validation of the connection it holds
+      # (config.BoundedDataSourceHealthIndicator, rounded up to whole seconds).
+      # Hikari requires it below connection-timeout.
+      validation-timeout: 2000
   flyway:
     schemas: ${DB_SCHEMA:customer_master}
     # V1-V4 only. Compose sets SPRING_FLYWAY_LOCATIONS to add classpath:db/seed (V5).
@@ -64,6 +74,19 @@ management:
       probes:
         # /actuator/health/readiness backs the Compose app healthcheck.
         enabled: true
+      group:
+        readiness:
+          # Ready only while PostgreSQL answers ("db" is the DataSource check):
+          # readiness turns 503 when the database is lost and UP once it returns.
+          # Worst-case answer, about 9s: connection-timeout (5s), plus a pool
+          # aliveness check started just before it expires (validation-timeout,
+          # 2s), plus the db check's validation (2s). That stays below Spring
+          # Boot's 10s slow-indicator threshold and Docker's default 30s
+          # healthcheck timeout.
+          include: readinessState,db
+        liveness:
+          # Process state only, so a database outage never reports the app as broken.
+          include: livenessState
 
 springdoc:
   api-docs:

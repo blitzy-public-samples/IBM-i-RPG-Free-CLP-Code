@@ -294,6 +294,10 @@ public class CustomerSearchService {
     /**
      * Resolves the requested page size.
      *
+     * <p>The default needs no check here: {@code AppProperties.Search} is validated at startup to
+     * hold {@code 1 <= defaultSize <= maxSize <= Integer.MAX_VALUE - 1}, so the result, and the
+     * look-ahead {@code size + 1} the caller derives from it, always fit an {@code int}.
+     *
      * @param size        the requested size, or {@code null}
      * @param maxSize     the largest size accepted
      * @param defaultSize the size used when none is requested

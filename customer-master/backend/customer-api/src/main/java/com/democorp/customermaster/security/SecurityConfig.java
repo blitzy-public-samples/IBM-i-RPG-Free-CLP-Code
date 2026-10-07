@@ -194,8 +194,9 @@ public class SecurityConfig {
      * {@code ROLE_INQUIRY} or {@code ROLE_MAINTENANCE}.
      *
      * <p>{@link UsersProperties} has already been validated when this method runs: at least one user,
-     * unique usernames of 1 to 18 allowed characters, never {@code *SYSTEM*}, a non-blank password and
-     * a role each. The store returns the configured username, which {@code CurrentUser} stamps into
+     * unique usernames of 1 to 18 allowed characters, never {@code *SYSTEM*}, a non-blank password of
+     * at most {@value UsersProperties#MAX_PASSWORD_BYTES} UTF-8 bytes, the most BCrypt encodes, and a
+     * role each. The store returns the configured username, which {@code CurrentUser} stamps into
      * {@code chguser}. Only the number of users per role is logged, never a username or a password.
      *
      * @param usersProperties the validated users from {@code customer-master.security.users}

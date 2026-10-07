@@ -1,6 +1,8 @@
 package com.democorp.customermaster.config;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
@@ -16,6 +18,9 @@ import org.springframework.validation.annotation.Validated;
  * {@code @EnableConfigurationProperties}. The {@code customer-master.security.*},
  * {@code customer-master.generator.*} and {@code customer-master.address.*} settings belong to
  * {@code UsersProperties}, {@code GeneratorProperties} and {@code AddressValidationProperties}.
+ * The prefix stays lenient for those siblings, but a key under {@code customer-master.db} or
+ * {@code customer-master.search} that this class does not bind, such as a misspelt
+ * {@code db.lock-timout}, fails startup naming the key ({@link AppPropertiesUnknownKeyAdvisor}).
  *
  * <p>The values replace these IBM i constants and conditions:
  * <ul>
@@ -53,16 +58,40 @@ public record AppProperties(@DefaultValue @Valid Db db, @DefaultValue @Valid Sea
     /**
      * Customer search settings.
      *
+     * <p>Validated when the application starts, so {@code CustomerSearchService} relies on them
+     * without further checks:
+     * <ul>
+     *   <li>every value is at least 1;</li>
+     *   <li>{@code default-size} is not greater than {@code max-size}, so a request without
+     *       {@code size} gets a page that an explicit {@code size} could also ask for
+     *       ({@link #isDefaultSizeWithinMaxSize()});</li>
+     *   <li>{@code max-size} is at most {@code Integer.MAX_VALUE - 1} (2147483646), so the
+     *       look-ahead {@code LIMIT size + 1} of every page stays within an {@code int}.</li>
+     * </ul>
+     *
      * @param defaultSize {@code customer-master.search.default-size}: rows per page when the
-     *                    request gives no {@code size} (PMTCUSTR {@code SFLPAGESIZE})
+     *                    request gives no {@code size} (PMTCUSTR {@code SFLPAGESIZE}); 1 to
+     *                    {@code max-size}
      * @param maxSize     {@code customer-master.search.max-size}: the largest {@code size} a
-     *                    request may ask for
+     *                    request may ask for; 1 to 2147483646
      * @param maxRows     {@code customer-master.search.max-rows}: rows served across all pages of
      *                    one search before it stops with DEM0006 (PMTCUSTR {@code MAXSFLRECDS})
      */
     public record Search(
             @DefaultValue("12") @Min(1) int defaultSize,
-            @DefaultValue("100") @Min(1) int maxSize,
+            @DefaultValue("100") @Min(1) @Max(Integer.MAX_VALUE - 1) int maxSize,
             @DefaultValue("9999") @Min(1) int maxRows) {
+
+        /**
+         * Checks that the default page size is one an explicit {@code size} could also ask for.
+         * The message names both settings and neither value.
+         *
+         * @return {@code true} when {@code defaultSize <= maxSize}
+         */
+        @AssertTrue(message = "customer-master.search.default-size must not be greater than "
+                + "customer-master.search.max-size")
+        public boolean isDefaultSizeWithinMaxSize() {
+            return defaultSize <= maxSize;
+        }
     }
 }

@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -56,6 +57,11 @@ import org.springframework.validation.annotation.Validated;
  *       users by their lower-cased name, so {@code Sales} and {@code sales} would collide there.</li>
  *   <li>Every user has a non-blank password and a role. An unknown role name already fails enum
  *       conversion while binding.</li>
+ *   <li>A password is at most {@value #MAX_PASSWORD_BYTES} bytes in UTF-8, the most BCrypt encodes;
+ *       a longer one would otherwise fail later, inside {@code SecurityConfig}, with an error naming
+ *       no setting. The check is the derived property {@code passwordWithinEncoderLimit}, so the
+ *       failure names {@code customer-master.security.users[i]} and reports the value
+ *       {@code false}, never the password.</li>
  * </ul>
  *
  * <p><b>Passwords.</b> They are held here only as configured. {@code SecurityConfig} BCrypt-encodes
@@ -87,6 +93,13 @@ public record UsersProperties(@NotEmpty @Valid List<@NotNull User> users) {
 
     /** Change stamp reserved for the seed rows and the test-data generator. */
     public static final String SYSTEM_USER = "*SYSTEM*";
+
+    /**
+     * Longest password BCrypt encodes, in UTF-8 bytes. Spring Security's {@code BCrypt.hashpw}
+     * rejects a longer one with {@code "password cannot be more than 72 bytes"}, so a character
+     * outside ASCII counts for two to four of these bytes.
+     */
+    public static final int MAX_PASSWORD_BYTES = 72;
 
     /**
      * Copies the bound list into an unmodifiable one.
@@ -133,8 +146,9 @@ public record UsersProperties(@NotEmpty @Valid List<@NotNull User> users) {
      *                 {@value UsersProperties#MAX_USERNAME_LENGTH} characters matching
      *                 {@value UsersProperties#USERNAME_PATTERN}, never
      *                 {@value UsersProperties#SYSTEM_USER}
-     * @param password the password as configured; non-blank, encoded by {@code SecurityConfig} at
-     *                 startup and never printed by {@link #toString()}
+     * @param password the password as configured; non-blank, at most
+     *                 {@value UsersProperties#MAX_PASSWORD_BYTES} bytes in UTF-8, encoded by
+     *                 {@code SecurityConfig} at startup and never printed by {@link #toString()}
      * @param role     the single role granted to the user
      */
     public record User(
@@ -155,6 +169,26 @@ public record UsersProperties(@NotEmpty @Valid List<@NotNull User> users) {
         @AssertTrue(message = "username must not be " + SYSTEM_USER)
         public boolean isNotSystemUser() {
             return username == null || !SYSTEM_USER.equalsIgnoreCase(username.trim());
+        }
+
+        /**
+         * Whether the password fits BCrypt's input limit of
+         * {@value UsersProperties#MAX_PASSWORD_BYTES} UTF-8 bytes.
+         *
+         * <p>Validated as the bean property {@code passwordWithinEncoderLimit} rather than as a
+         * constraint on {@code password}, because a binding-failure report prints the rejected value
+         * of the property it names: here that value is {@code false}, never the password. A missing
+         * password passes here, because {@code @NotBlank} reports it. The bytes are counted with
+         * {@link StandardCharsets#UTF_8}, the encoding {@code BCrypt.hashpw} applies.
+         *
+         * @return {@code true} unless the password is longer than
+         *     {@value UsersProperties#MAX_PASSWORD_BYTES} bytes in UTF-8
+         */
+        @AssertTrue(message = "password must be at most " + MAX_PASSWORD_BYTES
+                + " bytes in UTF-8, the most BCrypt encodes")
+        public boolean isPasswordWithinEncoderLimit() {
+            return password == null
+                    || password.getBytes(StandardCharsets.UTF_8).length <= MAX_PASSWORD_BYTES;
         }
 
         /**
