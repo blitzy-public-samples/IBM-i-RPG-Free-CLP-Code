@@ -24,13 +24,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Specifies {@link StorableText} and {@link StorableTextValidator}: a request text value is rejected
- * when it contains U+0000 (NUL), which a PostgreSQL text column cannot store, and accepted otherwise,
- * {@code null} included.
+ * when it contains U+0000 (NUL), which a PostgreSQL text column cannot store, or an unpaired surrogate,
+ * which the driver would store as {@code ?}, and accepted otherwise, {@code null} and well-formed
+ * surrogate pairs included.
  *
  * <p>Two levels are covered. The validator alone decides on single values. Hibernate Validator, the
  * provider Spring MVC uses for {@code @Valid} bodies, then checks the three customer request records:
- * each of their nine text components rejects a NUL with exactly one {@code StorableText} violation on
- * that property, {@code null} passes so the business rules still see absent fields, and
+ * each of their nine text components rejects a NUL or an unpaired surrogate with exactly one
+ * {@code StorableText} violation on that property, {@code null} passes so the business rules still see
+ * absent fields, and
  * {@code version} and {@code purpose} are not constrained by it. The simple name {@code StorableText}
  * is the constraint code {@code ApiExceptionHandler} phrases as "contains a character that cannot be
  * stored".
@@ -38,12 +40,18 @@ import org.junit.jupiter.params.provider.ValueSource;
  * <p>Strings with a NUL are written with the octal escape {@code \0}, never followed by an octal
  * digit. Pure JUnit 5 and AssertJ: no Spring context, no database, no Docker.
  */
-@DisplayName("StorableText: request text must not contain U+0000")
+@DisplayName("StorableText: request text must not contain U+0000 or an unpaired surrogate")
 final class StorableTextValidatorTest {
 
     /** The nine text components every customer request record declares, in JSON order. */
     private static final List<String> TEXT_COMPONENTS = List.of("name", "addr", "city", "state", "zip",
             "corpPhone", "acctMgr", "acctPhone", "active");
+
+    /** A high surrogate, the first half of a supplementary character. */
+    private static final char HIGH = '\uD800';
+
+    /** A low surrogate, the second half of a supplementary character. */
+    private static final char LOW = '\uDC00';
 
     /** One provider for the whole class; closed in {@link #closeValidator()}. */
     private static ValidatorFactory factory;
@@ -73,10 +81,36 @@ final class StorableTextValidatorTest {
 
     @ParameterizedTest(name = "[{index}] valid: {0}")
     @ValueSource(strings = {"", " ", "ACME INC", "NIBH L'LOR COMPANY", "\\NUNC\\", "STRAßE", "É", "\t",
-        "A\1B", "\u007F", "\uD83D\uDE00", "0", "\uFFFF"})
-    @DisplayName("text without U+0000 is valid, other control characters included")
+        "A\1B", "\u007F", "\uD83D\uDE00", "0", "\uFFFF", "\uD800\uDC00", "\uDBFF\uDFFF",
+        "A\uD83D\uDE00B\uD83D\uDE00"})
+    @DisplayName("text without U+0000 or an unpaired surrogate is valid, control characters and pairs included")
     void textWithoutNulIsValid(String value) {
         assertThat(storable.isValid(value, null)).isTrue();
+    }
+
+    @ParameterizedTest(name = "[{index}] invalid: {1}")
+    @MethodSource("unpairedSurrogates")
+    @DisplayName("text with an unpaired surrogate anywhere is invalid")
+    void textWithUnpairedSurrogateIsInvalid(String value, String description) {
+        assertThat(storable.isValid(value, null)).as(description).isFalse();
+    }
+
+    static Stream<Arguments> unpairedSurrogates() {
+        String pair = "\uD83D\uDE00";
+        return Stream.of(
+                Arguments.of("" + HIGH, "a lone high surrogate"),
+                Arguments.of("" + LOW, "a lone low surrogate"),
+                Arguments.of(HIGH + "ABC", "a high surrogate at the start"),
+                Arguments.of("QA " + HIGH + "X", "a high surrogate in the middle"),
+                Arguments.of("ABC" + HIGH, "a high surrogate at the end"),
+                Arguments.of(LOW + "ABC", "a low surrogate at the start"),
+                Arguments.of("AB" + LOW + "C", "a low surrogate in the middle"),
+                Arguments.of("ABC" + LOW, "a low surrogate at the end"),
+                Arguments.of("" + LOW + HIGH, "a reversed pair"),
+                Arguments.of("" + HIGH + HIGH, "two high surrogates"),
+                Arguments.of("" + HIGH + HIGH + LOW, "a high surrogate before a pair"),
+                Arguments.of(pair + LOW, "a low surrogate after a pair"),
+                Arguments.of(pair + HIGH, "a high surrogate after a pair"));
     }
 
     @ParameterizedTest(name = "[{index}] invalid at {1} of {2}")
@@ -104,6 +138,8 @@ final class StorableTextValidatorTest {
         assertThat(storable.isValid(new StringBuilder("AB").append(StorableTextValidator.NUL), null))
                 .isFalse();
         assertThat(storable.isValid(new StringBuilder("AB"), null)).isTrue();
+        assertThat(storable.isValid(new StringBuilder("AB").append(HIGH), null)).isFalse();
+        assertThat(storable.isValid(new StringBuilder("AB").append(HIGH).append(LOW), null)).isTrue();
     }
 
     @ParameterizedTest(name = "[{index}] {0}")
@@ -140,6 +176,25 @@ final class StorableTextValidatorTest {
 
     @ParameterizedTest(name = "[{index}] {0}.{1}")
     @MethodSource("recordProperties")
+    @DisplayName("an unpaired surrogate in one text component is exactly one StorableText violation there")
+    void rejectsUnpairedSurrogatePerProperty(Class<? extends Record> type, String property)
+            throws ReflectiveOperationException {
+        // One code point, so it is within every column size, active's 1 included: only StorableText fails.
+        Record request = build(type, property, String.valueOf(HIGH));
+
+        Set<ConstraintViolation<Record>> violations = validator.validate(request);
+
+        assertThat(violations).singleElement().satisfies(violation -> {
+            assertThat(violation.getPropertyPath()).hasToString(property);
+            assertThat(violation.getConstraintDescriptor().getAnnotation().annotationType())
+                    .isEqualTo(StorableText.class);
+            assertThat(violation.getMessage()).isEqualTo("contains a character that cannot be stored");
+        });
+    }
+
+
+    @ParameterizedTest(name = "[{index}] {0}.{1}")
+    @MethodSource("recordProperties")
     @DisplayName("an ordinary value in one text component raises no violation")
     void acceptsOrdinaryValuePerProperty(Class<? extends Record> type, String property)
             throws ReflectiveOperationException {
@@ -155,14 +210,14 @@ final class StorableTextValidatorTest {
 
     @Test
     @DisplayName("a value that is both too long and contains NUL reports both constraints")
-    void reportsSizeAndStorableTextTogether() {
+    void reportsLengthAndStorableTextTogether() {
         CustomerFields fields = new CustomerFields("A".repeat(40) + StorableTextValidator.NUL, null, null,
                 null, null, null, null, null, null);
 
         assertThat(validator.validate(fields))
                 .extracting(violation -> violation.getConstraintDescriptor().getAnnotation().annotationType()
                         .getSimpleName())
-                .containsExactlyInAnyOrder("Size", "StorableText");
+                .containsExactlyInAnyOrder("CodePointLength", "StorableText");
     }
 
     static Stream<Arguments> recordProperties() {

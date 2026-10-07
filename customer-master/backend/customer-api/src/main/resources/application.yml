@@ -59,6 +59,9 @@ spring:
       # This switch does not cover the reverse, a JSON number or boolean for a text field
       # (name 123, active true); config.StrictJsonBindingConfig rejects that: 400 APP0400.
       allow-coercion-of-scalars: false
+    parser:
+      # A member given twice in one object ({"name":...,"name":...}), at any depth, is rejected: 400 APP0400.
+      strict-duplicate-detection: true
 
 server:
   error:

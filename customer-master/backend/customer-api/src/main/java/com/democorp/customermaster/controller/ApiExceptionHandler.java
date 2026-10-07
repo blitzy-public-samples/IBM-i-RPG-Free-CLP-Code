@@ -762,7 +762,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * Returns the cause of an unreadable body from the Jackson failure in its cause chain: an unknown
      * property names the property but is no field of the request, so it carries no field; a value Jackson
      * could not bind names the path of the property, which is the field; anything else, including invalid
-     * JSON syntax, trailing content and a missing body, is {@value #REASON_MALFORMED_BODY} with no field.
+     * JSON syntax, trailing content, a member given twice in one object (the parser's
+     * {@code strict-duplicate-detection}) and a missing body, is {@value #REASON_MALFORMED_BODY} with no
+     * field.
      *
      * @param ex the exception
      * @return the cause
@@ -939,14 +941,16 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * default message.
      *
      * @param code the constraint code, such as {@code NotNull}; may be empty
-     * @return {@code is required}, {@code is too long}, {@code has an invalid format},
-     *     {@code contains a character that cannot be stored} (a U+0000 that
+     * @return {@code is required}, {@code is too long} (a {@code Size} maximum, or a
+     *     {@code CodePointLength} maximum, which counts characters as the column does),
+     *     {@code has an invalid format}, {@code contains a character that cannot be stored} (a
+     *     character a text column cannot hold, which
      *     {@link com.democorp.customermaster.controller.dto.StorableText} rejects) or {@code is invalid}
      */
     private static String constraintPhrase(String code) {
         return switch (code) {
             case "NotNull" -> "is required";
-            case "Size" -> "is too long";
+            case "Size", "CodePointLength" -> "is too long";
             case "Pattern" -> "has an invalid format";
             case "StorableText" -> "contains a character that cannot be stored";
             default -> "is invalid";

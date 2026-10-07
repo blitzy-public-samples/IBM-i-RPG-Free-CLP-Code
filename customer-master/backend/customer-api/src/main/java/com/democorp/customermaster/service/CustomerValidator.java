@@ -73,7 +73,8 @@ import org.springframework.stereotype.Component;
  *       value before calling {@link #validate(Customer)}. A value that is present, even blank, is
  *       checked as given.</li>
  *   <li>It enforces no ZIP or phone format and no length; the source has no format rule, and
- *       lengths are enforced by the request DTOs ({@code @Size}, 400 APP0400).</li>
+ *       lengths are enforced by the request DTOs ({@code @CodePointLength}, in characters as the
+ *       columns count them, 400 APP0400).</li>
  *   <li>It builds no message text. {@code ProblemFactory} renders {@code detail} from the catalog
  *       using the exception's {@code code} and {@code args}, and the exception message is the code
  *       alone, so no value the user typed reaches an exception message or a log line.</li>

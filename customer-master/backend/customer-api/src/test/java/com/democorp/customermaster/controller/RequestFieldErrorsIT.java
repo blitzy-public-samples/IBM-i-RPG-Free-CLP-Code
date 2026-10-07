@@ -14,6 +14,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -37,11 +38,21 @@ import org.springframework.http.ResponseEntity;
  * and reject a longer entry with the same APP0400 shape, reason "{field} must be at most {n}
  * characters", so an entry of supplementary characters at the width is accepted and one more is not.
  *
+ * <p><b>Body widths.</b> The nine text fields of review, add and update are limited to their column
+ * width in characters ({@code @CodePointLength}), as {@code varchar(n)} counts them. A 40-character
+ * name ending in U+1F600 (41 UTF-16 units), or 21 or 40 of U+1F600, is accepted and stored with that
+ * {@code char_length}; one character more is 400 APP0400 "{field} is too long" on that field.
+ *
  * <p><b>U+0000.</b> PostgreSQL text columns cannot hold NUL. Before {@code @StorableText}, a review
  * echoed such a value with 200 and an add failed at the {@code INSERT} as 500 DEM9999 after consuming
  * the allocated id. Each of the nine text fields of review, add and update is now rejected with 400
  * APP0400 on that field before the service runs, so no id is consumed: the next valid add still gets
  * {@link DatabaseCleaner#FIRST_INTERACTIVE_ID}.
+ *
+ * <p><b>Unpaired surrogates.</b> A JSON escape of a lone high or low surrogate binds to a Java string
+ * the driver cannot encode, so it stored {@code ?} instead: a review answered 200 and an add 201 echoing
+ * a value other than the one stored. The same nine fields now reject it as U+0000 is rejected, while a
+ * high and a low escape in order are one supplementary character, accepted and stored.
  *
  * <p><b>Unchanged business rules.</b> A blank or missing field still reaches {@code CustomerValidator}
  * (422 DEM0502), and an add without {@code active} still stores {@code Y}.
@@ -70,6 +81,12 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
 
     /** U+1F600, one code point held in two UTF-16 units; the client encodes it as UTF-8 in the query. */
     private static final String EMOJI = new String(Character.toChars(0x1F600));
+
+    /** In a body map, stands for the JSON escape of the high surrogate U+D800; see {@link #withSurrogateEscapes}. */
+    private static final String HIGH_SURROGATE = "~high-surrogate~";
+
+    /** In a body map, stands for the JSON escape of the low surrogate U+DC00; see {@link #withSurrogateEscapes}. */
+    private static final String LOW_SURROGATE = "~low-surrogate~";
 
     /** The reason {@code CustomerSearchService} gives for a {@code name} filter over 13 code points. */
     private static final String SEARCH_FILTER_TOO_LONG = "name must be at most 13 characters";
@@ -247,6 +264,121 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Body widths, counted in characters
+    // ---------------------------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "[{index}] {0} of {2} characters")
+    @MethodSource("valuesWithinTheColumn")
+    @DisplayName("add with a value within its column in characters: 201, stored as sent with that length")
+    void valueWithinTheColumnIsStored(String field, String value, int characters) {
+        Map<String, Object> body = validFields();
+        body.put(field, value);
+
+        ResponseEntity<String> response = post(CUSTOMERS, body);
+
+        assertThat(response.getStatusCode()).as(response.getBody()).isEqualTo(HttpStatus.CREATED);
+        String custId = json(response).path("custId").asText();
+        assertThat(json(response).path(field).asText()).isEqualTo(value);
+        assertThat(storedText(field, custId)).isEqualTo(value);
+        assertThat(storedLength(field, custId)).isEqualTo(characters);
+    }
+
+    static Stream<Arguments> valuesWithinTheColumn() {
+        return Stream.of(
+                Arguments.of("name", "A".repeat(39) + EMOJI, 40),
+                Arguments.of("name", EMOJI.repeat(21), 21),
+                Arguments.of("name", EMOJI.repeat(40), 40),
+                Arguments.of("city", EMOJI.repeat(11), 11),
+                Arguments.of("city", EMOJI.repeat(20), 20));
+    }
+
+    @Test
+    @DisplayName("EDIT review with a 40-character name ending in U+1F600 (41 UTF-16 units): 200, echoed")
+    void fullWidthNameOnReviewIsAccepted() {
+        Map<String, Object> body = reviewBody();
+        body.put("purpose", "EDIT");
+        String name = "A".repeat(39) + EMOJI;
+        body.put("name", name);
+        body.put("active", "Y");
+
+        ResponseEntity<String> response = post(REVIEW, body);
+
+        assertThat(response.getStatusCode()).as(response.getBody()).isEqualTo(HttpStatus.OK);
+        assertThat(json(response).path("customer").path("name").asText()).isEqualTo(name);
+        assertThat(json(response).path("notice").path("code").asText()).isEqualTo("DEM0000");
+        assertThat(customerCount()).isZero();
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("valuesOverTheColumn")
+    @DisplayName("add with one character over the column, U+1F600 included: 400 on the field, nothing stored")
+    void valueOverTheColumnIsAFieldError(String field, String value) {
+        Map<String, Object> body = validFields();
+        body.put(field, value);
+
+        JsonNode problem = assertInvalid(post(CUSTOMERS, body), field + " is too long");
+
+        assertErrors(problem, List.of(field));
+        assertThat(customerCount()).isZero();
+    }
+
+    static Stream<Arguments> valuesOverTheColumn() {
+        return Stream.of(
+                Arguments.of("name", "A".repeat(40) + EMOJI),
+                Arguments.of("name", EMOJI.repeat(41)),
+                Arguments.of("city", EMOJI.repeat(20) + "A"),
+                Arguments.of("city", EMOJI.repeat(21)));
+    }
+
+    @Test
+    @DisplayName("review with a 41-character name ending in U+1F600: 400 name is too long")
+    void overWidthNameOnReviewIsAFieldError() {
+        Map<String, Object> body = reviewBody();
+        body.put("name", "A".repeat(40) + EMOJI);
+
+        JsonNode problem = assertInvalid(post(REVIEW, body), "name is too long");
+
+        assertErrors(problem, List.of("name"));
+    }
+
+    @Test
+    @DisplayName("PUT with name and city of U+1F600 at their full widths: 200, stored, version 1")
+    void fullWidthValuesOnUpdateAreStored() {
+        String custId = addValidCustomer();
+        Map<String, Object> body = validFields();
+        body.put("name", EMOJI.repeat(40));
+        body.put("city", EMOJI.repeat(20));
+        body.put("active", "Y");
+        body.put("version", 0);
+
+        ResponseEntity<String> response = put(custId, body);
+
+        assertThat(response.getStatusCode()).as(response.getBody()).isEqualTo(HttpStatus.OK);
+        assertThat(json(response).path("name").asText()).isEqualTo(EMOJI.repeat(40));
+        assertThat(json(response).path("version").asLong()).isEqualTo(1L);
+        assertThat(storedLength("name", custId)).isEqualTo(40);
+        assertThat(storedLength("city", custId)).isEqualTo(20);
+    }
+
+    @Test
+    @DisplayName("PUT with a name of 41 U+1F600: 400 name is too long, the row unchanged")
+    void overWidthNameOnUpdateIsAFieldError() {
+        String custId = addValidCustomer();
+        Map<String, Object> body = validFields();
+        body.put("name", EMOJI.repeat(41));
+        body.put("active", "Y");
+        body.put("version", 0);
+
+        JsonNode problem = assertInvalid(put(custId, body), "name is too long");
+
+        assertErrors(problem, List.of("name"));
+        assertThat(storedText("name", custId)).isEqualTo("ACME INC");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT row_version FROM custmast WHERE custid = ?", Long.class, custId)).isZero();
+    }
+
+
+    // ---------------------------------------------------------------------------------------------
     // No invented fields
     // ---------------------------------------------------------------------------------------------
 
@@ -354,6 +486,96 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     static Stream<String> textFields() {
         return TEXT_FIELDS.stream();
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Unpaired surrogates
+    // ---------------------------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("textFields")
+    @DisplayName("review with an unpaired surrogate in one text field: 400 APP0400 on that field, no 200 echo")
+    void unpairedSurrogateOnReviewIsRejected(String field) {
+        Map<String, Object> body = reviewBody();
+        body.put(field, HIGH_SURROGATE);
+
+        JsonNode problem = assertInvalid(postJson(REVIEW, withSurrogateEscapes(body)), field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(problem.path("errors").get(0).path("message").asText())
+                .isEqualTo("Request is not valid: " + field + " " + NOT_STORABLE);
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("textFields")
+    @DisplayName("add with an unpaired surrogate in one text field: 400 APP0400 on that field, nothing stored")
+    void unpairedSurrogateOnAddIsRejected(String field) {
+        Map<String, Object> body = validFields();
+        body.put(field, LOW_SURROGATE);
+
+        JsonNode problem = assertInvalid(postJson(CUSTOMERS, withSurrogateEscapes(body)),
+                field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(customerCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("EDIT review and add of a name with a lone high surrogate inside: 400, no id consumed")
+    void unpairedSurrogateConsumesNoId() {
+        Map<String, Object> review = reviewBody();
+        review.put("purpose", "EDIT");
+        review.put("active", "Y");
+        review.put("name", "QA " + HIGH_SURROGATE + "X");
+        assertErrors(assertInvalid(postJson(REVIEW, withSurrogateEscapes(review)), "name " + NOT_STORABLE),
+                List.of("name"));
+
+        Map<String, Object> add = validFields();
+        add.put("name", "QA " + HIGH_SURROGATE + "X");
+        assertErrors(assertInvalid(postJson(CUSTOMERS, withSurrogateEscapes(add)), "name " + NOT_STORABLE),
+                List.of("name"));
+
+        Map<String, Object> reversed = validFields();
+        reversed.put("addr", "1 MAIN " + LOW_SURROGATE + HIGH_SURROGATE + " ST");
+        assertErrors(assertInvalid(postJson(CUSTOMERS, withSurrogateEscapes(reversed)), "addr " + NOT_STORABLE),
+                List.of("addr"));
+
+        assertThat(customerCount()).isZero();
+        assertThat(addValidCustomer()).isEqualTo(DatabaseCleaner.FIRST_INTERACTIVE_ID);
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("textFields")
+    @DisplayName("PUT with an unpaired surrogate in one text field: 400 APP0400 on that field, the row unchanged")
+    void unpairedSurrogateOnUpdateIsRejected(String field) {
+        String custId = addValidCustomer();
+        Map<String, Object> body = validFields();
+        body.put(field, HIGH_SURROGATE);
+        body.put("version", 0);
+
+        JsonNode problem = assertInvalid(putJson(custId, withSurrogateEscapes(body)), field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT row_version FROM custmast WHERE custid = ?", Long.class, custId)).isZero();
+        assertThat(storedText("name", custId)).isEqualTo("ACME INC");
+    }
+
+    @Test
+    @DisplayName("a high and a low surrogate escape in order are one character: add 201, stored as sent")
+    void escapedSurrogatePairIsStored() {
+        Map<String, Object> body = validFields();
+        body.put("name", "QA " + HIGH_SURROGATE + LOW_SURROGATE + "X");
+        String stored = "QA " + new String(Character.toChars(0x10000)) + "X";
+
+        ResponseEntity<String> response = postJson(CUSTOMERS, withSurrogateEscapes(body));
+
+        assertThat(response.getStatusCode()).as(response.getBody()).isEqualTo(HttpStatus.CREATED);
+        String custId = json(response).path("custId").asText();
+        assertThat(json(response).path("name").asText()).isEqualTo(stored);
+        assertThat(storedText("name", custId)).isEqualTo(stored);
+        assertThat(storedLength("name", custId)).isEqualTo(5);
+    }
+
 
     // ---------------------------------------------------------------------------------------------
     // Business rules unchanged
@@ -481,6 +703,44 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     }
 
     /**
+     * Serializes a body, then writes each {@link #HIGH_SURROGATE} as the JSON escape of U+D800 and each
+     * {@link #LOW_SURROGATE} as that of U+DC00. A Java string holding an unpaired surrogate cannot be
+     * sent as it is, because the client's UTF-8 encoder would replace it with {@code ?}; the escapes
+     * reach the server as a client writes them and bind to the surrogates themselves.
+     *
+     * @param body the body, with the placeholders in its values
+     * @return the JSON text
+     */
+    private String withSurrogateEscapes(Map<String, Object> body) {
+        return toJson(body).replace(HIGH_SURROGATE, "\\ud800").replace(LOW_SURROGATE, "\\udc00");
+    }
+
+    /**
+     * Posts JSON text as the maintenance user.
+     *
+     * @param path the request path
+     * @param json the body, sent as given
+     * @return the response, any status
+     */
+    private ResponseEntity<String> postJson(String path, String json) {
+        return maintenanceXhr().post().uri(path).contentType(MediaType.APPLICATION_JSON).body(json)
+                .retrieve().toEntity(String.class);
+    }
+
+    /**
+     * Puts JSON text to one customer as the maintenance user.
+     *
+     * @param custId the path id, sent as given
+     * @param json the body, sent as given
+     * @return the response, any status
+     */
+    private ResponseEntity<String> putJson(String custId, String json) {
+        return maintenanceXhr().put().uri(CUSTOMERS + "/" + custId).contentType(MediaType.APPLICATION_JSON)
+                .body(json).retrieve().toEntity(String.class);
+    }
+
+
+    /**
      * Asserts a 400 APP0400 problem whose {@code detail} and {@code args} carry the given reason.
      *
      * @param response the response
@@ -525,5 +785,43 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     private int customerCount() {
         Integer count = jdbcTemplate.queryForObject("SELECT count(*) FROM custmast", Integer.class);
         return count == null ? 0 : count;
+    }
+
+    /**
+     * Reads one stored text column of a customer.
+     *
+     * @param field the JSON property, {@code name} or {@code city}
+     * @param custId the customer id
+     * @return the stored value
+     */
+    private String storedText(String field, String custId) {
+        return jdbcTemplate.queryForObject("SELECT " + column(field) + " FROM custmast WHERE custid = ?",
+                String.class, custId);
+    }
+
+    /**
+     * Reads the length of one stored text column of a customer, in characters as PostgreSQL counts them.
+     *
+     * @param field the JSON property, {@code name} or {@code city}
+     * @param custId the customer id
+     * @return {@code char_length} of the stored value
+     */
+    private Integer storedLength(String field, String custId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT char_length(" + column(field) + ") FROM custmast WHERE custid = ?", Integer.class, custId);
+    }
+
+    /**
+     * Maps a JSON property to its {@code custmast} column.
+     *
+     * @param field {@code name} or {@code city}, whose columns have the same names
+     * @return the column name
+     * @throws IllegalArgumentException for any other property
+     */
+    private static String column(String field) {
+        return switch (field) {
+            case "name", "city" -> field;
+            default -> throw new IllegalArgumentException("No column mapped for " + field);
+        };
     }
 }

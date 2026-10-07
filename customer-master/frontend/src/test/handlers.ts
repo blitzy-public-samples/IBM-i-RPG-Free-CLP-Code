@@ -849,7 +849,8 @@ const MALFORMED_BODY = 'malformed request body';
 
 /**
  * The nine text properties of every write request, in schema order, each with
- * its `@Size(max)` in UTF-16 code units (the DDS field lengths).
+ * its `@CodePointLength(max)` in code points (the DDS field lengths, counted
+ * as the columns count characters).
  */
 const TEXT_PROPERTIES: readonly (readonly [keyof CustomerFieldsFixture, number])[] = [
   ['name', 40],
@@ -1021,8 +1022,12 @@ const JAVA_IDENTIFIER_PART = /[\p{L}\p{Nl}\p{Nd}\p{Mn}\p{Mc}\p{Pc}\p{Sc}\p{Cf}\u
  * and no trailing commas. Reading a member reads its name and its value's
  * first token, a number or literal in full but a string only up to its
  * opening quote: its content is decoded when the value is used or skipped.
- * Every syntax error, and running out of text (or of its well-formed UTF-8
- * prefix) where more is due, throws {@link BindingFailure} with
+ * Like the server's parser, which detects duplicates strictly, it refuses, in
+ * an object at any depth, a member name an earlier member of that object gave
+ * (names compare after their escapes are decoded) as soon as it reads the
+ * name, before its colon; separate objects never share names. Every syntax
+ * error, every repeated name, and running out of text (or of its well-formed
+ * UTF-8 prefix) where more is due, throws {@link BindingFailure} with
  * {@link MALFORMED_BODY}.
  */
 class JsonReader {
@@ -1030,6 +1035,8 @@ class JsonReader {
   private readonly truncated: boolean;
   private index = 0;
   private pendingString = false;
+  /** The member names read so far in each object still open, the innermost last. */
+  private readonly objectNames: Set<string>[] = [];
 
   /**
    * @param text the body's well-formed UTF-8 prefix, decoded (a leading BOM removed)
@@ -1051,6 +1058,9 @@ class JsonReader {
     }
     if (char === '{' || char === '[') {
       this.index += 1;
+      if (char === '{') {
+        this.objectNames.push(new Set<string>());
+      }
       return { type: char === '{' ? 'object' : 'array' };
     }
     if (char === 't' || char === 'f' || char === 'n') {
@@ -1066,12 +1076,18 @@ class JsonReader {
 
   /**
    * The next member of the object being read, or `undefined` at its closing
-   * brace; `first` for the member right after the opening brace.
+   * brace; `first` for the member right after the opening brace. A name the
+   * object already gave fails the read before its colon.
    */
   readMember(first: boolean): JsonMember | undefined {
+    const names = this.objectNames[this.objectNames.length - 1];
+    if (names === undefined) {
+      throw new Error('JsonReader.readMember called outside an object');
+    }
     this.skipWhitespace();
     if (this.text.charAt(this.index) === '}') {
       this.index += 1;
+      this.objectNames.pop();
       return undefined;
     }
     if (!first) {
@@ -1081,6 +1097,10 @@ class JsonReader {
     this.expect('"');
     this.pendingString = true;
     const name = this.readString();
+    if (names.has(name)) {
+      this.malformed();
+    }
+    names.add(name);
     this.skipWhitespace();
     this.expect(':');
     return { name, value: this.readValue() };
@@ -1312,8 +1332,12 @@ function bindValue(reader: JsonReader, name: string, kind: PropertyKind, token: 
  * reported as `unknown property <name>` once the object ends, or as soon as
  * every property of the shape has been seen (the record is built then): after
  * the next member's first token, and for any later unknown member right after
- * its value's first token. Only then are trailing tokens refused. A property
- * given twice keeps its last value.
+ * its value's first token. Only then are trailing tokens refused. A name
+ * given twice in one object, the root or one inside an unknown member's value,
+ * fails as {@link MALFORMED_BODY} where {@link JsonReader} reads the repeat: it
+ * pre-empts the deferred unknown property and anything later, but not a value
+ * already refused (`"name":1,"name":"x"` is `name has an invalid value`) nor an
+ * unknown member met once the record is built, whose value is never read.
  *
  * @throws BindingFailure with the server's reason
  */
@@ -1394,8 +1418,10 @@ async function bindWriteRequest(request: Request, shape: RequestShape): Promise<
 
 /**
  * The server's bean-validation violations of a bound body, all at once: per
- * text property `<name> is too long` beyond its width (UTF-16 code units),
- * then `<name> contains a character that cannot be stored` for a U+0000, plus
+ * text property `<name> is too long` beyond its width (code points, as
+ * {@link codePointLength} counts them; an unpaired surrogate counts as one),
+ * then `<name> contains a character that cannot be stored` for a U+0000 or
+ * an unpaired surrogate ({@link hasUnpairedSurrogate}), plus
  * `missing`, the required properties left out. Ordered by property name in
  * Java's `String` order, then by constraint; {@link requestNotValid} keeps
  * each property's first.
@@ -1407,10 +1433,10 @@ function bodyViolations(text: TextFields, missing: readonly RequestViolation[]):
     if (value === undefined) {
       continue;
     }
-    if (value.length > width) {
+    if (codePointLength(value) > width) {
       violations.push({ field: name, reason: `${name} is too long` });
     }
-    if (value.includes('\u0000')) {
+    if (value.includes('\u0000') || hasUnpairedSurrogate(value)) {
       violations.push({ field: name, reason: `${name} contains a character that cannot be stored` });
     }
   }
@@ -2780,6 +2806,17 @@ function codePointLength(text: string): number {
  */
 function databaseText(text: string): string {
   return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '?');
+}
+
+/**
+ * Whether `text` holds an unpaired surrogate (a high surrogate not followed
+ * by a low one, or a low surrogate not preceded by a high one), which a JSON
+ * `\u` escape can produce: the server's `StorableText` rejects it as a
+ * character that cannot be stored, since {@link databaseText} would turn it
+ * into `?`. A well-formed pair is one supplementary character and passes.
+ */
+function hasUnpairedSurrogate(text: string): boolean {
+  return /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
 }
 
 /**

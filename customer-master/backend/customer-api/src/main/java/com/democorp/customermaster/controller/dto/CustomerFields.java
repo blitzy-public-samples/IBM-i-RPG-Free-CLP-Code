@@ -6,7 +6,7 @@ import com.democorp.customermaster.domain.Address;
 import com.democorp.customermaster.domain.Customer;
 
 import io.swagger.v3.oas.annotations.media.Schema;
-import jakarta.validation.constraints.Size;
+import org.hibernate.validator.constraints.CodePointLength;
 
 /**
  * The nine customer data fields a user enters: the body of {@code POST /api/customers} and
@@ -67,17 +67,24 @@ import jakarta.validation.constraints.Size;
  * and taken from the path on update, the change stamp comes from the clock and the
  * authenticated principal, and only {@code CustomerUpdateRequest} adds {@code version}.
  * With {@code spring.jackson.deserialization.fail-on-unknown-properties} enabled, any such
- * member in a request body is rejected with 400 APP0400.
+ * member in a request body is rejected with 400 APP0400. Nor may a body give a member twice:
+ * {@code spring.jackson.parser.strict-duplicate-detection} rejects a name repeated within one
+ * JSON object with 400 APP0400 "malformed request body", before or after the last property is
+ * seen, instead of keeping either value.
  *
  * <p><b>Validation stops at what the column can store.</b> Each component carries only
- * {@link Size} and {@link StorableText}, which the controller enforces with {@code @Valid}: a
- * longer value fails as {@code MethodArgumentNotValidException} and becomes 400 APP0400 with an
- * {@code errors[]} entry on the property, the API counterpart of the display field that cannot
- * hold more characters. {@code @Size} counts UTF-16 code units, so it never admits a value
- * longer than the column, which counts characters. A value containing U+0000 (NUL), which a
- * PostgreSQL text column cannot hold, is rejected the same way by {@link StorableText} before
- * the service runs, so it never reaches the database as 500 DEM9999 or uses up a customer id;
- * no format rule is added, and {@code null} passes both constraints. No component is
+ * {@link CodePointLength} and {@link StorableText}, which the controller enforces with
+ * {@code @Valid}: a longer value fails as {@code MethodArgumentNotValidException} and becomes 400
+ * APP0400 with an {@code errors[]} entry on the property, the API counterpart of the display field
+ * that cannot hold more characters. {@code @CodePointLength} counts characters (code points), as
+ * the {@code varchar} and {@code char} columns do, so a value is rejected exactly when it is longer
+ * than its column: a {@code name} of 40 supplementary characters such as U+1F600 is accepted and
+ * stored, one of 41 is not. {@code @Size} would count UTF-16 units and reject such a value from 21
+ * characters on. A value containing U+0000 (NUL), which a PostgreSQL text column cannot hold, or
+ * an unpaired surrogate, which the driver would store as {@code ?}, is rejected the same way by
+ * {@link StorableText} before the service runs, so it never reaches the database as 500 DEM9999,
+ * is never confirmed or answered as a value other than the one stored, and uses up no customer
+ * id; no format rule is added, and {@code null} passes both constraints. No component is
  * {@code @NotNull} or {@code @NotBlank}: a blank or missing value is a business-rule failure
  * that {@code service/CustomerValidator} reports as 422 DEM0501, DEM0502 or DEM0503, in the
  * source order and stopping at the first, as {@code EditUpdData} does. An absent
@@ -112,15 +119,19 @@ import jakarta.validation.constraints.Size;
  */
 @Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record CustomerFields(
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
-        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
-        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active) {
+        // Each limit is the column width counted in characters (code points), the unit varchar and
+        // char count. @Size cannot express it: it counts UTF-16 units, so it would reject a value of
+        // supplementary characters that fits its column. controller/CodePointLengthSchemaCustomizer
+        // publishes @CodePointLength as the maxLength and minLength @Size would have produced.
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 1) @StorableText String active) {
 
     /**
      * Builds a new customer draft from these fields, with no id, change stamp or version.

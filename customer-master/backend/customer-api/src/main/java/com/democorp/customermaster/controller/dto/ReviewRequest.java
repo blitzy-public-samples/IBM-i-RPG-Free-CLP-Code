@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
+import org.hibernate.validator.constraints.CodePointLength;
 
 /**
  * The body of {@code POST /api/customers/review}: why the review is requested plus the nine
@@ -30,7 +30,8 @@ import jakarta.validation.constraints.Size;
  *       <td>Required; exactly {@code "ADD"} or {@code "EDIT"}</td></tr>
  *   <tr><td>{@code name} .. {@code active}</td><td>The MTNCUSTD input fields
  *       [5250_Subfile/MTNCUSTD.DSPF:61-120]</td>
- *       <td>The {@code CustomerFields} limits: 40, 40, 20, 2, 10, 20, 40, 20, 1; no U+0000</td></tr>
+ *       <td>The {@code CustomerFields} limits, in characters: 40, 40, 20, 2, 10, 20, 40, 20, 1; no
+ *       U+0000 and no unpaired surrogate</td></tr>
  * </table>
  *
  * <p><b>The contract is the component list.</b> {@code purpose} comes first, then the nine data
@@ -64,14 +65,18 @@ import jakarta.validation.constraints.Size;
  *       {@code "EDIT"}: same case, nothing before or after it, no blank, tab or line break trimmed.
  *       Any other string, such as {@code "DELETE"}, {@code "add"}, {@code " ADD"} or
  *       {@code "EDIT\n"}, a number or quoted index ({@code 0}, {@code "1"}), a fraction, a boolean,
- *       an object or an array fails deserialization on {@code purpose}, as does any content after
- *       the body's JSON object ({@code HttpMessageNotReadableException}; {@code spring.jackson} in
+ *       an object or an array fails deserialization on {@code purpose}, as do any content after
+ *       the body's JSON object and a member given twice, {@code purpose} or any other
+ *       ({@code HttpMessageNotReadableException}; {@code spring.jackson} in
  *       {@code application.yml}); a JSON {@code null} or a missing one deserializes to {@code null}
  *       and fails {@link NotNull}; all become 400 APP0400 with an {@code errors[]} entry on
- *       {@code purpose}, except trailing content, which names no field.</li>
- *   <li>Each data field carries only {@link Size} and {@link StorableText}, as in
- *       {@code CustomerFields}: a longer value, or one containing U+0000 (NUL), which a PostgreSQL
- *       text column cannot hold and a later save could never store, is rejected with 400 APP0400
+ *       {@code purpose}, except trailing content and a repeated member, which name no field
+ *       ("malformed request body").</li>
+ *   <li>Each data field carries only {@link CodePointLength} and {@link StorableText}, as in
+ *       {@code CustomerFields}: a value longer than its column, counted in characters (code points)
+ *       as the column counts them, or one containing U+0000 (NUL), which a PostgreSQL
+ *       text column cannot hold and a later save could never store, or an unpaired surrogate, which
+ *       a later save would store as {@code ?} rather than as confirmed, is rejected with 400 APP0400
  *       and an {@code errors[]} entry on the property, while a blank or missing value reaches
  *       {@code service/CustomerValidator}, which reports it as 422 DEM0501, DEM0502 or DEM0503 in
  *       source order. An absent {@code active} must reach the service as {@code null}, so that an
@@ -106,15 +111,16 @@ import jakarta.validation.constraints.Size;
 @Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record ReviewRequest(
         @NotNull @JsonDeserialize(using = PurposeDeserializer.class) CustomerMaintenanceService.Purpose purpose,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
-        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
-        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active) {
+        // Column widths in code points, not @Size's UTF-16 units: see the note in CustomerFields.
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 1) @StorableText String active) {
 
     /**
      * Returns the nine data fields of this request, without the purpose.

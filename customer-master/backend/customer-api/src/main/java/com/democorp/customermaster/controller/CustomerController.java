@@ -95,8 +95,9 @@ import org.springframework.web.bind.annotation.RestController;
  *       supplementary characters. Likewise {@code size} only publishes its range and default
  *       (minimum 1, maximum 100, default 12): the service applies the configured default and
  *       answers 400 APP0400 on {@code size} outside that range.</li>
- *   <li>Body limits ({@code @Size} per column, {@code @NotNull version} on update, {@code @NotNull
- *       purpose} on review) are checked through {@link Valid}: 400 APP0400. On {@code PUT}, whose
+ *   <li>Body limits ({@code @CodePointLength} per column, counting characters as the column does,
+ *       {@code @NotNull version} on update, {@code @NotNull purpose} on review) are checked
+ *       through {@link Valid}: 400 APP0400. On {@code PUT}, whose
  *       path variable is constrained too, those body errors arrive inside the same
  *       {@code HandlerMethodValidationException}.</li>
  *   <li>A {@code custId}, {@code chgTime}, {@code chgUser}, {@code rowVersion} or any other member

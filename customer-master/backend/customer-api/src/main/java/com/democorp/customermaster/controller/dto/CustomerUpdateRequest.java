@@ -2,7 +2,7 @@ package com.democorp.customermaster.controller.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
+import org.hibernate.validator.constraints.CodePointLength;
 
 /**
  * The body of {@code PUT /api/customers/{custId}}: the nine {@link CustomerFields} plus the
@@ -41,9 +41,11 @@ import jakarta.validation.constraints.Size;
  *
  * <p><b>Validation.</b>
  * <ul>
- *   <li>Each data field carries only {@link Size} and {@link StorableText}, as in
- *       {@code CustomerFields}: a longer value, or one containing U+0000 (NUL), which a PostgreSQL
- *       text column cannot hold, is rejected with 400 APP0400 and an {@code errors[]} entry on the
+ *   <li>Each data field carries only {@link CodePointLength} and {@link StorableText}, as in
+ *       {@code CustomerFields}: a value longer than its column, counted in characters (code points)
+ *       as the column counts them, or one containing U+0000 (NUL), which a PostgreSQL
+ *       text column cannot hold, or an unpaired surrogate, which the driver would store as
+ *       {@code ?}, is rejected with 400 APP0400 and an {@code errors[]} entry on the
  *       property, while a blank or missing value reaches
  *       {@code service/CustomerValidator}, which reports it as 422 DEM0501, DEM0502 or DEM0503 in
  *       source order.</li>
@@ -52,8 +54,9 @@ import jakarta.validation.constraints.Size;
  *       becoming 0. It binds only from an exact integral JSON number such as {@code 0}: a fraction
  *       or exponent ({@code 0.9}, {@code 1.0}, {@code 1e0}), a string ({@code "0"}), a boolean
  *       and any content after the body's JSON object are rejected with 400 APP0400 before the
- *       service runs ({@code spring.jackson} in {@code application.yml}). Its value is not compared
- *       here: the database verifies it.</li>
+ *       service runs, as is a member given twice, {@code version} or any other
+ *       ({@code spring.jackson} in {@code application.yml}). Its value is not compared here: the
+ *       database verifies it.</li>
  * </ul>
  *
  * <p>Example:
@@ -81,15 +84,16 @@ import jakarta.validation.constraints.Size;
  */
 @Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record CustomerUpdateRequest(
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String city,
-        @Schema(types = {"string", "null"}) @Size(max = 2) @StorableText String state,
-        @Schema(types = {"string", "null"}) @Size(max = 10) @StorableText String zip,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String corpPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String acctMgr,
-        @Schema(types = {"string", "null"}) @Size(max = 20) @StorableText String acctPhone,
-        @Schema(types = {"string", "null"}) @Size(max = 1) @StorableText String active,
+        // Column widths in code points, not @Size's UTF-16 units: see the note in CustomerFields.
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String name,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String addr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String city,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 2) @StorableText String state,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 10) @StorableText String zip,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String corpPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 40) @StorableText String acctMgr,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 20) @StorableText String acctPhone,
+        @Schema(types = {"string", "null"}) @CodePointLength(max = 1) @StorableText String active,
         @NotNull Long version) {
 
     /**
