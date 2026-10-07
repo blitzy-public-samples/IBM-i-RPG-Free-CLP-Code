@@ -47,8 +47,11 @@ import org.springframework.data.repository.CrudRepository;
  * <ul>
  *   <li><b>New aggregate.</b> {@code save(customer)} with {@code rowVersion() == null} and an id
  *       already assigned by {@code CustomerIdAllocator.next()} issues
- *       {@code INSERT INTO "custmast" ("custid", "name", ..., "row_version") VALUES (...)} with the
- *       assigned id and version 0, and returns a copy carrying version 0.</li>
+ *       {@code INSERT INTO "custmast" ("acctmgr", "acctphone", "active", "addr", "chgtime",
+ *       "chguser", "city", "corpphone", "custid", "name", "row_version", "state", "zip")
+ *       VALUES (...)} with the assigned id and version 0, and returns a copy carrying version 0.
+ *       Spring Data JDBC orders the insert columns by name, not in V3 declaration order; the
+ *       list is explicit, never positional.</li>
  *   <li><b>Loaded aggregate.</b> {@code save(customer)} with {@code rowVersion() == v} issues
  *       {@code UPDATE "custmast" SET "name" = ..., "row_version" = v + 1
  *       WHERE "custid" = :id AND "row_version" = v} and returns a copy carrying {@code v + 1}.
