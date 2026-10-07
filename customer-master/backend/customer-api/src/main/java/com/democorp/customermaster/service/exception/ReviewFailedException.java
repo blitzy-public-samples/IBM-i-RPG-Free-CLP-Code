@@ -59,7 +59,12 @@ import java.util.Objects;
  * }
  * }</pre>
  *
- * <p>Instances are immutable and safe to share between threads.
+ * <p>The payload is fixed at construction: the final {@code cause} reference always names the same wrapped failure,
+ * and the final {@code stateAccepted} is an immutable string. The exception instance itself is not immutable, because
+ * it inherits the mutable stack trace and suppressed exceptions of {@link Throwable}, and the wrapped failure that
+ * {@code cause} and {@link #getCause()} return is itself a mutable {@link Throwable}. A new instance is created for
+ * each failure and stays with the request that raised it; it is not cached, shared or reused across requests or
+ * threads.
  */
 public final class ReviewFailedException extends RuntimeException {
 

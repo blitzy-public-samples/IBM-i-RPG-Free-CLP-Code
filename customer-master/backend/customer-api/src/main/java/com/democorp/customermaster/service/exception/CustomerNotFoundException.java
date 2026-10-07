@@ -43,7 +43,11 @@ import java.util.Objects;
  *         .orElseThrow(() -> new CustomerNotFoundException(id));
  * }</pre>
  *
- * <p>Instances are immutable and therefore safe to share between threads.
+ * <p>The application payload is immutable: the final {@code id} field is set once by the constructor
+ * and holds an immutable {@link CustomerId}. The exception instance itself is not immutable, because
+ * it inherits the mutable stack trace, suppressed exceptions and cause of {@link Throwable}. A new
+ * instance is created for each failure and stays with the request that raised it; it is not cached,
+ * shared or reused across requests or threads.
  */
 public final class CustomerNotFoundException extends RuntimeException {
 

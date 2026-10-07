@@ -44,7 +44,11 @@ import java.util.Objects;
  *         InvalidSearchCriteriaException.APP0400, "size", List.of("size must be between 1 and 100"));
  * }</pre>
  *
- * <p>Instances are immutable and therefore safe to share between threads.
+ * <p>The application payload is immutable: the final fields {@code code} and {@code field}, and the
+ * final {@code args} list, an unmodifiable copy, are set once by the constructor. The exception instance
+ * itself is not immutable, because it inherits the mutable stack trace, suppressed exceptions and cause
+ * of {@link Throwable}. A new instance is created for each failure and stays with the request that
+ * raised it; it is not cached, shared or reused across requests or threads.
  */
 public final class InvalidSearchCriteriaException extends RuntimeException {
 

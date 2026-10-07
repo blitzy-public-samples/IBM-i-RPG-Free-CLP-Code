@@ -52,7 +52,11 @@ import java.util.Set;
  * <p>{@link #getMessage()} is the code only. Field values, USPS descriptions and any other user-derived text live
  * solely in {@link #args()}, so logging this exception never writes customer data.
  *
- * <p>Instances are immutable and safe to share between threads.
+ * <p>The application payload is immutable: the final fields {@code rule} and {@code code}, and the final
+ * {@code args} and {@code errors} lists, unmodifiable copies holding immutable strings and {@link FieldError} records
+ * respectively, are set once by the constructor. The exception instance itself is not immutable, because it inherits
+ * the mutable stack trace, suppressed exceptions and cause of {@link Throwable}. A new instance is created for each
+ * failure and stays with the request that raised it; it is not cached, shared or reused across requests or threads.
  */
 public final class CustomerValidationException extends RuntimeException {
 
