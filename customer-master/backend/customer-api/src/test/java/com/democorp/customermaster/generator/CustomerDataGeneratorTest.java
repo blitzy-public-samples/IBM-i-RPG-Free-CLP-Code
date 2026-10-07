@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.TreeSet;
 import java.util.function.DoubleSupplier;
+import java.util.random.RandomGenerator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -140,6 +141,24 @@ final class CustomerDataGeneratorTest {
 
     /** Twelve Z letters: one {@code genWord(5, 11)} at r = 1. */
     private static final String Z12 = "Z".repeat(12);
+
+    /**
+     * LOADCUSTR's {@code companyType} array, written out from the source in its order
+     * [5250_Subfile/LOADCUSTR.SQLRPGLE:59-70], so suffix checks never read {@link CustomerDataGenerator}'s
+     * own list.
+     */
+    private static final List<String> SOURCE_COMPANY_TYPES = List.of(
+            "INC", "LLC", "LLP", "COMPANY", "& SONS", "ET FILS",
+            "PLC", "CORP", "LTD", "SOLE", "PARTNERS", "ASSOC");
+
+    /**
+     * LOADCUSTR's {@code streetType} array, written out from the source in its order
+     * [5250_Subfile/LOADCUSTR.SQLRPGLE:73-88], so suffix checks never read {@link CustomerDataGenerator}'s
+     * own list.
+     */
+    private static final List<String> SOURCE_STREET_TYPES = List.of(
+            "STREET", "ST", "ROAD", "RD", "AVENUE", "AVE", "PLACE", "CIRCLE",
+            "SQUARE", "HWY", "VISTA", "CALLE", "RANCH", "CRESCENT", "COURT", "WAY");
 
     /**
      * A name generator whose every draw is {@code r}.
@@ -296,7 +315,8 @@ final class CustomerDataGeneratorTest {
         @Test
         void companyTypeBoundOf21Point6TruncatesTo21() {
             // j = Rand_Int(1 : %elem(companyType) * 1.8) [5250_Subfile/LOADCUSTR.SQLRPGLE:161]: int(10) value.
-            double bound = CustomerDataGenerator.COMPANY_TYPES.size() * 1.8;
+            // %elem(companyType) is 12 [5250_Subfile/LOADCUSTR.SQLRPGLE:59-70].
+            double bound = 12 * 1.8;
             assertThat(constant(1.0).randInt(1, bound)).isEqualTo(21);
             assertThat(constant(0.0).randInt(1, bound)).isEqualTo(1);
         }
@@ -304,7 +324,8 @@ final class CustomerDataGeneratorTest {
         @Test
         void streetTypeBoundIsExactly28() {
             // j = Rand_Int(1 : %elem(streetType) * 1.75) [5250_Subfile/LOADCUSTR.SQLRPGLE:179].
-            double bound = CustomerDataGenerator.STREET_TYPES.size() * 1.75;
+            // %elem(streetType) is 16 [5250_Subfile/LOADCUSTR.SQLRPGLE:73-88].
+            double bound = 16 * 1.75;
             assertThat(constant(1.0).randInt(1, bound)).isEqualTo(28);
             assertThat(constant(0.0).randInt(1, bound)).isEqualTo(1);
         }
@@ -331,8 +352,143 @@ final class CustomerDataGeneratorTest {
         }
 
         @Test
+        void inclusiveUnitTurnsADrawOfZeroIntoExactlyZero() {
+            DoubleSupplier unit = NameGenerator.inclusiveUnit(new ScriptedLongs(0L));
+
+            assertThat(unit.getAsDouble()).isEqualTo(0.0);
+        }
+
+        @Test
+        void inclusiveUnitTurnsTheTopDrawOf2To53IntoExactlyOne() {
+            // Db2 RANDOM() covers 0 <= r <= 1 [Service_Pgms/SRV_RANDOM.SQLRPGLE:30]; k = 2^53 is its r = 1,
+            // which a [0, 1) source such as nextDouble() can never return.
+            DoubleSupplier unit = NameGenerator.inclusiveUnit(new ScriptedLongs(9_007_199_254_740_992L));
+
+            assertThat(unit.getAsDouble()).isEqualTo(1.0);
+        }
+
+        @Test
+        void inclusiveUnitTurnsADrawOf2To52IntoExactlyOneHalf() {
+            DoubleSupplier unit = NameGenerator.inclusiveUnit(new ScriptedLongs(4_503_599_627_370_496L));
+
+            assertThat(unit.getAsDouble()).isEqualTo(0.5);
+        }
+
+        @Test
+        void inclusiveUnitDrawsOneLongFromZeroToTheExclusiveBound2To53PlusOnePerValue() {
+            ScriptedLongs generator = new ScriptedLongs(0L, 4_503_599_627_370_496L, 9_007_199_254_740_992L);
+            DoubleSupplier unit = NameGenerator.inclusiveUnit(generator);
+            assertThat(generator.draws()).as("draws made by building the unit source").isEmpty();
+
+            for (int value = 1; value <= 3; value++) {
+                unit.getAsDouble();
+                assertThat(generator.draws()).as("draws after %d unit values", value).hasSize(value);
+            }
+
+            assertThat(generator.draws()).containsOnly(new ScriptedLongs.Draw(0L, 9_007_199_254_740_993L));
+        }
+
+        @Test
+        void inclusiveUnitReachesTheHighBoundOfMaxLAtTheTopDraw() {
+            // MaxL = Rand_Int(5 : 40 - 12) [5250_Subfile/LOADCUSTR.SQLRPGLE:154]: 28 only at r = 1.
+            NameGenerator names =
+                    new NameGenerator(NameGenerator.inclusiveUnit(new ScriptedLongs(9_007_199_254_740_992L)));
+
+            assertThat(names.randInt(5, 28)).isEqualTo(28);
+        }
+
+        @Test
+        void inclusiveUnitReachesTheLowBoundOfMaxLAtTheBottomDraw() {
+            NameGenerator names = new NameGenerator(NameGenerator.inclusiveUnit(new ScriptedLongs(0L)));
+
+            assertThat(names.randInt(5, 28)).isEqualTo(5);
+        }
+
+        @Test
+        void seededDrawsThroughTheInclusiveUnitOverASplittableRandomOfTheSameSeed() {
+            // The full int range spreads every unit value apart, so a seeded generator built any other way,
+            // nextDouble() over the same SplittableRandom included, yields a different sequence.
+            NameGenerator seeded = NameGenerator.seeded(SEED);
+            NameGenerator inclusive = new NameGenerator(NameGenerator.inclusiveUnit(new SplittableRandom(SEED)));
+            int[] expected = new int[SEEDED_CALLS];
+            int[] actual = new int[SEEDED_CALLS];
+            for (int i = 0; i < SEEDED_CALLS; i++) {
+                expected[i] = inclusive.randInt(0, Integer.MAX_VALUE);
+                actual[i] = seeded.randInt(0, Integer.MAX_VALUE);
+            }
+
+            assertThat(actual).containsExactly(expected);
+        }
+
+        @Test
         void rejectsANullUnitSource() {
             assertThatNullPointerException().isThrownBy(() -> new NameGenerator(null));
+        }
+
+        @Test
+        void inclusiveUnitRejectsANullGenerator() {
+            assertThatNullPointerException().isThrownBy(() -> NameGenerator.inclusiveUnit(null));
+        }
+
+        /**
+         * A {@link RandomGenerator} that answers {@link #nextLong(long, long)} with scripted values in order
+         * and records the origin and bound of every such call, standing in for the JDK generator behind
+         * {@link NameGenerator#inclusiveUnit(RandomGenerator)}.
+         *
+         * <p>Every other way of drawing fails the test. {@link #nextLong()}, the one abstract method through
+         * which {@link RandomGenerator}'s default {@code nextInt}, {@code nextBoolean}, {@code nextFloat} and
+         * single-bound {@code nextLong} draw, throws {@link AssertionError}, and so does {@link #nextDouble()},
+         * the [0, 1) draw an inclusive unit source must not use. A bounded call also fails once the script is
+         * used up, or when its scripted value lies outside the requested range, so a bound that excludes
+         * k = 2^53 cannot be answered with it.
+         */
+        private static final class ScriptedLongs implements RandomGenerator {
+
+            /**
+             * One {@link ScriptedLongs#nextLong(long, long)} call.
+             *
+             * @param origin the inclusive lower end requested
+             * @param bound  the exclusive upper end requested
+             */
+            record Draw(long origin, long bound) {
+            }
+
+            private final long[] script;
+
+            private final List<Draw> draws = new ArrayList<>();
+
+            private int next;
+
+            ScriptedLongs(long... script) {
+                this.script = Arrays.copyOf(script, script.length);
+            }
+
+            @Override
+            public long nextLong(long origin, long bound) {
+                draws.add(new Draw(origin, bound));
+                if (next >= script.length) {
+                    throw new AssertionError("no scripted value left for nextLong(" + origin + ", " + bound + ")");
+                }
+                long k = script[next++];
+                if (k < origin || k >= bound) {
+                    throw new AssertionError("scripted " + k + " is outside [" + origin + ", " + bound + ")");
+                }
+                return k;
+            }
+
+            @Override
+            public long nextLong() {
+                throw new AssertionError("the unit source must draw with nextLong(origin, bound), not nextLong()");
+            }
+
+            @Override
+            public double nextDouble() {
+                throw new AssertionError("the unit source must not draw with nextDouble(), which covers [0, 1)");
+            }
+
+            List<Draw> draws() {
+                return List.copyOf(draws);
+            }
         }
     }
 
@@ -550,9 +706,9 @@ final class CustomerDataGeneratorTest {
         void atROneNoCompanyTypeAndNoStreetTypeIsAppended() {
             Customer row = constantRows(1.0).row(1, START);
 
-            assertThat(CustomerDataGenerator.COMPANY_TYPES)
+            assertThat(SOURCE_COMPANY_TYPES)
                     .noneMatch(type -> row.name().endsWith(" " + type));
-            assertThat(CustomerDataGenerator.STREET_TYPES)
+            assertThat(SOURCE_STREET_TYPES)
                     .noneMatch(type -> row.address().addr().endsWith(" " + type));
         }
 
@@ -668,6 +824,276 @@ final class CustomerDataGeneratorTest {
         }
     }
 
+    /**
+     * Exact rows from scripted draws, traced by hand through the company-name and street rules
+     * [5250_Subfile/LOADCUSTR.SQLRPGLE:151-183].
+     *
+     * <p>A script lists one unit value per {@code Rand_Int} call in source order: the CSZ index, the name
+     * length limit, the name words, the company-type draw, the street length limit, the street number (only
+     * when n % 4 &ne; 0), the street words and the street-type draw; every later draw is 0. One
+     * {@code genWord(5:11)} at r = 0 is {@code AAAAAA} (7 draws), and at r = 1 it is twelve {@code Z}
+     * (13 draws). A draw in the middle of a {@code Rand_Int} interval reaches exactly one value, so these
+     * rows pin the generator's own arguments: the type draws 1..21 and 1..28 with their cutoffs after 12
+     * and 16, the 12 company and 16 street types in source order, and the inclusive 5..28 word limit. Rows
+     * whose text overflows show the {@code CHAR(40)} cut to the first 40 characters and the removal of a
+     * blank the cut leaves at the end. Every expected value is written out, never derived from
+     * {@link CustomerDataGenerator}'s constants or lists.
+     */
+    @Nested
+    @DisplayName("row: scripted draws through the name and street rules")
+    class ScriptedRows {
+
+        @ParameterizedTest(name = "company-type draw {0} gives name \"{1}\"")
+        @CsvSource(textBlock = """
+                 1, AAAAAA INC
+                 2, AAAAAA LLC
+                 3, AAAAAA LLP
+                 4, AAAAAA COMPANY
+                 5, AAAAAA & SONS
+                 6, AAAAAA ET FILS
+                 7, AAAAAA PLC
+                 8, AAAAAA CORP
+                 9, AAAAAA LTD
+                10, AAAAAA SOLE
+                11, AAAAAA PARTNERS
+                12, AAAAAA ASSOC
+                13, AAAAAA
+                """)
+        void companyTypeDrawsUpToTwelveAppendTheirSourceTypeAndThirteenAppendsNone(int type, String expectedName) {
+            // Draw 0: CSZ; draw 1: name limit 5; draws 2-8: AAAAAA; draw 9: j = Rand_Int(1 : 21), mid-interval.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(unitFor(1, 21, type)).row(1);
+
+            assertThat(row.name()).isEqualTo(expectedName);
+        }
+
+        @ParameterizedTest(name = "street-type draw {0} gives street \"{1}\"")
+        @CsvSource(textBlock = """
+                 1, 1 AAAAAA STREET
+                 2, 1 AAAAAA ST
+                 3, 1 AAAAAA ROAD
+                 4, 1 AAAAAA RD
+                 5, 1 AAAAAA AVENUE
+                 6, 1 AAAAAA AVE
+                 7, 1 AAAAAA PLACE
+                 8, 1 AAAAAA CIRCLE
+                 9, 1 AAAAAA SQUARE
+                10, 1 AAAAAA HWY
+                11, 1 AAAAAA VISTA
+                12, 1 AAAAAA CALLE
+                13, 1 AAAAAA RANCH
+                14, 1 AAAAAA CRESCENT
+                15, 1 AAAAAA COURT
+                16, 1 AAAAAA WAY
+                17, 1 AAAAAA
+                """)
+        void streetTypeDrawsUpToSixteenAppendTheirSourceTypeAndSeventeenAppendsNone(int type,
+                String expectedStreet) {
+            // Draws 0-9: CSZ, name limit 5, AAAAAA, INC; draw 10: street limit 5; draw 11: number 1;
+            // draws 12-18: AAAAAA; draw 19: j = Rand_Int(1 : 28), mid-interval.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(0.0)
+                    .draw(0.0).draw(0.0).aWord().draw(unitFor(1, 28, type))
+                    .row(1);
+
+            assertThat(row.address().addr()).isEqualTo(expectedStreet);
+        }
+
+        /**
+         * Six-letter words make the text 7, 14, 21, 28 and 35 characters long with its trailing blank. The
+         * loop takes another word while the text is at most the limit, so a limit equal to one of those
+         * lengths takes one more word, and 28, drawn only at r = 1, takes a fifth.
+         */
+        @ParameterizedTest(name = "name length limit {0} gives \"{1}\"")
+        @CsvSource(textBlock = """
+                 5, AAAAAA INC
+                 6, AAAAAA INC
+                 7, AAAAAA AAAAAA INC
+                13, AAAAAA AAAAAA INC
+                14, AAAAAA AAAAAA AAAAAA INC
+                20, AAAAAA AAAAAA AAAAAA INC
+                21, AAAAAA AAAAAA AAAAAA AAAAAA INC
+                27, AAAAAA AAAAAA AAAAAA AAAAAA INC
+                28, AAAAAA AAAAAA AAAAAA AAAAAA AAAAAA INC
+                """)
+        void nameWordsContinueWhileTheTextIsAtMostTheLimitDrawnFromFiveToTwentyEight(int limit,
+                String expectedName) {
+            // Draw 0: CSZ; draw 1: MaxL = Rand_Int(5 : 28), mid-interval below 28 and exactly 1 for 28. Every
+            // later draw is 0, so the words are AAAAAA and the company type is INC.
+            Customer row = new RowScript().draw(0.0).draw(unitFor(5, 28, limit)).row(1);
+
+            assertThat(row.name()).isEqualTo(expectedName);
+        }
+
+        /**
+         * The street words follow the same rule on row 4, which has no street number. At limit 28 the fifth
+         * word makes 34 characters and {@code STREET} 41, which the cut to 40 shortens to {@code STREE}.
+         */
+        @ParameterizedTest(name = "street length limit {0} on row 4 gives \"{1}\"")
+        @CsvSource(textBlock = """
+                 5, AAAAAA STREET
+                 6, AAAAAA STREET
+                 7, AAAAAA AAAAAA STREET
+                13, AAAAAA AAAAAA STREET
+                14, AAAAAA AAAAAA AAAAAA STREET
+                20, AAAAAA AAAAAA AAAAAA STREET
+                21, AAAAAA AAAAAA AAAAAA AAAAAA STREET
+                27, AAAAAA AAAAAA AAAAAA AAAAAA STREET
+                28, AAAAAA AAAAAA AAAAAA AAAAAA AAAAAA STREE
+                """)
+        void streetWordsContinueWhileTheTextIsAtMostTheLimitDrawnFromFiveToTwentyEight(int limit,
+                String expectedStreet) {
+            // Draws 0-9: CSZ, name limit 5, AAAAAA, INC; draw 10: street MaxL = Rand_Int(5 : 28); row 4 draws no
+            // number. Every later draw is 0, so the words are AAAAAA and the street type is STREET.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(0.0).draw(unitFor(5, 28, limit))
+                    .row(4);
+
+            assertThat(row.address().addr()).isEqualTo(expectedStreet);
+        }
+
+        @Test
+        void theStreetNumberCountsTowardTheLimitAndTwentyEightStillTakesAThirdTwelveLetterWord() {
+            // Row 1: draw 10, the street limit, at r = 1 (28); draw 11, the number, at r = 0 (1); then twelve-Z
+            // words. "1 " is 2 characters, one word makes 15 and a second 28, both at most 28, so a third
+            // follows (41) and the loop stops. STREET (type draw 0) joins the trimmed 40 characters and falls
+            // to the cut. A limit of 27 would stop after two words.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(0.0)
+                    .draw(1.0).draw(0.0).zWord().zWord().zWord()
+                    .row(1);
+
+            assertThat(row.address().addr()).isEqualTo("1 ZZZZZZZZZZZZ ZZZZZZZZZZZZ ZZZZZZZZZZZZ").hasSize(40);
+        }
+
+        @Test
+        void aNameLongerThanFortyKeepsExactlyItsFirstFortyCharacters() {
+            // Draw 1: name limit at r = 1 (28); words AAAAAA, then twelve Z twice: 7 and 20 continue, 33 stops,
+            // 32 characters trimmed. Company type 11, PARTNERS, makes 41 characters, and the CHAR(40)
+            // assignment keeps the first 40, dropping the final S.
+            Customer row = new RowScript().draw(0.0).draw(1.0).aWord().zWord().zWord().draw(unitFor(1, 21, 11))
+                    .row(1);
+
+            assertThat(row.name()).isEqualTo("AAAAAA ZZZZZZZZZZZZ ZZZZZZZZZZZZ PARTNER").hasSize(40);
+        }
+
+        @Test
+        void aNameWhoseFortyCharacterCutEndsInABlankIsStoredWithoutIt() {
+            // Name limit 28; words AAAAAA, AAAAAA, then twelve Z twice: 7, 14 and 27 continue, 40 stops, 39
+            // characters trimmed. INC (type draw 0) makes 43; the first 40 end in the blank before INC, and the
+            // stored name drops it, as a CHAR(40) column ignores its padding.
+            Customer row = new RowScript().draw(0.0).draw(1.0).aWord().aWord().zWord().zWord().draw(0.0)
+                    .row(1);
+
+            assertThat(row.name()).isEqualTo("AAAAAA AAAAAA ZZZZZZZZZZZZ ZZZZZZZZZZZZ").hasSize(39);
+        }
+
+        @Test
+        void aStreetLongerThanFortyKeepsExactlyItsFirstFortyCharacters() {
+            // Row 4, no street number. Draws 0-9: CSZ, name limit 5, AAAAAA, INC; draw 10: street limit 28;
+            // words AAAAAA, then twelve Z twice, 32 characters trimmed; street type 14, CRESCENT, makes 41, and
+            // the cut keeps the first 40, dropping the final T.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(0.0)
+                    .draw(1.0).aWord().zWord().zWord().draw(unitFor(1, 28, 14))
+                    .row(4);
+
+            assertThat(row.address().addr()).isEqualTo("AAAAAA ZZZZZZZZZZZZ ZZZZZZZZZZZZ CRESCEN").hasSize(40);
+        }
+
+        @Test
+        void aStreetWhoseFortyCharacterCutEndsInABlankIsStoredWithoutIt() {
+            // Row 4, street limit 28; words AAAAAA, AAAAAA, then twelve Z twice: 39 characters trimmed. STREET
+            // (type draw 0) makes 46; the first 40 end in the blank before STREET, which the stored street drops.
+            Customer row = new RowScript().draw(0.0).draw(0.0).aWord().draw(0.0)
+                    .draw(1.0).aWord().aWord().zWord().zWord().draw(0.0)
+                    .row(4);
+
+            assertThat(row.address().addr()).isEqualTo("AAAAAA AAAAAA ZZZZZZZZZZZZ ZZZZZZZZZZZZ").hasSize(39);
+        }
+
+        /**
+         * A draw script for one row: one unit value per {@code Rand_Int} call, in the order the row consumes
+         * them, with every draw beyond the script at 0.
+         */
+        private static final class RowScript {
+
+            private final List<Double> draws = new ArrayList<>();
+
+            /**
+             * Appends one draw.
+             *
+             * @param r the unit value
+             * @return this script
+             */
+            RowScript draw(double r) {
+                draws.add(r);
+                return this;
+            }
+
+            /**
+             * Appends the 7 draws of one {@code genWord(5, 11)} at r = 0, the word {@code AAAAAA}: two
+             * letters, {@code TgtL} 3 and two letter pairs.
+             *
+             * @return this script
+             */
+            RowScript aWord() {
+                return repeat(0.0, 7);
+            }
+
+            /**
+             * Appends the 13 draws of one {@code genWord(5, 11)} at r = 1, twelve {@code Z}: two letters,
+             * {@code TgtL} 9 and five letter pairs.
+             *
+             * @return this script
+             */
+            RowScript zWord() {
+                return repeat(1.0, 13);
+            }
+
+            /**
+             * Builds row {@code rowNumber}, id {@code 1001}, over the three-row CSZ list from this script.
+             *
+             * @param rowNumber the 1-based row number
+             * @return the generated row
+             */
+            Customer row(long rowNumber) {
+                double[] script = draws.stream().mapToDouble(Double::doubleValue).toArray();
+                NameGenerator names = new NameGenerator(new ScriptedUnit(0.0, script));
+                return new CustomerDataGenerator(names, THREE_ROWS, LOAD_TIME).row(rowNumber, START);
+            }
+
+            /**
+             * Appends the same draw several times.
+             *
+             * @param r     the unit value
+             * @param count how many draws
+             * @return this script
+             */
+            private RowScript repeat(double r, int count) {
+                for (int i = 0; i < count; i++) {
+                    draws.add(r);
+                }
+                return this;
+            }
+        }
+    }
+
+    /** LOADCUSTR's company-type and street-type arrays [5250_Subfile/LOADCUSTR.SQLRPGLE:59-88]. */
+    @Nested
+    @DisplayName("COMPANY_TYPES and STREET_TYPES: LOADCUSTR's arrays copied entry for entry")
+    class TypeLists {
+
+        @Test
+        void companyTypesAreTheTwelveSourceEntriesInSourceOrder() {
+            assertThat(CustomerDataGenerator.COMPANY_TYPES)
+                    .containsExactlyElementsOf(SOURCE_COMPANY_TYPES)
+                    .hasSize(12);
+        }
+
+        @Test
+        void streetTypesAreTheSixteenSourceEntriesInSourceOrder() {
+            assertThat(CustomerDataGenerator.STREET_TYPES)
+                    .containsExactlyElementsOf(SOURCE_STREET_TYPES)
+                    .hasSize(16);
+        }
+    }
+
     /** Row rules over a seeded load [5250_Subfile/LOADCUSTR.SQLRPGLE:138-200]. */
     @Nested
     @DisplayName("row rules over a seeded load of 2,100 rows")
@@ -720,15 +1146,17 @@ final class CustomerDataGeneratorTest {
 
         @Test
         void nameAndStreetFitFortyCharactersWithNoSurroundingBlank() {
+            // Fld.NAME and Fld.ADDR [5250_Subfile/LOADCUSTR.SQLRPGLE:165,183] are CUSTMAST's Name and Addr,
+            // both CHAR(40) [5250_Subfile/Custmast.sql:14-15].
             List<Customer> rows = seededRows(THREE_ROWS);
             SoftAssertions.assertSoftly(softly -> {
                 for (int i = 0; i < rows.size(); i++) {
                     Customer row = rows.get(i);
                     softly.assertThat(row.name()).as("row %d name", i + 1)
-                            .hasSizeLessThanOrEqualTo(CustomerDataGenerator.NAME_MAX)
+                            .hasSizeLessThanOrEqualTo(40)
                             .matches(NAME_SHAPE);
                     softly.assertThat(row.address().addr()).as("row %d street", i + 1)
-                            .hasSizeLessThanOrEqualTo(CustomerDataGenerator.ADDR_MAX)
+                            .hasSizeLessThanOrEqualTo(40)
                             .matches(ADDR_SHAPE);
                 }
             });
@@ -738,13 +1166,13 @@ final class CustomerDataGeneratorTest {
         void companyAndStreetTypesAreAppendedToSomeRowsAndNotToOthers() {
             List<Customer> rows = seededRows(THREE_ROWS);
 
-            assertThat(rows).anyMatch(row -> CustomerDataGenerator.COMPANY_TYPES.stream()
+            assertThat(rows).anyMatch(row -> SOURCE_COMPANY_TYPES.stream()
                             .anyMatch(type -> row.name().endsWith(" " + type)))
-                    .anyMatch(row -> CustomerDataGenerator.COMPANY_TYPES.stream()
+                    .anyMatch(row -> SOURCE_COMPANY_TYPES.stream()
                             .noneMatch(type -> row.name().endsWith(" " + type)))
-                    .anyMatch(row -> CustomerDataGenerator.STREET_TYPES.stream()
+                    .anyMatch(row -> SOURCE_STREET_TYPES.stream()
                             .anyMatch(type -> row.address().addr().endsWith(" " + type)))
-                    .anyMatch(row -> CustomerDataGenerator.STREET_TYPES.stream()
+                    .anyMatch(row -> SOURCE_STREET_TYPES.stream()
                             .noneMatch(type -> row.address().addr().endsWith(" " + type)));
         }
 
@@ -802,6 +1230,24 @@ final class CustomerDataGeneratorTest {
                     new CustomerDataGenerator(constant(0.0), List.of(sixDigits), LOAD_TIME).row(1, START);
 
             assertThat(row.address().zip()).isEqualTo("34567");
+        }
+
+        @ParameterizedTest(name = "CSZ state {0} is stored as {1}")
+        @CsvSource(textBlock = """
+                ca, CA
+                Tx, TX
+                nY, NY
+                """)
+        void theCszStateIsStoredUppercaseWhateverItsCaseInTheList(String state, String expectedState) {
+            // CszSource keeps the file's state as written, only trimmed, and StateService accepts it in any
+            // case; the generator uppercases it (CustomerDataGenerator's normalization rule), so the stored
+            // code matches STATES and custmast_state_fk.
+            CszRow notUppercase = new CszRow(90210, "STANDARD", "LOWERTOWN", state);
+            Customer row =
+                    new CustomerDataGenerator(constant(0.0), List.of(notUppercase), LOAD_TIME).row(1, START);
+
+            assertThat(List.of(row.address().city(), row.address().state(), row.address().zip()))
+                    .containsExactly("LOWERTOWN", expectedState, "90210");
         }
 
         @Test
