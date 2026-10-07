@@ -342,9 +342,17 @@ dialog::backdrop {
   border: 1px solid var(--color-accent);
 }
 
+/*
+ * A disabled key takes no pointer events, so a press on it reaches the
+ * .fkey-bar toolbar, whose mousedown handler keeps focus in the field that has
+ * it. Browsers deliver no mouse events from a disabled button itself, yet still
+ * blur the focused field when it is pressed; F4=Prompt+ needs State to keep
+ * focus. The not-allowed cursor of disabled buttons is given up for that.
+ */
 .fkey-bar__key:disabled {
   color: var(--color-muted);
   border-color: var(--color-border);
+  pointer-events: none;
 }
 
 /*
