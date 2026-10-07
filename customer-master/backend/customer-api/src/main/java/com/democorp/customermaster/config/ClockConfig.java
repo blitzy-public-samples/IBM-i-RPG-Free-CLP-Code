@@ -25,9 +25,10 @@ import org.springframework.context.annotation.Configuration;
  * <ul>
  *   <li>{@code CustomerMaintenanceService} sets {@code chgTime} on add and update, written in the
  *       same INSERT or UPDATE as the data, so the stamp commits or rolls back with the write.</li>
- *   <li>{@code CustomerGeneratorRunner} and {@code CustomerLoader} take the load start from it,
- *       use that value as every generated row's {@code chgtime}, and measure elapsed time from
- *       it.</li>
+ *   <li>{@code CustomerGeneratorRunner} takes the load start from it, passes that value to
+ *       {@code CustomerDataGenerator} as every generated row's {@code chgtime}, and measures
+ *       elapsed time from it; {@code CustomerLoader} writes the rows it is given and reads no
+ *       clock.</li>
  * </ul>
  *
  * <p>The class carries no profile or condition: the bean exists in the web context, in the
