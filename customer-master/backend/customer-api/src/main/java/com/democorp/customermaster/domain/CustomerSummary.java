@@ -30,9 +30,12 @@ import java.util.Objects;
  * builds each instance in its row mapper from
  * {@code SELECT custid, name, city, state, left(zip, 5) AS zip5, active}, so
  * {@code zip5} is already cut to five characters and this record never holds the full
- * ZIP. The values are stored column values, not filters or display text: they carry no
- * padding, because the target text columns are {@code varchar}, and they are exactly
- * what the keyset comparison {@code (name, city, state, custid)} reads back.
+ * ZIP. The values are stored column values, not filters or display text. The target
+ * text columns are {@code varchar}, which adds no automatic padding, and values
+ * written through {@link TextNormalizer#field(String)} carry no trailing blanks,
+ * because it strips them. They are exactly what the keyset comparison
+ * {@code (name, city, state, custid)} reads back, so they must not be trimmed or
+ * padded again.
  *
  * <p><b>Who reads it.</b>
  * <ul>

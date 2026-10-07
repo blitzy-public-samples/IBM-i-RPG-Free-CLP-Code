@@ -5,10 +5,15 @@
 -- with BASE36ADD (BASE36/SRV_BASE36.RPGLE) and uses the advanced value, so the
 -- first interactive id the source issues is EEEF.
 --
--- Purpose: atomic allocation of the 4-character base-36 custid. nextval never
--- returns the same value twice, whatever the isolation level, and a rolled-back
--- add only leaves a gap. CustomerId.fromOrdinal turns the ordinal into the id
--- using BASE36ADD's digit alphabet: A..Z = 0..25, 0..9 = 26..35.
+-- Purpose: atomic allocation of the 4-character base-36 custid. Between
+-- restarts, nextval hands out no value twice, whatever the isolation level,
+-- and a rolled-back add only leaves a gap. The only restart is the generator's
+-- guarded, transactional ALTER SEQUENCE ... RESTART WITH, taken under the
+-- ACCESS EXCLUSIVE lock on custmast in the same transaction that replaces the
+-- rows. It takes effect or rolls back together with them, so no remaining row
+-- holds a value that nextval hands out again.
+-- CustomerId.fromOrdinal turns the ordinal into the id using BASE36ADD's digit
+-- alphabet: A..Z = 0..25, 0..9 = 26..35.
 --
 --   START WITH 191957  EEEF, the successor of CUSTNEXT's initial EEEE
 --                      (ordinal 191956; despite the data-area comment calling
@@ -27,9 +32,8 @@
 -- this sequence, and always after taking a lock on table custmast in the same
 -- transaction (ROW EXCLUSIVE for an add, ACCESS EXCLUSIVE for a generator load):
 -- table lock first, sequence second, so adds and loads cannot deadlock. The
--- generator resets it with the transactional ALTER SEQUENCE ... RESTART WITH,
--- never with setval. The sequence belongs to the migration role (DB_USER),
--- which ALTER SEQUENCE requires.
+-- restart never uses setval. The sequence belongs to the migration role
+-- (DB_USER), which ALTER SEQUENCE requires.
 --
 -- The name is unqualified: the schema comes from DB_SCHEMA through
 -- spring.flyway.schemas. custmast.custid has no column default, because ids are

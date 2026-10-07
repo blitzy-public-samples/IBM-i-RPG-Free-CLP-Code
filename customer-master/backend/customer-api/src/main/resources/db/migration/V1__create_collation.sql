@@ -21,11 +21,17 @@
 -- ICU root position before letters. The α stays a literal character, because
 -- ICU tailoring rules read the escape \u03B1 as the text u03B1.
 --
--- The reorder locale 'und-u-kr-latn-digit' is not used: on this PostgreSQL/ICU
--- build its digit reorder applies only to sort keys (ORDER BY), not to
--- comparisons (<, >, row comparisons) or B-tree index order, so index scans
--- and keyset predicates would put digits before letters. The tailoring rule
--- places ASCII digits after Latin letters consistently on every path.
+-- Contract: comparison (=, <, >, row comparisons), ORDER BY and B-tree index
+-- order give one order, with the ASCII digits after every Latin letter.
+-- Keyset pagination (the row comparison over custmast_search_keyset) and
+-- index scans depend on comparison and sort order agreeing.
+--
+-- The reorder locale 'und-u-kr-latn-digit' is not used: with ICU 76.1 in the
+-- pinned postgres:18.6 image, its comparison of text in U+0000..U+017F skips
+-- the digit reorder that its sort keys apply, so comparisons, row comparisons
+-- and B-tree order put digits before letters while ORDER BY puts them after.
+-- Check: under a collation with that locale, 'A' < '0' is false, yet ORDER BY
+-- puts 'A' first.
 --
 -- Deterministic on purpose (the default): the regex CHECK on custid (V3) and
 -- LIKE prefix scans over the varchar_pattern_ops indexes need a deterministic

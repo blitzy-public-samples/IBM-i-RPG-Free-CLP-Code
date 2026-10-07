@@ -19,7 +19,9 @@
 -- Intentional differences from the source (recorded in
 -- docs/deviations-and-open-questions.md):
 --   * Text columns are varchar with the source lengths instead of CHAR, so no
---     trailing padding is stored. Customer search matches LIKE against
+--     automatic padding is added. Values written by the application and the
+--     generator carry no trailing blanks, because TextNormalizer.field strips
+--     them. Customer search matches LIKE against
 --     rpad(name, 40) and rpad(city, 20), which reproduces the Db2 match on the
 --     blank-padded CHAR value. The code columns custid, state and active stay
 --     char(n).

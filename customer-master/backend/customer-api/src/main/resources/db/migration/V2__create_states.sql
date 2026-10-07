@@ -16,7 +16,8 @@
 --   The source keeps STATES and CUSTMAST in different libraries; both now live
 --   in the one migration schema (DB_SCHEMA, through spring.flyway.schemas), so
 --   the foreign key from custmast can exist.
---   NAME CHAR(30) becomes varchar(30), which stores no trailing padding.
+--   NAME CHAR(30) becomes varchar(30), which adds no automatic CHAR padding
+--   (the names below carry no trailing blanks).
 --   StateRepository.search matches rpad(upper(name), 30), so a user '_' still
 --   matches a pad blank as it does in Db2: nameContains=texas_ finds Texas.
 --   The table label becomes COMMENT ON TABLE. The record format name, the
