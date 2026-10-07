@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE AddressValidateResponse [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<!DOCTYPE AddressValidateResponse [<!ENTITY xxe SYSTEM "file:///dev/null">]>
 <AddressValidateResponse>
   <Address ID="0">
     <Address1>STE 2</Address1>
