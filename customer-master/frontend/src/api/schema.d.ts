@@ -371,7 +371,7 @@ export interface operations {
             201: {
                 headers: {
                     /** @description Path of the new customer, /api/customers/{custId} */
-                    Location?: string;
+                    Location: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -787,6 +787,15 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+            /** @description APP0401 (only when invalid Basic credentials are supplied; an anonymous request is answered 200) */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description APP0400 (method not allowed; Allow lists the supported methods) */

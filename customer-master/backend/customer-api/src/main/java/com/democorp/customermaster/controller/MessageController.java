@@ -40,7 +40,13 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>Access.</b> The endpoint is public: the catalog is needed to render the sign-in page's own
  * messages before any credentials exist, and it holds no customer data. The security configuration
  * permits it anonymously, so, unlike the other controllers, no {@code basicAuth} security requirement is
- * declared for the OpenAPI document. It has no error responses of its own to declare.
+ * declared for the OpenAPI document. Its one error response of its own is a conditional 401
+ * {@code APP0401}: the Basic authentication filter runs before the anonymous permission is checked, so
+ * a request that voluntarily sends invalid or malformed Basic credentials is still rejected, as the
+ * security configuration documents. The body is the usual problem+json, and the
+ * {@code WWW-Authenticate} challenge is added only when {@code X-Requested-With} is absent. An
+ * anonymous request is always answered 200, which is why the SPA fetches the catalog without
+ * credentials.
  *
  * <p><b>Web context only.</b> The generator runs the same jar with no web server; the condition keeps
  * this controller out of that context.
@@ -76,6 +82,13 @@ public class MessageController {
             content = @Content(
                     mediaType = MediaType.APPLICATION_JSON_VALUE,
                     schema = @Schema(type = "object", additionalPropertiesSchema = String.class)))
+    @ApiResponse(
+            responseCode = "401",
+            description = "APP0401 (only when invalid Basic credentials are supplied; an anonymous request"
+                    + " is answered 200)",
+            content = @Content(
+                    mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                    schema = @Schema(implementation = ProblemSchema.class)))
     @GetMapping(value = "/api/messages", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, String> messages() {
         return catalog.all();

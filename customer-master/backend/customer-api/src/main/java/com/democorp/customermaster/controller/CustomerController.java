@@ -388,6 +388,7 @@ public class CustomerController {
             headers = @Header(
                     name = "Location",
                     description = "Path of the new customer, /api/customers/{custId}",
+                    required = true,
                     schema = @Schema(type = "string")),
             content = @Content(
                     mediaType = MediaType.APPLICATION_JSON_VALUE,

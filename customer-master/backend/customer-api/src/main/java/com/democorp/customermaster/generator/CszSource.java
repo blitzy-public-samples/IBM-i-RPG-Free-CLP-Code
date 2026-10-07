@@ -78,6 +78,10 @@ import org.springframework.stereotype.Component;
  *       foreign key would reject any other row, while the source had no such key. Codes in the
  *       download such as AP, FM, MH and PW are therefore dropped. {@code exists} matches
  *       case-insensitively; {@code CustomerDataGenerator} normalizes the state it writes.</li>
+ *   <li>A city in a row the two rules above keep must not contain U+0000 (NUL), which PostgreSQL text
+ *       and therefore {@code custmast.city} cannot store: such a row fails the whole load before any
+ *       write, naming its line and the city column used ({@code city} or {@code primary_city}). The
+ *       character is never removed or replaced. A row those rules drop is dropped whatever it holds.</li>
  *   <li>{@code type} is trimmed, or {@code ""} when the file has no such column.</li>
  * </ol>
  * Retained rows keep their file order and are never deduplicated, because {@code CustomerDataGenerator}
@@ -151,6 +155,9 @@ public class CszSource {
     /** U+2029, which some viewers render as a line break although it is no control character. */
     private static final char PARAGRAPH_SEPARATOR = '\u2029';
 
+    /** U+0000, which no PostgreSQL text value can hold; a kept city carrying it fails the load. */
+    private static final char NUL = '\u0000';
+
     /** The STATES cache that decides which rows are kept. */
     private final StateService stateService;
 
@@ -170,7 +177,8 @@ public class CszSource {
      *                 prefix; surrounding whitespace is ignored
      * @return the retained rows in file order, unmodifiable; empty when no row is usable
      * @throws CszFileException if the location is empty, cannot be opened or read, is not valid UTF-8,
-     *                          lacks a required column, or holds a malformed record or a bad ZIP
+     *                          lacks a required column, or holds a malformed record, a bad ZIP or a kept
+     *                          city containing U+0000
      */
     public List<CszRow> load(String location) {
         if (location == null || location.isBlank()) {
@@ -308,6 +316,14 @@ public class CszSource {
             if (!stateService.exists(state)) {
                 droppedState++;
                 continue;
+            }
+
+            // PostgreSQL text cannot store U+0000, so COPY would fail inside the loader's transaction after
+            // TRUNCATE; a kept city carrying it fails here, before any write, naming its line and column.
+            if (city.indexOf(NUL) >= 0) {
+                throw new CszFileException(prefix(location) + " line " + record.line() + ": "
+                        + columns.cityName() + " " + quoted(city) + " contains U+0000 (NUL), which custmast.city"
+                        + " cannot store; remove the character from the file");
             }
 
             final String type = columns.type() >= 0 && columns.type() < fields.size()
@@ -705,7 +721,7 @@ public class CszSource {
      *
      * @param zip      index of {@code zip}
      * @param city     index of {@code city}, or of {@code primary_city} when there is no {@code city}
-     * @param cityName the header name of the city column used, for the log
+     * @param cityName the header name of the city column used, for the log and messages
      * @param state    index of {@code state}
      * @param type     index of {@code type}, or -1 when the file has none
      */
@@ -794,7 +810,7 @@ public class CszSource {
 
     /**
      * A CSZ file that cannot be used: an empty or unknown location, an unreadable file, invalid UTF-8,
-     * a missing required column, a malformed record or a bad ZIP.
+     * a missing required column, a malformed record, a bad ZIP, or a kept city containing U+0000.
      *
      * <p>The message is always one line, naming the location and, for a record, the 1-based physical
      * line where it starts; {@code CustomerGeneratorRunner} prints it verbatim and exits with status 1.

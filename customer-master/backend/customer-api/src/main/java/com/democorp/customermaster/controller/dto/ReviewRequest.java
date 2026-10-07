@@ -45,7 +45,10 @@ import jakarta.validation.constraints.Size;
  * mapping method, {@link #fields()}, follows no getter convention, so neither Jackson nor
  * springdoc sees a property beyond these ten. As in {@code CustomerFields}, each data field's
  * documentation-only {@code @Schema} publishes it as an optional string or {@code null};
- * {@code purpose} stays a required {@code ADD}/{@code EDIT} string.
+ * {@code purpose} stays a required {@code ADD}/{@code EDIT} string. The record's own
+ * documentation-only {@code @Schema} closes the schema ({@code additionalProperties: false}), so
+ * the contract admits no member beyond the ten, as the binder does when it answers any other
+ * member with 400 APP0400.
  *
  * <p><b>What a client cannot send.</b> {@code custId}, {@code chgTime}, {@code chgUser},
  * {@code rowVersion} and {@code version} are deliberately absent: a review stores nothing, the id
@@ -100,6 +103,7 @@ import jakarta.validation.constraints.Size;
  * @param acctPhone the account manager's phone, at most 20 characters; no format is enforced
  * @param active    the active code, one character; {@code Y} or {@code N} once validated
  */
+@Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record ReviewRequest(
         @NotNull @JsonDeserialize(using = PurposeDeserializer.class) CustomerMaintenanceService.Purpose purpose,
         @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,

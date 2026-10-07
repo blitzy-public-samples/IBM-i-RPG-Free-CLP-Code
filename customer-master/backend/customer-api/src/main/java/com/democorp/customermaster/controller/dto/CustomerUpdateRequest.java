@@ -28,7 +28,10 @@ import jakarta.validation.constraints.Size;
  * through {@code @JsonUnwrapped}, carries no serialization annotation, and its one mapping
  * method, {@link #fields()}, follows no getter convention, so neither Jackson nor springdoc sees
  * a property beyond these ten. As in {@code CustomerFields}, each data field's
- * documentation-only {@code @Schema} publishes it as an optional string or {@code null}.
+ * documentation-only {@code @Schema} publishes it as an optional string or {@code null}, and the
+ * record's own documentation-only {@code @Schema} closes the schema
+ * ({@code additionalProperties: false}), so the contract admits no member beyond the ten, as the
+ * binder does when it answers any other member with 400 APP0400.
  *
  * <p><b>What a client cannot send.</b> {@code custId} is taken from the path, and
  * {@code chgTime}, {@code chgUser} and {@code rowVersion} are set by the service from the clock,
@@ -76,6 +79,7 @@ import jakarta.validation.constraints.Size;
  * @param active    the active code, one character; {@code Y} or {@code N} once validated
  * @param version   the row version the client read; required
  */
+@Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record CustomerUpdateRequest(
         @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
         @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,

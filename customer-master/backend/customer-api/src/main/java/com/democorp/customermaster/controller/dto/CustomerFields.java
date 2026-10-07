@@ -55,9 +55,12 @@ import jakarta.validation.constraints.Size;
  *
  * <p><b>Published schema.</b> Each component's documentation-only {@code @Schema} declares it a
  * string or {@code null}, and none is {@code required}: a client may omit a field or send JSON
- * {@code null}, and both reach the service as {@code null}. As the {@code customer} member of
- * {@code ReviewResponse}, {@code controller/DtoSchemaCustomizer} publishes this schema with all
- * nine properties required, because a successful review returns every field.
+ * {@code null}, and both reach the service as {@code null}. The record's own documentation-only
+ * {@code @Schema} closes the schema ({@code additionalProperties: false}), so the contract admits
+ * no member beyond the nine, as the binder does when it answers any other member with 400
+ * APP0400. As the {@code customer} member of {@code ReviewResponse},
+ * {@code controller/DtoSchemaCustomizer} publishes this schema with all nine properties
+ * required, because a successful review returns every field and nothing else.
  *
  * <p><b>What a client cannot send.</b> {@code custId}, {@code chgTime}, {@code chgUser},
  * {@code rowVersion} and {@code version} are deliberately absent: the id is allocated on add
@@ -107,6 +110,7 @@ import jakarta.validation.constraints.Size;
  * @param acctPhone the account manager's phone, at most 20 characters; no format is enforced
  * @param active    the active code, one character; {@code Y} or {@code N} once validated
  */
+@Schema(additionalProperties = Schema.AdditionalPropertiesValue.FALSE)
 public record CustomerFields(
         @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String name,
         @Schema(types = {"string", "null"}) @Size(max = 40) @StorableText String addr,

@@ -113,6 +113,7 @@ paths:
           headers:
             Location:
               description: "Path of the new customer, /api/customers/{custId}"
+              required: true
               schema:
                 type: string
               style: simple
@@ -431,6 +432,13 @@ paths:
                 additionalProperties:
                   type: string
           description: OK
+        "401":
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+          description: APP0401 (only when invalid Basic credentials are supplied;
+            an anonymous request is answered 200)
         "405":
           content:
             application/problem+json:
@@ -563,6 +571,7 @@ components:
   schemas:
     CustomerFields:
       type: object
+      additionalProperties: false
       properties:
         acctMgr:
           type:
@@ -689,6 +698,7 @@ components:
       - zip5
     CustomerUpdateRequest:
       type: object
+      additionalProperties: false
       properties:
         acctMgr:
           type:
@@ -860,6 +870,7 @@ components:
       - type
     ReviewRequest:
       type: object
+      additionalProperties: false
       properties:
         acctMgr:
           type:
