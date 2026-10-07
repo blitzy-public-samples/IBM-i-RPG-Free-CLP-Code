@@ -30,8 +30,9 @@ import org.springframework.stereotype.Service;
  *       STATES by the entered {@code SD_STATE} on every validation and sent DEM0503 when no row came
  *       back. The
  *       State rule in {@code CustomerValidator} (DEM0503) and the standardized-State check in
- *       {@code AddressStandardizationService} call {@link #exists(String)} instead, so no validation
- *       queries the database; the {@code custmast_state_fk} foreign key is the storage-level backstop.</li>
+ *       {@code AddressStandardizationService} call {@link #exists(String)} instead, so after the
+ *       cache's first load no validation queries the database; the {@code custmast_state_fk} foreign
+ *       key is the storage-level backstop.</li>
  *   <li><b>PMTSTATER {@code ProcessSearchCriteria}</b> [5250_Subfile/PMTSTATER.SQLRPGLE:395-400], which
  *       built {@code DESCLike = '%%'} for a blank "Name Contains" filter and
  *       {@code '%' + %trim(SC_NAME) + '%'} otherwise, and opened {@code DataCur}

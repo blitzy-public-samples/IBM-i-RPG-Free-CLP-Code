@@ -40,8 +40,10 @@ import org.junit.jupiter.params.provider.ValueSource;
  * carrying the rule number (1 to 9 in source order), the CUSTMSGF code, the {@code SndSflMsg} label verbatim
  * as its only argument, and exactly one {@link CustomerValidationException.FieldError} that names the field's
  * JSON property with the same code. Rule 7 is the account manager's phone and rule 8 the account manager's
- * name, because {@code EditUpdData} calls {@code Edit_SD_ACCTPH} before {@code Edit_SD_ACCTMGR}
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:419-433]; that is not the screen's label order.
+ * name: {@code EditUpdData} calls {@code Edit_SD_ACCTPH} before {@code Edit_SD_ACCTMGR}
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:419-433], and the screen, under its "Account Manager" heading, likewise
+ * puts "Phone" ({@code SD_ACCTPH}) on the row above "Name" ({@code SD_ACCTMGR})
+ * [5250_Subfile/MTNCUSTD.DSPF:104-113].
  *
  * <p><b>Inputs.</b> The validator receives values the maintenance service has already normalized with
  * {@code TextNormalizer.field}: uppercase, no trailing blanks, a blank field as {@code ""}. Every fixture

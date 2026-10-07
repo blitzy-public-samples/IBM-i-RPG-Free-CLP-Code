@@ -90,8 +90,10 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *       address service is called. The class carries no {@code @Transactional} for this reason.</li>
  *   <li>{@link #add(Customer)}: one transaction: {@code SET LOCAL lock_timeout}, the allocation guard
  *       and {@code nextval} inside {@link CustomerIdAllocator#next()}, then the {@code INSERT}.
- *       Validation runs before the transaction does any database work, so a rejected add consumes
- *       no id.</li>
+ *       The field rules and the principal check run before {@code SET LOCAL lock_timeout}, the
+ *       allocation and any write, so a rejected add consumes no id. If the State rule is the first
+ *       use of the {@code StateService} cache, the cache loads with one read of STATES inside this
+ *       transaction, before the lock timeout is set.</li>
  *   <li>{@link #update(CustomerId, Customer, long)}: one transaction: {@code SET LOCAL lock_timeout},
  *       then {@code UPDATE ... WHERE custid = ? AND row_version = ?}. When no row matches, the row is
  *       re-read in the same transaction: absent gives 404 DEM0599, present gives 409 DEM1002 with the
@@ -107,7 +109,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * principal, never the database role) and {@code row_version} are written by the same
  * {@code INSERT} or {@code UPDATE} as the data, so they commit or roll back with it. After each
  * commit one INFO line {@code customer.write action=ADD|UPDATE custId=... user=... version=...} is
- * logged; it carries no customer data beyond the id.
+ * logged; it carries no customer data beyond the id. The line is operational and best-effort: a
+ * logging failure never changes the outcome of the committed write, and is reported instead by one
+ * line on standard error.
  *
  * <p><b>Errors.</b> Every failure is a typed exception carrying a message code only; no SQL text
  * or SQLSTATE reaches a message. {@code controller.ApiExceptionHandler} maps them to problem+json.
@@ -307,7 +311,8 @@ public class CustomerMaintenanceService {
      *
      * <p>Runs with no transaction: the address call may take seconds and must hold no connection.
      * The State lookups of the rules and of the standardized-State check read the
-     * {@code StateService} cache, which loads once in its own short read.
+     * {@code StateService} cache; when a review is its first use, the State rule loads it with one
+     * short read of its own, finished before the address call.
      *
      * @param purpose why the review is requested; it selects the {@code active} default and the
      *                confirmation notice
@@ -363,9 +368,11 @@ public class CustomerMaintenanceService {
      *   <li>the {@code INSERT} of the data with {@code chgtime}, {@code chguser} and
      *       {@code row_version} 0.</li>
      * </ol>
-     * The rules and the principal are checked before any database work, so a rejected add consumes no
-     * id. An id consumed by a later failure leaves a gap, as the source consumes the key before an
-     * insert that may fail.
+     * The rules and the principal are checked before {@code SET LOCAL lock_timeout}, the allocation
+     * and any write, so a rejected add consumes no id. If the State rule is the first use of the
+     * {@code StateService} cache, the cache loads with one read of STATES inside this transaction,
+     * before the lock timeout is set. An id consumed by a later failure leaves a gap, as the source
+     * consumes the key before an insert that may fail.
      *
      * @param draft the nine data fields as received; any {@code custId}, stamp or version it carries
      *              is replaced
@@ -599,6 +606,14 @@ public class CustomerMaintenanceService {
      * it rolls back. Only the id, the user and the version are captured, never customer data.
      * Nothing is registered when no transaction synchronization is active.
      *
+     * <p>The line is best-effort. Spring calls {@code afterCommit} after the database
+     * {@code COMMIT} and passes anything it throws on to the caller of the transactional method, so
+     * an escaping logging failure would answer 500 for a stored customer, and a retried add would
+     * store a second one. A {@link RuntimeException} thrown while logging is therefore caught and
+     * never rethrown: the committed write is neither retried nor rolled back, and its result is
+     * returned as usual. {@link #reportUnloggedWrite(String, CustomerId, Long, RuntimeException)}
+     * writes one line to standard error instead. An {@link Error} is not caught.
+     *
      * @param action {@code ADD} or {@code UPDATE}
      * @param saved  the customer as written
      */
@@ -612,10 +627,44 @@ public class CustomerMaintenanceService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                log.info("customer.write action={} custId={} user={} version={}",
-                        action, custId, user, version);
+                try {
+                    log.info("customer.write action={} custId={} user={} version={}",
+                            action, custId, user, version);
+                } catch (RuntimeException loggingFailure) {
+                    // The write has committed: a failing logger must not turn it into an error
+                    // response, so the failure is reported once and the call returns normally.
+                    reportUnloggedWrite(action, custId, version, loggingFailure);
+                }
             }
         });
+    }
+
+    /**
+     * Reports on standard error that the {@code customer.write} line of a committed write could not
+     * be logged.
+     *
+     * <p>Standard error is written directly because it depends on neither SLF4J nor Logback, the
+     * framework that has just failed; {@code java.util.logging} is not used either, because Spring
+     * Boot routes it to SLF4J. The one line carries fixed text, the action, the id, the version and
+     * the failure's class name. It carries no user, no customer data and no exception message, which
+     * could hold either. Nothing is retried and nothing is logged again, so the report is bounded
+     * and cannot recurse into the failing logger.
+     *
+     * @param action  {@code ADD} or {@code UPDATE}
+     * @param custId  the id the committed write stored
+     * @param version the {@code row_version} the committed write stored
+     * @param failure what the logging call threw
+     */
+    private static void reportUnloggedWrite(String action, CustomerId custId, Long version,
+            RuntimeException failure) {
+        try {
+            System.err.println("customer.write not logged after commit: action=" + action
+                    + " custId=" + custId + " version=" + version
+                    + " failure=" + failure.getClass().getName());
+        } catch (RuntimeException ignored) {
+            // Standard error failed too. Nothing further is attempted: any other report could fail
+            // the same way, and the committed write must still return its result to the caller.
+        }
     }
 
     /**

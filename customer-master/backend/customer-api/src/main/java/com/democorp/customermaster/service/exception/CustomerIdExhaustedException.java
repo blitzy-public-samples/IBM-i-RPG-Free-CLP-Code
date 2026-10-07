@@ -17,7 +17,8 @@ package com.democorp.customermaster.service.exception;
  * SQLSTATE {@code 2200H} (sequence generator limit exceeded), and
  * {@code CustomerIdAllocator.next()} translates that error into this exception.
  * The same condition follows a generator load whose last id is {@code 9999},
- * because the load leaves the sequence exhausted. Ids are never reissued.
+ * because the load leaves the sequence exhausted. No id is reissued by
+ * wrap-around.
  *
  * <p><b>HTTP mapping.</b> {@code ApiExceptionHandler} maps this exception,
  * through {@code ProblemFactory}, to {@code 503 Service Unavailable} with

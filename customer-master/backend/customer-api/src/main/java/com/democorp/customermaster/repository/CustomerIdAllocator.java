@@ -14,7 +14,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.PessimisticLockingFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.EmptySqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,8 +47,9 @@ import org.springframework.transaction.annotation.Transactional;
  *   <li>BASE36ADD's silent rollover from {@code 9999} to {@code AAAA}, which leaves the limit check to
  *       its caller [BASE36/SRV_BASE36.RPGLE:9-13]. The sequence is {@code NO CYCLE}: past
  *       {@code MAXVALUE 1679615} ({@code 9999}) {@code nextval} raises SQLSTATE {@code 2200H}, and
- *       {@link #next()} turns that into {@link CustomerIdExhaustedException} (HTTP 503 APP0503). Ids are
- *       never reissued.</li>
+ *       {@link #next()} turns that into {@link CustomerIdExhaustedException} (HTTP 503 APP0503), so no
+ *       id is reissued by wrap-around. Only a committed load resets the range, through
+ *       {@link #restartAfterLoad(int)}, after it has replaced every earlier row.</li>
  * </ul>
  *
  * <p><b>The guard.</b> Every writer that allocates or resets ids first takes a table lock on
@@ -72,10 +74,12 @@ import org.springframework.transaction.annotation.Transactional;
  * <p><b>Lock-wait timeouts.</b> A lock wait that exceeds the caller's timeout fails with SQLSTATE
  * {@code 55P03}. Every statement of this class reports it as
  * {@link org.springframework.dao.CannotAcquireLockException}, with the original data-access exception,
- * and so the {@link SQLException} carrying {@code 55P03}, as its cause. Spring's default translator for
- * {@link JdbcTemplate} (the {@code SQLException} subclass translator with its SQLSTATE-class fallback)
- * leaves {@code 55P03} uncategorized, so the type is fixed here. {@code CustomerMaintenanceService} maps
- * it to 409 DEM1001, and the generator to "Cannot allocate CUSTMAST".
+ * and so the {@link SQLException} carrying {@code 55P03}, as its cause. The
+ * {@link NamedParameterJdbcTemplate} translates failures through the
+ * {@link org.springframework.jdbc.core.JdbcTemplate} it wraps, whose default translator (the
+ * {@code SQLException} subclass translator with its SQLSTATE-class fallback) leaves {@code 55P03}
+ * uncategorized, so the type is fixed here. {@code CustomerMaintenanceService} maps it to 409 DEM1001,
+ * and the generator to "Cannot allocate CUSTMAST".
  *
  * <p><b>SQL.</b> All names are unqualified. The schema comes from the JDBC {@code currentSchema} and
  * Hikari's {@code schema} setting ({@code DB_SCHEMA}), so no statement names a library or schema. The
@@ -89,8 +93,8 @@ import org.springframework.transaction.annotation.Transactional;
  * customerRepository.save(newCustomer(id, fields));
  * }</pre>
  *
- * <p>The class is stateless apart from its thread-safe {@link JdbcTemplate}, so one instance serves all
- * threads. It and its public methods stay non-final, so Spring's proxy can apply
+ * <p>The class is stateless apart from its thread-safe {@link NamedParameterJdbcTemplate}, so one
+ * instance serves all threads. It and its public methods stay non-final, so Spring's proxy can apply
  * {@link Transactional}.
  */
 @Component
@@ -128,17 +132,18 @@ public class CustomerIdAllocator {
     private static final Logger log = LoggerFactory.getLogger(CustomerIdAllocator.class);
 
     /** Runs every statement on the connection bound to the caller's transaction. */
-    private final JdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate namedJdbc;
 
     /**
      * Creates the allocator over the application's datasource.
      *
-     * @param jdbcTemplate the template whose connections take part in the caller's Spring-managed
-     *                     transaction and resolve unqualified names to the {@code DB_SCHEMA} schema
-     * @throws NullPointerException if {@code jdbcTemplate} is {@code null}
+     * @param namedJdbc the named-parameter template Spring Boot configures on that datasource; its
+     *                  connections take part in the caller's Spring-managed transaction and resolve
+     *                  unqualified names to the {@code DB_SCHEMA} schema
+     * @throws NullPointerException if {@code namedJdbc} is {@code null}
      */
-    public CustomerIdAllocator(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = Objects.requireNonNull(jdbcTemplate, "jdbcTemplate");
+    public CustomerIdAllocator(NamedParameterJdbcTemplate namedJdbc) {
+        this.namedJdbc = Objects.requireNonNull(namedJdbc, "namedJdbc");
     }
 
     /**
@@ -151,8 +156,12 @@ public class CustomerIdAllocator {
      * caller inserts the row with the returned id in the same transaction. The guard waits while a load
      * holds {@code ACCESS EXCLUSIVE}, and does not wait for other adds or updates.
      *
-     * <p>Ids strictly increase in allocation order, because V4 declares {@code CACHE 1}. They are never
-     * handed out twice, whether or not the caller commits; a rollback leaves a gap.
+     * <p>Between committed loads, ids strictly increase in allocation order, because V4 declares
+     * {@code CACHE 1}, and none is handed out twice, whether or not the caller commits; a rollback
+     * leaves a gap. A committed load replaces every row and restarts the sequence at its start + count
+     * through {@link #restartAfterLoad(int)}, or leaves it exhausted when its last id is {@code 9999}.
+     * That restart can move the sequence back, so an id issued before the load can be issued again; it
+     * cannot collide, because no row from before the load remains.
      *
      * @return the allocated id; {@code EEEF} on a fresh database
      * @throws CustomerIdExhaustedException if the sequence has passed {@code 9999} (SQLSTATE
@@ -200,7 +209,9 @@ public class CustomerIdAllocator {
 
     /**
      * Moves the sequence so that the next add receives {@code nextOrdinal}, the ordinal after the last
-     * row a load wrote: {@code start + count}.
+     * row a load wrote: {@code start + count}. The restart ignores the sequence's current position, so
+     * it can move the sequence back below ids issued before the load, which later adds then receive
+     * again; they cannot collide, because the load has replaced every earlier row.
      *
      * <p><b>Caller duties.</b> The caller must already hold {@link #lockForLoad()} in the same
      * transaction, and must call this as the last statement before {@code COMMIT}, after the
@@ -271,7 +282,7 @@ public class CustomerIdAllocator {
      */
     private void execute(String sql) {
         try {
-            jdbcTemplate.execute(sql);
+            namedJdbc.getJdbcOperations().execute(sql);
         } catch (DataAccessException e) {
             throw lockWaitOrSelf(e, sql);
         }
@@ -293,7 +304,7 @@ public class CustomerIdAllocator {
     private long drawNextval() {
         Long value;
         try {
-            value = jdbcTemplate.queryForObject(NEXTVAL_SQL, Long.class);
+            value = namedJdbc.queryForObject(NEXTVAL_SQL, EmptySqlParameterSource.INSTANCE, Long.class);
         } catch (DataAccessException e) {
             // Spring's fallback translator maps SQL class 22 to DataIntegrityViolationException, the
             // same type as unrelated data errors, so exhaustion is recognized by its SQLSTATE alone.
@@ -311,12 +322,13 @@ public class CustomerIdAllocator {
 
     /**
      * Gives a lock-wait timeout one stable type. Decision: a lock-wait failure is wrapped instead of
-     * passed on as raised, because Spring's default {@link JdbcTemplate} translator leaves SQLSTATE
-     * {@code 55P03} as an {@code UncategorizedSQLException}, while callers of the add (409 DEM1001) and
-     * of the load ("Cannot allocate CUSTMAST") expect a {@link CannotAcquireLockException}. The original
-     * exception stays the cause, so a consumer that looks for {@code 55P03} in the cause chain still
-     * finds it; an exception that is already a {@link PessimisticLockingFailureException} passes through
-     * unchanged.
+     * passed on as raised, because the {@link NamedParameterJdbcTemplate} translates through the
+     * {@link org.springframework.jdbc.core.JdbcTemplate} it wraps, whose default translator leaves
+     * SQLSTATE {@code 55P03} as an {@code UncategorizedSQLException}, while callers of the add
+     * (409 DEM1001) and of the load ("Cannot allocate CUSTMAST") expect a
+     * {@link CannotAcquireLockException}. The original exception stays the cause, so a consumer that
+     * looks for {@code 55P03} in the cause chain still finds it; an exception that is already a
+     * {@link PessimisticLockingFailureException} passes through unchanged.
      *
      * @param failure the exception the statement raised
      * @param sql     the statement, named in the message for server-side logs only
