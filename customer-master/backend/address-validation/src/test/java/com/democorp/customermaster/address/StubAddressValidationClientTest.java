@@ -6,8 +6,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.assertj.core.api.SoftAssertions;
 import org.junit.jupiter.api.DisplayName;
@@ -126,6 +128,23 @@ class StubAddressValidationClientTest {
              "input": {"address2": " 1 dup st ", "city": "old haven ", "state": "ct", "zip5": " 06399"},
              "output": {"address1": "", "address2": "1 DUP ST", "city": "OLD HAVEN", "state": "CT",
                         "zip5": "06399", "zip4": "0002"}}""";
+
+    // ------------------------------------------------ malformed-output resources
+
+    /**
+     * Input of the output template, a fictitious key no bundled fixture uses:
+     * {@code 12 SAMPLE ROAD}, {@code OLD HAVEN}, {@code CT}, {@code 06399}.
+     */
+    private static final String TEMPLATE_INPUT = """
+            {"address2": "12 SAMPLE ROAD", "city": "OLD HAVEN", "state": "CT", "zip5": "06399"}""";
+
+    /** The request that hits the output template. */
+    private static final AddressValidationRequest TEMPLATE_REQUEST =
+            new AddressValidationRequest("", "12 SAMPLE ROAD", "OLD HAVEN", "CT", "06399", "");
+
+    /** The answer the output template holds; street and ZIP+4 differ from an echo. */
+    private static final AddressValidationResult TEMPLATE_OUTPUT = AddressValidationResult.success(
+            "", "12 SAMPLE RD", "OLD HAVEN", "CT", "06399", "0003");
 
     /** The client under test, over the bundled fixture file. */
     private final StubAddressValidationClient client = new StubAddressValidationClient();
@@ -434,6 +453,110 @@ class StubAddressValidationClientTest {
             assertThatThrownBy(() -> new StubAddressValidationClient(duplicates)
                     .validate(new AddressValidationRequest("", "1 DUP ST", "OLD HAVEN", "CT", "06399", "")))
                     .isInstanceOf(IllegalStateException.class);
+        }
+
+        @Test
+        @DisplayName("the output template the rejection tests below vary is valid on its own and answers as written")
+        void outputTemplateLoadsOnItsOwn() {
+            final StubAddressValidationClient stub =
+                    new StubAddressValidationClient(templateWithOutput(templateOutput()));
+
+            assertThat(stub.validate(TEMPLATE_REQUEST)).isEqualTo(TEMPLATE_OUTPUT);
+        }
+
+        @Test
+        @DisplayName("a fixture without an output object fails with IllegalStateException")
+        void missingOutputFails() {
+            final Resource noOutput = templateWithoutOutput();
+
+            assertThatThrownBy(() -> new StubAddressValidationClient(noOutput))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("has no output object");
+        }
+
+        @ParameterizedTest(name = "[{index}] output.{0} of {1} characters loads, of {1} + 1 fails")
+        @CsvSource(delimiter = '|', textBlock = """
+                address1 | 30 | BLDG 7 SUITE 4100 SAMPLE PLAZA | BLDG 7 SUITE 4100 SAMPLE PLAZAS
+                address2 | 30 | 12 SAMPLE ROAD NORTHWEST APT 9 | 12 SAMPLE ROAD NORTHWEST APT 99
+                city     | 30 | OLD HAVEN BY THE SAMPLE MEADOW | OLD HAVEN BY THE SAMPLE MEADOWS
+                state    |  2 | CT                             | CTX
+                zip5     |  5 | 06399                          | 063990
+                zip4     |  4 | 0003                           | 00030
+                """)
+        @DisplayName("an output value wider than its USAdrValDS field fails with IllegalStateException, "
+                + "caused by IllegalArgumentException, naming no value")
+        void overWidthOutputFails(String member, int width, String atWidth, String overWidth) {
+            assertThat(width(atWidth)).as("at-width value").isEqualTo(width);
+            assertThat(width(overWidth)).as("over-width value").isEqualTo(width + 1);
+            final Map<String, String> fitting = templateOutput();
+            assertThat(fitting.put(member, atWidth)).as("template output." + member).isNotNull();
+            final Map<String, String> tooWide = templateOutput();
+            tooWide.put(member, overWidth);
+            final Resource atWidthFixture = templateWithOutput(fitting);
+            final Resource overWidthFixture = templateWithOutput(tooWide);
+
+            assertThatCode(() -> new StubAddressValidationClient(atWidthFixture)).doesNotThrowAnyException();
+            assertThatThrownBy(() -> new StubAddressValidationClient(overWidthFixture))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("output exceeds a USAdrValDS field width")
+                    .hasMessageNotContaining(overWidth)
+                    .cause()
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage(member + " exceeds " + width + " characters");
+        }
+
+        @ParameterizedTest(name = "[{index}] output.city \"{0}\"")
+        @ValueSource(strings = {"", "   "})
+        @DisplayName("a blank output city fails with IllegalStateException, because a fixture must standardize")
+        void blankOutputCityFails(String city) {
+            final Map<String, String> output = templateOutput();
+            output.put("city", city);
+            final Resource blankCity = templateWithOutput(output);
+
+            assertThatThrownBy(() -> new StubAddressValidationClient(blankCity))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("output.city is blank");
+        }
+
+        @Test
+        @DisplayName("an output without a city member reads the city as blank and fails with IllegalStateException")
+        void omittedOutputCityFails() {
+            final Map<String, String> output = templateOutput();
+            assertThat(output.remove("city")).as("template output.city").isNotNull();
+            final Resource noCity = templateWithOutput(output);
+
+            assertThatThrownBy(() -> new StubAddressValidationClient(noCity))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("output.city is blank");
+        }
+
+        /**
+         * The output members of the output template, in file order and each within its
+         * width: a fresh, mutable copy that a rejection test breaks in exactly one place.
+         */
+        private Map<String, String> templateOutput() {
+            final Map<String, String> output = new LinkedHashMap<>();
+            output.put("address1", TEMPLATE_OUTPUT.address1());
+            output.put("address2", TEMPLATE_OUTPUT.address2());
+            output.put("city", TEMPLATE_OUTPUT.city());
+            output.put("state", TEMPLATE_OUTPUT.state());
+            output.put("zip5", TEMPLATE_OUTPUT.zip5());
+            output.put("zip4", TEMPLATE_OUTPUT.zip4());
+            return output;
+        }
+
+        /** A one-fixture resource: the output template's input with an output of these members. */
+        private Resource templateWithOutput(Map<String, String> output) {
+            final String members = output.entrySet().stream()
+                    .map(member -> "\"" + member.getKey() + "\": \"" + member.getValue() + "\"")
+                    .collect(Collectors.joining(", "));
+            return resource("[{\"description\": \"output template\", \"input\": " + TEMPLATE_INPUT
+                    + ", \"output\": {" + members + "}}]");
+        }
+
+        /** A one-fixture resource: the output template's input and no output member. */
+        private Resource templateWithoutOutput() {
+            return resource("[{\"description\": \"output template\", \"input\": " + TEMPLATE_INPUT + "}]");
         }
 
         /** Finds the fixture whose input equals the given key and returns its output as a result. */

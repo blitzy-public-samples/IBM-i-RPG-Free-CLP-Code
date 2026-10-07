@@ -62,9 +62,11 @@ import org.xml.sax.SAXException;
  * {@code 1234}) is the one the {@code usps/*.xml} fixtures use. The placeholder password
  * carries {@code &} and {@code "} so that attribute escaping is exercised.
  *
- * <p><b>Captured output.</b> {@link OutputCaptureExtension} keeps one capture for the
- * whole class, so the standard-error assertions also prove that no earlier test in this
- * class printed there.
+ * <p><b>Captured output.</b> {@link OutputCaptureExtension} captures each test invocation
+ * separately. The {@link CapturedOutput} a test receives holds that invocation's output
+ * plus class-level output written outside any invocation's capture, such as while JUnit
+ * constructs the test instance, so the standard-error assertions prove that each fault
+ * case's own parse printed nothing.
  *
  * <p>Plain JUnit 5 and AssertJ: no application context, no network.
  */
