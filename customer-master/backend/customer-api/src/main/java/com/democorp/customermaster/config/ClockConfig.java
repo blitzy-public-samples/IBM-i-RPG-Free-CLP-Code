@@ -26,8 +26,9 @@ import org.springframework.context.annotation.Configuration;
  *   <li>{@code CustomerMaintenanceService} sets {@code chgTime} on add and update, written in the
  *       same INSERT or UPDATE as the data, so the stamp commits or rolls back with the write.</li>
  *   <li>{@code CustomerGeneratorRunner} takes the load start from it, passes that value to
- *       {@code CustomerDataGenerator} as every generated row's {@code chgtime}, and measures
- *       elapsed time from it; {@code CustomerLoader} writes the rows it is given and reads no
+ *       {@code CustomerDataGenerator} as every generated row's {@code chgtime}; the elapsed time
+ *       it prints is an interval, not a timestamp, and is measured with the monotonic
+ *       {@code System.nanoTime()}. {@code CustomerLoader} writes the rows it is given and reads no
  *       clock.</li>
  * </ul>
  *

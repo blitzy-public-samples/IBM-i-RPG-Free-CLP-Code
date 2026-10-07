@@ -24,8 +24,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p><b>What it replaces.</b>
  * <ul>
- *   <li>LOADCUSTR's {@code truncate lennons1.custmast} followed by one
- *       {@code insert into lennons1.custmast values(:Fld)} per generated row, all under commitment control
+ *   <li>LOADCUSTR's {@code truncate} of CUSTMAST followed by one
+ *       {@code insert ... values(:Fld)} into CUSTMAST per generated row, all under commitment control
  *       {@code *NONE} [5250_Subfile/LOADCUSTR.SQLRPGLE:90-98,131-207]. A failure part-way left the table
  *       truncated and partly loaded. Here the truncate, the rows and the sequence restart commit or roll
  *       back together.</li>
@@ -108,7 +108,7 @@ public class CustomerLoader {
     static final String SET_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '" + LOCK_TIMEOUT + "'";
 
     /**
-     * Empties the table inside the load transaction, replacing {@code truncate lennons1.custmast}
+     * Empties the table inside the load transaction, replacing LOADCUSTR's {@code truncate} of CUSTMAST
      * [5250_Subfile/LOADCUSTR.SQLRPGLE:95]. The table name is unqualified; the connection's
      * {@code currentSchema} ({@code DB_SCHEMA}) resolves it.
      */
