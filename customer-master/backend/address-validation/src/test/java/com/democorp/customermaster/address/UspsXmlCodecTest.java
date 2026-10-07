@@ -13,16 +13,22 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -48,8 +54,8 @@ import org.xml.sax.SAXException;
  *       the source trims its data-area credentials.</li>
  *   <li><b>Valid responses</b> [USADRVAL.SQLRPGLE:100-133]. Missing or empty address
  *       elements read {@code ""}, the {@code default ' '} of the XMLTABLE columns; a
- *       non-blank City is a success [118-121]; a blank City with one valid {@code Error}
- *       is an address-level error.</li>
+ *       non-blank City is a success whatever else the row holds [118-121]; a blank City
+ *       with one valid {@code Error} is an address-level error.</li>
  *   <li><b>Faults</b> [USADRVAL.SQLRPGLE:94-96,114-116,134-136]. Every response the
  *       source's {@code SQLSTATE <> '00000'} test would reject raises
  *       {@link AddressServiceUnavailableException}, without the JDK parser printing
@@ -59,8 +65,12 @@ import org.xml.sax.SAXException;
  *
  * <p><b>Test values.</b> Every address and credential is fictitious. The base row
  * ({@code STE 2}, {@code 8 ELMWOOD DR}, {@code OLD HAVEN}, {@code CT}, {@code 06399},
- * {@code 1234}) is the one the {@code usps/*.xml} fixtures use. The placeholder password
- * carries {@code &} and {@code "} so that attribute escaping is exercised.
+ * {@code 1234}) is the one the {@code usps/*.xml} fixtures use. The inline response
+ * documents start from that row and, for a blank City, the error triple
+ * {@code -2147219401} / {@code clsAMS} / {@code Address Not Found.}; each boundary or
+ * fault case changes one thing in such a document, whose unchanged form a control test
+ * parses. The placeholder password carries {@code &} and {@code "} so that attribute
+ * escaping is exercised.
  *
  * <p><b>Captured output.</b> {@link OutputCaptureExtension} captures each test invocation
  * separately. The {@link CapturedOutput} a test receives holds that invocation's output
@@ -87,6 +97,9 @@ class UspsXmlCodecTest {
     /** The six {@code Address} children in source order [USADRVAL.SQLRPGLE:84-89]. */
     private static final String[] ADDRESS_FIELDS =
             {"Address1", "Address2", "City", "State", "Zip5", "Zip4"};
+
+    /** The fixtures' base row as the values of {@link #ADDRESS_FIELDS}, in the same order. */
+    private static final String[] BASE_ROW = {"STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234"};
 
     /** Error number Web Tools returns for an address it cannot find. */
     private static final int ADDRESS_NOT_FOUND = -2147219401;
@@ -139,8 +152,9 @@ class UspsXmlCodecTest {
 
         Element root = parseXml(document).getDocumentElement();
         assertThat(root.getAttribute("PASSWORD")).isEqualTo(PASSWORD);
-        assertThat(childText(addressOf(root), "Address2")).isEqualTo("A&B <ST");
-        assertThat(childText(addressOf(root), "City")).isEqualTo("OLD HAVEN");
+        Element address = assertSingleChild(root, "Address");
+        assertThat(assertSingleChild(address, "Address2").getTextContent()).isEqualTo("A&B <ST");
+        assertThat(assertSingleChild(address, "City").getTextContent()).isEqualTo("OLD HAVEN");
     }
 
     @Test
@@ -159,7 +173,8 @@ class UspsXmlCodecTest {
 
         assertThat(root.getAttribute("USERID")).isEqualTo(USER_ID);
         assertThat(root.getAttribute("PASSWORD")).isEqualTo(PASSWORD);
-        assertThat(childElements(addressOf(root))).extracting(Element::getTextContent)
+        Element address = assertSingleChild(root, "Address");
+        assertThat(childElements(address)).extracting(Element::getTextContent)
                 .containsExactly("STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "");
     }
 
@@ -174,8 +189,8 @@ class UspsXmlCodecTest {
         String document = codec.requestDocument(request, USER_ID, PASSWORD);
 
         assertThat(document).contains("<Address2>" + street + "</Address2>");
-        assertThat(childText(addressOf(parseXml(document).getDocumentElement()), "Address2"))
-                .isEqualTo(street);
+        Element address = assertSingleChild(parseXml(document).getDocumentElement(), "Address");
+        assertThat(assertSingleChild(address, "Address2").getTextContent()).isEqualTo(street);
     }
 
     @Test
@@ -266,6 +281,132 @@ class UspsXmlCodecTest {
         assertThat(result.errorDescription()).isEqualTo("Address Not Found.");
     }
 
+    @Test
+    @DisplayName("control: the unchanged inline success document is a success with the base row")
+    void parsesBaseSuccessDocument() {
+        AddressValidationResult result = codec.parse(response(baseAddress()));
+
+        assertThat(result.standardized()).isTrue();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234", 0, "", ""));
+    }
+
+    @Test
+    @DisplayName("control: the unchanged inline error document (blank City, one Error) is an address error")
+    void parsesBaseErrorDocument() {
+        byte[] body = response(baseAddressWith(Map.of("City", "")) + baseError());
+
+        AddressValidationResult result = codec.parse(body);
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "", "CT", "06399", "1234",
+                ADDRESS_NOT_FOUND, "clsAMS", "Address Not Found."));
+    }
+
+    @Test
+    @DisplayName("success with every Address value at its full width, 30, 30, 30, 2, 5 and 4, keeps each")
+    void parsesSuccessAtFullWidths() {
+        String address1 = "SUITE 2210 NORTH TOWER FLOOR 9";
+        String address2 = "8 ELMWOOD DRIVE EXTENSION WEST";
+        String city = "OLD HAVEN JUNCTION NORTH SHORE";
+        assertThat(address1).hasSize(30);
+        assertThat(address2).hasSize(30);
+        assertThat(city).hasSize(30);
+        byte[] body = response(baseAddressWith(Map.of(
+                "Address1", address1, "Address2", address2, "City", city,
+                "State", "CT", "Zip5", "06399", "Zip4", "1234")));
+
+        AddressValidationResult result = codec.parse(body);
+
+        assertThat(result.standardized()).isTrue();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "SUITE 2210 NORTH TOWER FLOOR 9", "8 ELMWOOD DRIVE EXTENSION WEST",
+                "OLD HAVEN JUNCTION NORTH SHORE", "CT", "06399", "1234", 0, "", ""));
+    }
+
+    /**
+     * Valid {@code Error} elements at the limits of the response rules, each named for the
+     * limit it sits on and followed by the {@code Number}, {@code Source} and
+     * {@code Description} the result must carry.
+     */
+    static Stream<Arguments> errorsAtTheirLimits() {
+        return Stream.of(
+                Arguments.of(Named.of("Number 2147483647, Integer.MAX_VALUE",
+                                errorOf("2147483647", "clsAMS", "Address Not Found.")),
+                        2147483647, "clsAMS", "Address Not Found."),
+                Arguments.of(Named.of("Number -2147483648, Integer.MIN_VALUE",
+                                errorOf("-2147483648", "clsAMS", "Address Not Found.")),
+                        -2147483648, "clsAMS", "Address Not Found."),
+                Arguments.of(Named.of("Number with surrounding whitespace, read after trimming",
+                                errorOf("\n  -2147219401 \t", "clsAMS", "Address Not Found.")),
+                        -2147219401, "clsAMS", "Address Not Found."),
+                Arguments.of(Named.of("Source of exactly 30 characters",
+                                errorOf("-2147219401", "S".repeat(30), "Address Not Found.")),
+                        -2147219401, "S".repeat(30), "Address Not Found."),
+                Arguments.of(Named.of("Description of exactly 512 characters",
+                                errorOf("-2147219401", "clsAMS", "D".repeat(512))),
+                        -2147219401, "clsAMS", "D".repeat(512)));
+    }
+
+    @ParameterizedTest(name = "blank City with an Error at {0} is an address-level error")
+    @MethodSource("errorsAtTheirLimits")
+    @DisplayName("a blank City with one Error at the limits of its rules is an address-level error")
+    void parsesErrorAtItsLimits(String error, int number, String source, String description) {
+        AddressValidationResult result = codec.parse(response(baseAddressWith(Map.of("City", "")) + error));
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "", "CT", "06399", "1234", number, source, description));
+    }
+
+    @ParameterizedTest(name = "{0} reads as blank")
+    @ValueSource(strings = {"<Description/>", "<Description></Description>"})
+    @DisplayName("an empty Error Description element is valid and reads as blank")
+    void parsesErrorWithEmptyDescription(String emptyDescription) {
+        byte[] body = response(baseAddressWith(Map.of("City", "")) + errorElement(
+                element("Number", "-2147219401") + element("Source", "clsAMS") + emptyDescription));
+
+        AddressValidationResult result = codec.parse(body);
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "", "CT", "06399", "1234", ADDRESS_NOT_FOUND, "clsAMS", ""));
+    }
+
+    @ParameterizedTest(name = "Address holding only {0} is a success")
+    @ValueSource(strings = {"<City>OLD HAVEN</City>", "<Address2/><City>OLD HAVEN</City>"})
+    @DisplayName("a non-blank City alone is a success, with Address2 and every other value blank")
+    void parsesCityOnlySuccess(String addressChildren) {
+        AddressValidationResult result = codec.parse(response(addressChildren));
+
+        assertThat(result.standardized()).isTrue();
+        assertThat(result.errorNumber()).isZero();
+        assertThat(result).isEqualTo(new AddressValidationResult("", "", "OLD HAVEN", "", "", "", 0, "", ""));
+    }
+
+    /** {@code Error} content the response rules would reject if the City were blank. */
+    static Stream<Named<String>> errorsInvalidForBlankCity() {
+        return Stream.of(
+                Named.of("an Error whose Number 80040B1A is not an integer",
+                        errorOf("80040B1A", "clsAMS", "Address Not Found.")),
+                Named.of("an Error without Number, Source or Description", errorElement("")),
+                Named.of("two Error children", baseError() + baseError()),
+                Named.of("an Error whose Source of 31 and Description of 513 characters are too long",
+                        errorOf("-2147219401", "S".repeat(31), "D".repeat(513))));
+    }
+
+    @ParameterizedTest(name = "non-blank City with {0} is a plain success")
+    @MethodSource("errorsInvalidForBlankCity")
+    @DisplayName("a non-blank City is a success whatever else the row holds, its Error ignored")
+    void parsesNonBlankCityAsSuccessWhateverItsError(String errors) {
+        AddressValidationResult result = codec.parse(response(baseAddress() + errors));
+
+        assertThat(result.standardized()).isTrue();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234", 0, "", ""));
+    }
+
     // ---------------------------------------------------------------------------------
     // Faults [USADRVAL.SQLRPGLE:94-96,114-116,134-136]
     // ---------------------------------------------------------------------------------
@@ -285,6 +426,55 @@ class UspsXmlCodecTest {
     @DisplayName("a response the source's SQLSTATE test rejects is a service fault, printed nowhere")
     void rejectsFaultyResponse(String name, CapturedOutput output) throws IOException {
         byte[] body = fixture(name);
+
+        assertThatThrownBy(() -> codec.parse(body))
+                .isInstanceOf(AddressServiceUnavailableException.class);
+
+        assertNothingPrintedByParser(output);
+    }
+
+    @ParameterizedTest(name = "{0} of {1} characters is a service fault")
+    @CsvSource({
+        "Address1, 31",
+        "Address2, 31",
+        "City,     31",
+        "State,     3",
+        "Zip5,      6",
+        "Zip4,      5"
+    })
+    @DisplayName("an Address value over its width (30, 30, 30, 2, 5, 4) is a service fault, printed nowhere")
+    void rejectsOverWidthAddressValue(String field, int length, CapturedOutput output) {
+        byte[] body = response(baseAddressWith(Map.of(field, "X".repeat(length))));
+
+        assertThatThrownBy(() -> codec.parse(body))
+                .isInstanceOf(AddressServiceUnavailableException.class);
+
+        assertNothingPrintedByParser(output);
+    }
+
+    /** Blank-City {@code Error} content the response rules reject, each one change from the base error. */
+    static Stream<Named<String>> errorsRejectedForBlankCity() {
+        return Stream.of(
+                Named.of("two Error children, each valid", baseError() + baseError()),
+                Named.of("an Error without Number", errorElement(
+                        element("Source", "clsAMS") + element("Description", "Address Not Found."))),
+                Named.of("an Error without Source", errorElement(
+                        element("Number", "-2147219401") + element("Description", "Address Not Found."))),
+                Named.of("Number 2147483648, one above Integer.MAX_VALUE",
+                        errorOf("2147483648", "clsAMS", "Address Not Found.")),
+                Named.of("Number -2147483649, one below Integer.MIN_VALUE",
+                        errorOf("-2147483649", "clsAMS", "Address Not Found.")),
+                Named.of("a Source of 31 characters",
+                        errorOf("-2147219401", "S".repeat(31), "Address Not Found.")),
+                Named.of("a Description of 513 characters",
+                        errorOf("-2147219401", "clsAMS", "D".repeat(513))));
+    }
+
+    @ParameterizedTest(name = "blank City with {0} is a service fault")
+    @MethodSource("errorsRejectedForBlankCity")
+    @DisplayName("a blank City without exactly one valid Error is a service fault, printed nowhere")
+    void rejectsBlankCityWithInvalidError(String errors, CapturedOutput output) {
+        byte[] body = response(baseAddressWith(Map.of("City", "")) + errors);
 
         assertThatThrownBy(() -> codec.parse(body))
                 .isInstanceOf(AddressServiceUnavailableException.class);
@@ -341,6 +531,58 @@ class UspsXmlCodecTest {
     }
 
     /**
+     * UTF-8 bytes of an inline {@code AddressValidateResponse} whose one
+     * {@code <Address ID="0">} holds {@code addressChildren} as written.
+     */
+    private static byte[] response(String addressChildren) {
+        return ("<AddressValidateResponse><Address ID=\"0\">" + addressChildren
+                + "</Address></AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** The base row as the six {@code Address} children of a response, in source order. */
+    private static String baseAddress() {
+        return baseAddressWith(Map.of());
+    }
+
+    /**
+     * The base row as the six {@code Address} children of a response, in source order,
+     * except that each field named in {@code replacements} holds its replacement value.
+     * A key that names no field changes nothing, so the document stays the base row.
+     */
+    private static String baseAddressWith(Map<String, String> replacements) {
+        StringBuilder children = new StringBuilder();
+        for (int i = 0; i < ADDRESS_FIELDS.length; i++) {
+            String field = ADDRESS_FIELDS[i];
+            children.append(element(field, replacements.getOrDefault(field, BASE_ROW[i])));
+        }
+        return children.toString();
+    }
+
+    /** The base error document's one {@code Error}: -2147219401, clsAMS, Address Not Found. */
+    private static String baseError() {
+        return errorOf("-2147219401", "clsAMS", "Address Not Found.");
+    }
+
+    /** An {@code Error} holding {@code Number}, {@code Source} and {@code Description}, in that order. */
+    private static String errorOf(String number, String source, String description) {
+        return errorElement(element("Number", number) + element("Source", source)
+                + element("Description", description));
+    }
+
+    /** An {@code Error} element holding {@code children} as written. */
+    private static String errorElement(String children) {
+        return "<Error>" + children + "</Error>";
+    }
+
+    /**
+     * {@code <name>text</name>}. The text is written unescaped, so callers pass only
+     * values without markup characters.
+     */
+    private static String element(String name, String text) {
+        return "<" + name + ">" + text + "</" + name + ">";
+    }
+
+    /**
      * Parses the codec's own output with a plain namespace-aware DOM builder, so the
      * assertions read what a receiving XML parser would see.
      */
@@ -373,17 +615,11 @@ class UspsXmlCodecTest {
         return names;
     }
 
-    /** The single {@code Address} child of the request root. */
-    private static Element addressOf(Element root) {
-        return singleChild(root, "Address");
-    }
-
-    /** Text of the single {@code localName} child of {@code parent}. */
-    private static String childText(Element parent, String localName) {
-        return singleChild(parent, localName).getTextContent();
-    }
-
-    private static Element singleChild(Element parent, String localName) {
+    /**
+     * Asserts that {@code parent} has exactly one direct element child named
+     * {@code localName}, and returns that child.
+     */
+    private static Element assertSingleChild(Element parent, String localName) {
         List<Element> matches = childElements(parent).stream()
                 .filter(child -> localName.equals(child.getLocalName()))
                 .toList();
