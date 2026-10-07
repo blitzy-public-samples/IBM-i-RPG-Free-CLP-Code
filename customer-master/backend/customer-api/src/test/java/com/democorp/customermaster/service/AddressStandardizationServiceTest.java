@@ -222,7 +222,7 @@ final class AddressStandardizationServiceTest {
 
             assertThat(result.address().city())
                     .isEqualTo("ABCDEFGHIJKLMNOPQRST")
-                    .hasSize(AddressStandardizationService.CITY_COLUMN_WIDTH);
+                    .hasSize(20);
         }
     }
 
@@ -457,9 +457,9 @@ final class AddressStandardizationServiceTest {
             assertThat(result.address().addr())
                     .isEqualTo(text(output, "address2"))
                     .isEqualTo(STANDARDIZED_STREET);
-            assertThat(result.address().city()).isEqualTo(
-                    AddressStandardizationService.cut(text(output, "city"),
-                            AddressStandardizationService.CITY_COLUMN_WIDTH));
+            assertThat(result.address().city())
+                    .isEqualTo(text(output, "city"))
+                    .isEqualTo("CEDAR BLUFF");
             assertThat(result.address().state()).isEqualTo(outputState);
             assertThat(result.address().zip()).isEqualTo(expectedZip);
         }

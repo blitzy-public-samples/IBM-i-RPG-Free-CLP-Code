@@ -393,10 +393,13 @@ class StubAddressValidationClientTest {
 
             final SoftAssertions softly = new SoftAssertions();
             for (int index = 0; index < entries.size(); index++) {
-                final Map<String, Object> entry = asObject(entries.get(index), "fixture " + index);
+                assertJsonObject(entries.get(index), "fixture " + index);
+                final Map<String, Object> entry = jsonObject(entries.get(index));
                 final String name = "fixture " + index + " (" + text(entry, "description") + ")";
-                final Map<String, Object> in = asObject(entry.get("input"), name + " input");
-                final Map<String, Object> out = asObject(entry.get("output"), name + " output");
+                assertJsonObject(entry.get("input"), name + " input");
+                final Map<String, Object> in = jsonObject(entry.get("input"));
+                assertJsonObject(entry.get("output"), name + " output");
+                final Map<String, Object> out = jsonObject(entry.get("output"));
 
                 final AddressValidationResult result = client.validate(new AddressValidationRequest(
                         "", text(in, "address2"), text(in, "city"), text(in, "state"), text(in, "zip5"), ""));
@@ -563,11 +566,14 @@ class StubAddressValidationClientTest {
         private AddressValidationResult outputFor(
                 List<Object> entries, String street, String city, String state, String zip5) {
             for (Object element : entries) {
-                final Map<String, Object> entry = asObject(element, "fixture");
-                final Map<String, Object> in = asObject(entry.get("input"), "fixture input");
+                assertJsonObject(element, "fixture");
+                final Map<String, Object> entry = jsonObject(element);
+                assertJsonObject(entry.get("input"), "fixture input");
+                final Map<String, Object> in = jsonObject(entry.get("input"));
                 if (text(in, "address2").equals(street) && text(in, "city").equals(city)
                         && text(in, "state").equals(state) && text(in, "zip5").equals(zip5)) {
-                    final Map<String, Object> out = asObject(entry.get("output"), "fixture output");
+                    assertJsonObject(entry.get("output"), "fixture output");
+                    final Map<String, Object> out = jsonObject(entry.get("output"));
                     return AddressValidationResult.success(text(out, "address1"), text(out, "address2"),
                             text(out, "city"), text(out, "state"), text(out, "zip5"), text(out, "zip4"));
                 }
@@ -585,10 +591,21 @@ class StubAddressValidationClientTest {
         return JsonParserFactory.getJsonParser().parseList(json);
     }
 
-    /** Casts a parsed JSON value to an object, failing with {@code what} when it is not one. */
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> asObject(Object value, String what) {
+    /**
+     * Asserts that a parsed JSON value is an object, failing with {@code what} as the
+     * description when it is null or any other JSON type.
+     */
+    private static void assertJsonObject(Object value, String what) {
         assertThat(value).as(what + " is a JSON object").isInstanceOf(Map.class);
+    }
+
+    /**
+     * Casts a parsed JSON value to an object. It asserts nothing, and a value of another type
+     * fails only with the cast's {@link ClassCastException}, so it is called only after
+     * {@link #assertJsonObject(Object, String)} has checked the same value.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> jsonObject(Object value) {
         return (Map<String, Object>) value;
     }
 

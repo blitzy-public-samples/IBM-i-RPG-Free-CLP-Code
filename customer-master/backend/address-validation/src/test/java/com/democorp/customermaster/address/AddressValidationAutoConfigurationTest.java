@@ -71,13 +71,13 @@ import com.democorp.customermaster.address.AddressValidationProperties.Usps;
 class AddressValidationAutoConfigurationTest {
 
     /** Property selecting the client implementation. */
-    private static final String CLIENT = AddressValidationProperties.PREFIX + ".client";
+    private static final String CLIENT = "customer-master.address.client";
 
     /** Property holding the USPS Web Tools user id. */
-    private static final String USER_ID = AddressValidationProperties.PREFIX + ".usps.user-id";
+    private static final String USER_ID = "customer-master.address.usps.user-id";
 
     /** Property switching standardization on or off in customer-api. */
-    private static final String ENABLED = AddressValidationProperties.PREFIX + ".enabled";
+    private static final String ENABLED = "customer-master.address.enabled";
 
     /** Fictitious USPS Web Tools user id; the only credential value in this class. */
     private static final String TEST_USER_ID = "TESTUSER123";
@@ -154,6 +154,12 @@ class AddressValidationAutoConfigurationTest {
                 assertThat(usps.userId()).isEmpty();
                 assertThat(usps.password()).isEmpty();
             });
+        }
+
+        @Test
+        @DisplayName("the documented customer-master.address prefix is the one bound")
+        void bindsTheDocumentedPrefix() {
+            assertThat(AddressValidationProperties.PREFIX).isEqualTo("customer-master.address");
         }
 
         @ParameterizedTest(name = "client={0}")
