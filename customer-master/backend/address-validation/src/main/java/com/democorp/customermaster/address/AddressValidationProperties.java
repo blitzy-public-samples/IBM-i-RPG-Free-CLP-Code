@@ -5,6 +5,7 @@ import java.net.URISyntaxException;
 import java.time.Duration;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
@@ -45,14 +46,21 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * bound and validated only in a context that contains the auto-configuration.
  *
  * <h2>Validation (fail fast)</h2>
- * Binding uses the canonical constructors, whose compact forms validate the values.
- * Any exception they throw aborts application startup:
+ * Binding uses this record's {@link ConstructorBinding} constructor, which reads
+ * {@code client} as text, and the canonical constructors, whose compact forms validate
+ * the values. Any exception they throw aborts application startup:
  * <ul>
- *   <li>an unknown {@code client} value, such as {@code foo}, fails enum conversion;</li>
+ *   <li>a {@code client} value other than {@code stub} or {@code usps} in any letter
+ *       case, exactly as written, raises {@link IllegalArgumentException}. This covers
+ *       an unknown value such as {@code foo}, an empty value, and a value with
+ *       surrounding blanks or separators such as {@code " stub "} or {@code us-ps}:
+ *       {@code @ConditionalOnProperty} compares the same text ignoring letter case only,
+ *       so such a value would otherwise select no client bean;</li>
  *   <li>{@code client=usps} with a blank {@code usps.user-id} raises
  *       {@link IllegalStateException};</li>
- *   <li>a timeout that is zero or negative, or a base URL that is not an absolute
- *       {@code http}/{@code https} URL, raises {@link IllegalArgumentException}.</li>
+ *   <li>a timeout that is zero or negative, a base URL that is not an absolute
+ *       {@code http}/{@code https} URL, or a base URL whose explicit port is not
+ *       between 1 and 65535, raises {@link IllegalArgumentException}.</li>
  * </ul>
  * Bean Validation is not used, because this library keeps no validator on its classpath.
  *
@@ -70,15 +78,16 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                maintenance flow is exactly the field-rule flow without address
  *                standardization; the client bean is still registered.
  * @param client  which {@link AddressValidationClient} implementation is registered;
- *                bound case-insensitively ({@code stub}, {@code STUB}, {@code usps})
+ *                bound from {@code stub} or {@code usps} in any letter case
+ *                ({@code stub}, {@code STUB}, {@code usps}), exactly as written
  * @param usps    settings of the USPS Web Tools client; always present, populated
  *                with its defaults when no {@code usps.*} property is set
  */
 @ConfigurationProperties(AddressValidationProperties.PREFIX)
 public record AddressValidationProperties(
-        @DefaultValue("true") boolean enabled,
-        @DefaultValue("stub") Client client,
-        @DefaultValue Usps usps) {
+        boolean enabled,
+        Client client,
+        Usps usps) {
 
     /** Property prefix of this record. */
     public static final String PREFIX = "customer-master.address";
@@ -122,8 +131,64 @@ public record AddressValidationProperties(
     }
 
     /**
+     * Binds the settings from configuration; Spring Boot uses this constructor, not the
+     * canonical one. {@code client} arrives as the configured text and is accepted only
+     * when it equals {@code stub} or {@code usps} ignoring letter case, exactly as
+     * written: the comparison {@link AddressValidationAutoConfiguration}'s
+     * {@code @ConditionalOnProperty} conditions apply to the same text. A value that
+     * binds therefore always selects exactly one client bean, and any other value fails
+     * startup instead of leaving the context without a client. The parsed values then
+     * pass the checks of the canonical constructor.
+     *
+     * @param enabled whether customer-api standardizes addresses during review
+     * @param client  {@code stub} or {@code usps} in any letter case, with no surrounding
+     *                blanks or separators; {@code stub} when the property is absent
+     * @param usps    settings of the USPS Web Tools client; populated with its defaults
+     *                when no {@code usps.*} property is set
+     * @throws IllegalArgumentException when {@code client} is any other text, including
+     *                                  an empty one; the message names the property but
+     *                                  never echoes the value
+     * @throws IllegalStateException    when {@code client} is {@code usps} and no user id
+     *                                  is configured
+     */
+    @ConstructorBinding
+    public AddressValidationProperties(
+            @DefaultValue("true") boolean enabled,
+            @DefaultValue("stub") String client,
+            @DefaultValue Usps usps) {
+        this(enabled, parseClient(client), usps);
+    }
+
+    /**
+     * Parses the configured client selector with {@link String#equalsIgnoreCase(String)}
+     * and no trimming or other normalization, the comparison
+     * {@code @ConditionalOnProperty(havingValue = ...)} applies.
+     *
+     * @param raw the configured text, or {@code null} when a caller passes none
+     * @return the selected client
+     * @throws IllegalArgumentException when {@code raw} is not {@code stub} or
+     *                                  {@code usps} in any letter case; the message
+     *                                  never echoes the value
+     */
+    private static Client parseClient(String raw) {
+        if ("stub".equalsIgnoreCase(raw)) {
+            return Client.STUB;
+        }
+        if ("usps".equalsIgnoreCase(raw)) {
+            return Client.USPS;
+        }
+        throw new IllegalArgumentException(PREFIX + ".client must be stub or usps");
+    }
+
+    /**
      * The {@link AddressValidationClient} implementations the auto-configuration can
-     * register. Spring Boot's lenient enum conversion binds the values in any case.
+     * register. The binding constructor selects a value only when the configured text
+     * equals {@code stub} or {@code usps} ignoring letter case, exactly as written (no
+     * surrounding blanks, no separators, not empty), which is the comparison
+     * {@code @ConditionalOnProperty} applies, so a value that binds always selects
+     * exactly one bean. Spring Boot's lenient enum conversion is deliberately not used:
+     * it trims the text and drops separators, so it would accept values such as
+     * {@code " stub "} or {@code us-ps} that select no bean.
      */
     public enum Client {
 
@@ -155,7 +220,8 @@ public record AddressValidationProperties(
      *
      * @param baseUrl        endpoint of the Web Tools {@code ShippingAPI.dll}
      *                       ({@code USPS_BASE_URL}); an absolute {@code http} or
-     *                       {@code https} URL without a fragment
+     *                       {@code https} URL without a fragment, whose port, when
+     *                       given, lies between 1 and 65535
      * @param userId         Web Tools user id ({@code USPS_USER_ID}); no default, required
      *                       when {@code client=usps}
      * @param password       Web Tools password ({@code USPS_PASSWORD}); no default
@@ -175,8 +241,10 @@ public record AddressValidationProperties(
          * Normalizes and validates the bound values.
          *
          * @throws IllegalArgumentException when a timeout is {@code null}, zero or
-         *                                  negative, or the base URL is not an
-         *                                  absolute {@code http}/{@code https} URL
+         *                                  negative, the base URL is not an
+         *                                  absolute {@code http}/{@code https} URL,
+         *                                  or its explicit port is not between 1
+         *                                  and 65535
          */
         public Usps {
             baseUrl = (baseUrl == null || baseUrl.isBlank()) ? DEFAULT_BASE_URL : baseUrl.strip();
@@ -284,7 +352,9 @@ public record AddressValidationProperties(
          * Rejects a base URL the client cannot extend. The client appends
          * {@code ?API=Verify&XML=...} (or {@code &...} when a query is already present),
          * so the value must be an absolute {@code http}/{@code https} URL with a host and
-         * no fragment. Checking it here fails startup instead of the first address
+         * no fragment. A port, when one is given, must lie between 1 and 65535; the URI
+         * parser also accepts 0 and values above 65535, to which the JDK HTTP client
+         * cannot connect. Checking it here fails startup instead of the first address
          * review. The value itself is left out of the message, because an operator could
          * have placed credentials in its user-info or query part.
          *
@@ -303,6 +373,12 @@ public record AddressValidationProperties(
             if (!http || uri.getHost() == null || uri.getRawFragment() != null) {
                 throw new IllegalArgumentException(
                         property + " must be an absolute http or https URL with a host and no fragment");
+            }
+            // -1 means no port was given, an empty one ("https://host:/path") included. The
+            // parser keeps any other decimal port that fits an int, out of range or not.
+            int port = uri.getPort();
+            if (port != -1 && (port < 1 || port > 65535)) {
+                throw new IllegalArgumentException(property + " must have a port between 1 and 65535");
             }
         }
     }

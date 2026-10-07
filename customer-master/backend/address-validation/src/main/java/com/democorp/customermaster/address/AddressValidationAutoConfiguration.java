@@ -38,13 +38,17 @@ import org.springframework.context.annotation.Bean;
  *
  * <h2>Behaviour notes</h2>
  * <ul>
- *   <li><b>Case.</b> {@link ConditionalOnProperty#havingValue()} is compared
- *       case-insensitively, so {@code STUB} and {@code USPS} select the same beans as
- *       {@code stub} and {@code usps}.</li>
- *   <li><b>Unknown value.</b> A value such as {@code foo} matches neither condition, but
- *       {@link AddressValidationProperties} is always bound here, and its
- *       {@link AddressValidationProperties.Client} enum rejects the value, so startup fails
- *       instead of running without a client.</li>
+ *   <li><b>Case.</b> {@link ConditionalOnProperty#havingValue()} is compared with the
+ *       configured text ignoring letter case only, so {@code STUB} and {@code USPS} select
+ *       the same beans as {@code stub} and {@code usps}. {@link AddressValidationProperties}
+ *       binds the selector with the same comparison, so a value that binds always matches
+ *       exactly one condition.</li>
+ *   <li><b>Unknown value.</b> Any other text matches neither condition: an unknown value
+ *       such as {@code foo}, an empty value, or {@code stub} and {@code usps} written with
+ *       surrounding blanks or separators, such as {@code " stub "} or {@code us-ps}.
+ *       {@link AddressValidationProperties} is always bound here and rejects each of them
+ *       with a message naming {@code customer-master.address.client}, never the value, so
+ *       startup fails instead of running without a client.</li>
  *   <li><b>Missing USPS user id.</b> {@code client=usps} with a blank
  *       {@code customer-master.address.usps.user-id} fails startup while the properties are
  *       bound, before the client could be created (fail fast).</li>

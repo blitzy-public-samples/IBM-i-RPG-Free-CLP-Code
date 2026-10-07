@@ -47,9 +47,10 @@ import org.springframework.web.bind.annotation.RestController;
  * <ul>
  *   <li>400 {@code APP0400} for a {@code nameContains} longer than 10 characters, raised by the
  *       {@link Size} constraint through Spring's built-in method validation
- *       ({@code HandlerMethodValidationException}), and for a {@code sort} other than {@code name} or
- *       {@code code}, raised by {@link StateService#list(String, String)} as
- *       {@code InvalidSearchCriteriaException}; {@link ApiExceptionHandler} maps both;</li>
+ *       ({@code HandlerMethodValidationException}), and for a {@code nameContains} containing U+0000
+ *       or a {@code sort} other than {@code name} or {@code code}, raised by
+ *       {@link StateService#list(String, String)} as {@code InvalidSearchCriteriaException};
+ *       {@link ApiExceptionHandler} maps both;</li>
  *   <li>401 {@code APP0401} without valid credentials, answered by the security filter chain before
  *       the request reaches this class.</li>
  * </ul>

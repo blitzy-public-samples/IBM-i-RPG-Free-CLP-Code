@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -14,9 +15,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.annotation.ImportCandidates;
+import org.springframework.boot.context.properties.bind.BindException;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.MapPropertySource;
 
 import com.democorp.customermaster.address.AddressValidationProperties.Client;
 import com.democorp.customermaster.address.AddressValidationProperties.Usps;
@@ -42,6 +45,10 @@ import com.democorp.customermaster.address.AddressValidationProperties.Usps;
  *   <li>{@code client=usps} registers {@link UspsWebToolsAddressValidationClient}, and
  *       startup fails fast when {@code usps.user-id} is missing or empty, where the
  *       source would have sent an empty {@code USERID} to USPS.</li>
+ *   <li>Any other {@code client} text fails startup with a message that names the
+ *       property but not the value: an unknown value, an empty one, or {@code stub} and
+ *       {@code usps} with surrounding blanks or separators, which the bean conditions
+ *       would not match, so the context never starts without a client.</li>
  *   <li>A client bean the application defines itself wins over both, because each
  *       auto-configured bean is {@code @ConditionalOnMissingBean}.</li>
  *   <li>{@code enabled=false} switches standardization off in customer-api only; the
@@ -74,6 +81,9 @@ class AddressValidationAutoConfigurationTest {
 
     /** Fictitious USPS Web Tools user id; the only credential value in this class. */
     private static final String TEST_USER_ID = "TESTUSER123";
+
+    /** Startup failure message when {@code client} is not {@code stub} or {@code usps} as written. */
+    private static final String INVALID_CLIENT_MESSAGE = CLIENT + " must be stub or usps";
 
     /** Startup failure message when {@code client=usps} has no user id. */
     private static final String MISSING_USER_ID_MESSAGE =
@@ -267,6 +277,52 @@ class AddressValidationAutoConfigurationTest {
                 assertThat(causeMessages(context.getStartupFailure()))
                         .anyMatch(message -> message.contains(CLIENT));
             });
+        }
+
+        /**
+         * Each value matches neither {@code @ConditionalOnProperty} condition, which
+         * compares the text as written ignoring letter case only, so binding it would
+         * start a context without a client. A user id is set so that the {@code usps}
+         * forms cannot fail for its absence instead. The values are supplied through a
+         * raw property source, because {@code withPropertyValues} trims them.
+         */
+        @ParameterizedTest(name = "client=\"{0}\"")
+        @ValueSource(strings = {" stub ", " usps", "stub\t", "us-ps", "s_t_u_b", ""})
+        @DisplayName("stub or usps not exactly as written, or empty, fails startup without echoing the value")
+        void inexactClientValueFailsStartup(String value) {
+            runner.withInitializer(context -> context.getEnvironment().getPropertySources().addFirst(
+                            new MapPropertySource("raw", Map.of(CLIENT, value, USER_ID, TEST_USER_ID))))
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        Throwable failure = context.getStartupFailure();
+                        assertThat(failure).rootCause()
+                                .isInstanceOf(IllegalArgumentException.class)
+                                .hasMessage(INVALID_CLIENT_MESSAGE);
+                        assertValueFreeFailure(failure, value);
+                    });
+        }
+
+        /**
+         * Asserts that the startup failure cannot show the configured value: the binding
+         * failure carries no configuration property, whose value the startup failure
+         * report would print, and no message in the cause chain contains the value
+         * outside the fixed invalid-client message (an empty value can only be checked
+         * the first way).
+         */
+        private void assertValueFreeFailure(Throwable failure, String value) {
+            List<BindException> bindFailures = new ArrayList<>();
+            for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+                if (cause instanceof BindException bindFailure) {
+                    bindFailures.add(bindFailure);
+                }
+            }
+            assertThat(bindFailures).isNotEmpty()
+                    .allSatisfy(bindFailure -> assertThat(bindFailure.getProperty()).isNull());
+            if (!value.isEmpty()) {
+                assertThat(causeMessages(failure))
+                        .map(message -> message.replace(INVALID_CLIENT_MESSAGE, ""))
+                        .noneMatch(message -> message.contains(value));
+            }
         }
     }
 

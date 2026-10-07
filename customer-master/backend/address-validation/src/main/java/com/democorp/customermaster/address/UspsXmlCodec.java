@@ -189,9 +189,7 @@ public final class UspsXmlCodec {
         Objects.requireNonNull(request, "request");
         StringWriter out = new StringWriter();
         try {
-            // The JDK's own writer is used, rather than whichever StAX provider happens to be
-            // on the classpath, so the empty-element form and the escaping are fixed.
-            XMLStreamWriter xml = XMLOutputFactory.newDefaultFactory().createXMLStreamWriter(out);
+            XMLStreamWriter xml = newWriter(out);
             try {
                 writeRequest(xml, request, clean(userId), clean(password));
                 xml.flush();
@@ -227,6 +225,54 @@ public final class UspsXmlCodec {
     public String requestQuery(AddressValidationRequest request, String userId, String password) {
         return QUERY_PREFIX
                 + URLEncoder.encode(requestDocument(request, userId, password), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Returns {@code value} exactly as {@link #requestDocument requestDocument} writes it
+     * between the double quotes of an attribute: stripped of surrounding whitespace
+     * ({@code null} reads {@code ""}) and escaped by the same JDK {@link XMLStreamWriter}.
+     * That writer escapes {@code &}, {@code <}, {@code >} and {@code "} but leaves an
+     * apostrophe, a tab and a line break as they are, so the password {@code p'&q} travels
+     * as {@code p'&amp;q}.
+     *
+     * <p>{@link UspsWebToolsAddressValidationClient} derives the request-wire form of each
+     * credential it masks from this method, so its mask follows the escaping the request
+     * document actually applies instead of a second, hand-written escaping rule that could
+     * drift from it.
+     *
+     * <p>The result is as secret as its input: callers must never log it.
+     *
+     * @param value the attribute value; {@code null} is written as {@code ""}
+     * @return the escaped attribute text, without the surrounding quotes
+     * @throws IllegalStateException if the XML writer fails or does not write the attribute
+     *                               in the expected form; the message carries no value
+     */
+    static String attributeValue(String value) {
+        String attribute = "PASSWORD";
+        StringWriter out = new StringWriter();
+        try {
+            XMLStreamWriter xml = newWriter(out);
+            try {
+                xml.writeStartElement(REQUEST_ROOT);
+                xml.writeAttribute(attribute, clean(value));
+                xml.writeEndElement();
+                xml.flush();
+            } finally {
+                xml.close();
+            }
+        } catch (XMLStreamException e) {
+            // Not chained, for the same reason as in requestDocument: the value is a credential.
+            throw new IllegalStateException(
+                    "could not write a USPS request attribute (" + e.getClass().getSimpleName() + ")");
+        }
+        String written = out.toString();
+        String start = "<" + REQUEST_ROOT + " " + attribute + "=\"";
+        String end = "\"></" + REQUEST_ROOT + ">";
+        if (written.length() < start.length() + end.length()
+                || !written.startsWith(start) || !written.endsWith(end)) {
+            throw new IllegalStateException("the USPS request attribute was not written in the expected form");
+        }
+        return written.substring(start.length(), written.length() - end.length());
     }
 
     /**
@@ -298,6 +344,16 @@ public final class UspsXmlCodec {
 
         return AddressValidationResult.error(
                 address1, address2, city, state, zip5, zip4, number, source, description);
+    }
+
+    /**
+     * Creates the XML writer behind {@link #requestDocument requestDocument} and
+     * {@link #attributeValue attributeValue}. The JDK's own writer is used, rather than
+     * whichever StAX provider happens to be on the classpath, so the empty-element form and
+     * the escaping are fixed.
+     */
+    private static XMLStreamWriter newWriter(StringWriter out) throws XMLStreamException {
+        return XMLOutputFactory.newDefaultFactory().createXMLStreamWriter(out);
     }
 
     /**

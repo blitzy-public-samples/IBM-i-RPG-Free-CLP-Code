@@ -74,11 +74,19 @@ import org.springframework.web.client.RestClientException;
  * URI is a secret. No log line and no exception message written here contains the URI, the
  * query string, the request document, the {@code USERID} attribute name, a credential, a
  * customer address value or the response body. Logs carry the host, the HTTP status and
- * the kind of fault only; an address-level error also logs the USPS error number and
- * description. Spring's {@code ResourceAccessException} quotes the full URI in its message,
- * so it is never chained or logged: the fault names its root cause's class instead. Every
- * text logged or thrown passes through a mask that replaces each configured credential, in
- * its raw, XML-escaped and URL-encoded forms, with {@code ****}. The client is built from
+ * the kind of fault only. An address-level error also logs the USPS error number, and its
+ * description only when that is one of the texts USPS documents; any other description is
+ * logged as a marker carrying its length, because free text from the service can echo an
+ * address, a name or a URL. Spring's {@code ResourceAccessException} quotes the full URI in
+ * its message, so it is never chained or logged: the fault names its root cause's class
+ * instead. Every fault reason, logged or thrown, and every logged description passes
+ * through a mask that replaces each configured credential with {@code ****} in its raw
+ * form, its request-wire attribute form, its {@code &apos;} entity form and the URL
+ * encoding of each. Each logged reason and description, once masked, has its control,
+ * format and line-separator characters escaped, so text from the service cannot forge or
+ * split a log line; the host, parsed from the configured base URL, cannot hold such
+ * characters and is logged as parsed. Results and exception messages keep their text
+ * unescaped. The client is built from
  * the static {@link RestClient#builder()} rather than an application {@code RestClient.Builder}
  * bean, so no observation registry records the URI as a metric or trace tag.
  *
@@ -122,6 +130,17 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
     private static final Logger log = LoggerFactory.getLogger(UspsWebToolsAddressValidationClient.class);
 
     private static final byte[] NO_BODY = new byte[0];
+
+    /**
+     * Address-level error descriptions USPS documents, the only ones
+     * {@linkplain #loggedDescription logged} verbatim; the sources are cited there.
+     */
+    private static final Set<String> DOCUMENTED_DESCRIPTIONS = Set.of(
+            "Address Not Found.",
+            "Invalid Address.",
+            "Invalid City.",
+            "Invalid State Code.",
+            "Invalid Zip Code.");
 
     private final String baseUrl;
     private final String userId;
@@ -211,9 +230,39 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
             log.debug("USPS address standardized: host={} status={}", host, status);
         } else {
             log.info("USPS address not standardized: host={} status={} errorNumber={} errorDescription={}",
-                    host, status, result.errorNumber(), mask(result.errorDescription()));
+                    host, status, result.errorNumber(), logText(loggedDescription(result.errorDescription())));
         }
         return result;
+    }
+
+    /**
+     * The form in which an address-level error description is logged. A description that
+     * exactly equals one of the {@linkplain #DOCUMENTED_DESCRIPTIONS documented texts} is
+     * logged as it is:
+     * <ul>
+     *   <li>{@code Address Not Found.}, the description of the Web Tools error for an
+     *       address it cannot match ({@code -2147219401} / {@code clsAMS}), the triple
+     *       {@link StubAddressValidationClient} reproduces;</li>
+     *   <li>{@code Invalid Address.}, {@code Invalid City.}, {@code Invalid State Code.}
+     *       and {@code Invalid Zip Code.} (USPS Web Tools Address Information API user
+     *       guide, section 6.0 Error Response).</li>
+     * </ul>
+     * Any other text is free text from the service, which can echo an address, a name or
+     * a URL, so only its length in code points is logged, as
+     * {@code [unlisted, 47 characters]}.
+     *
+     * <p>Logging only: the returned result, and the DEM9898 message customer-api builds
+     * from it, keep the description verbatim.
+     *
+     * @param description the parsed description; {@code null} reads as {@code ""}
+     * @return the description when documented, otherwise the length marker
+     */
+    private static String loggedDescription(String description) {
+        String text = description == null ? "" : description;
+        if (DOCUMENTED_DESCRIPTIONS.contains(text)) {
+            return text;
+        }
+        return "[unlisted, " + text.codePointCount(0, text.length()) + " characters]";
     }
 
     /**
@@ -269,7 +318,7 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
             // cause's class only and is constructed without a cause.
             Throwable root = NestedExceptionUtils.getMostSpecificCause(e);
             String reason = "USPS address service I/O failure: " + root.getClass().getSimpleName();
-            log.warn("USPS address validation failed: host={} reason={}", host, mask(reason));
+            log.warn("USPS address validation failed: host={} reason={}", host, logText(reason));
             throw new AddressServiceUnavailableException(mask(reason));
         }
     }
@@ -285,9 +334,54 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
         return new AddressServiceUnavailableException(mask(reason));
     }
 
-    /** Logs a fault at WARN with the host, the status and the masked reason. */
+    /** Logs a fault at WARN with the host, the status and the reason, masked and escaped. */
     private void logFault(int status, String reason) {
-        log.warn("USPS address validation failed: host={} status={} reason={}", host, status, mask(reason));
+        log.warn("USPS address validation failed: host={} status={} reason={}", host, status, logText(reason));
+    }
+
+    /**
+     * Prepares a text for a log argument: {@link #mask masked} first, so that a credential
+     * is replaced whole before any of its characters is escaped, then made
+     * {@link #logSafe log-safe}.
+     *
+     * @param text text about to be logged; {@code null} reads as {@code ""}
+     * @return the masked, escaped text
+     */
+    private String logText(String text) {
+        return logSafe(mask(text));
+    }
+
+    /**
+     * Escapes every character that could end, split or disguise a log line: each code
+     * point whose {@link Character#getType(int) general category} is
+     * {@link Character#CONTROL CONTROL} (CR, LF, TAB, ESC, DEL, NEL and the other C0 and
+     * C1 controls), {@link Character#FORMAT FORMAT} (such as the bidirectional override
+     * U+202E), {@link Character#LINE_SEPARATOR LINE_SEPARATOR} (U+2028) or
+     * {@link Character#PARAGRAPH_SEPARATOR PARAGRAPH_SEPARATOR} (U+2029) becomes a visible
+     * backslash, {@code u} and its code point in at least four uppercase hexadecimal
+     * digits, so a line feed is logged as <code>&#92;u000A</code>. Every other character is
+     * kept, accented letters included.
+     *
+     * <p>Applied to logged text only: results and exception messages keep the text as the
+     * service sent it.
+     *
+     * @param text text about to be logged; {@code null} reads as {@code ""}
+     * @return the text with those characters escaped
+     */
+    static String logSafe(String text) {
+        if (text == null) {
+            return "";
+        }
+        StringBuilder safe = new StringBuilder(text.length());
+        text.codePoints().forEach(codePoint -> {
+            switch (Character.getType(codePoint)) {
+                case Character.CONTROL, Character.FORMAT,
+                        Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR ->
+                        safe.append(String.format("\\u%04X", codePoint));
+                default -> safe.appendCodePoint(codePoint);
+            }
+        });
+        return safe.toString();
     }
 
     /**
@@ -295,10 +389,12 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
      * {@value AddressValidationProperties#MASK}, longest form first so that one credential
      * contained in the other is still masked whole.
      *
+     * <p>Package-private so that the tests can check every credential form it covers.
+     *
      * @param text text about to be logged or thrown; {@code null} reads as {@code ""}
      * @return the masked text
      */
-    private String mask(String text) {
+    String mask(String text) {
         if (text == null) {
             return "";
         }
@@ -310,9 +406,18 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
     }
 
     /**
-     * The forms in which a credential can appear in text: as configured, XML-escaped as the
-     * request document writes an attribute, and URL-encoded as the query carries either of
-     * those. Blank credentials yield no form. Sorted longest first.
+     * The forms in which a credential can appear in text, each also URL-encoded (UTF-8) as
+     * a query string or an echoing service would carry it:
+     * <ul>
+     *   <li>raw, as configured;</li>
+     *   <li>the request-wire form, the attribute text {@link UspsXmlCodec#attributeValue}
+     *       returns, which is what the request document carries and which leaves an
+     *       apostrophe literal ({@code p'&q} travels as {@code p'&amp;q});</li>
+     *   <li>the full-entity form of {@link #xmlEscape xmlEscape}, which also encodes the
+     *       apostrophe ({@code p&apos;&amp;q}), as other XML serializers write it.</li>
+     * </ul>
+     * Blank credentials yield no form. Duplicates are dropped, and the forms are sorted
+     * longest first.
      */
     private static List<String> secretForms(String... credentials) {
         Set<String> forms = new LinkedHashSet<>();
@@ -320,18 +425,23 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
             if (credential == null || credential.isBlank()) {
                 continue;
             }
-            String escaped = xmlEscape(credential);
-            forms.add(credential);
-            forms.add(escaped);
-            forms.add(URLEncoder.encode(credential, StandardCharsets.UTF_8));
-            forms.add(URLEncoder.encode(escaped, StandardCharsets.UTF_8));
+            List<String> written = List.of(
+                    credential, UspsXmlCodec.attributeValue(credential), xmlEscape(credential));
+            for (String form : written) {
+                forms.add(form);
+                forms.add(URLEncoder.encode(form, StandardCharsets.UTF_8));
+            }
         }
         List<String> sorted = new ArrayList<>(forms);
         sorted.sort(Comparator.comparingInt(String::length).reversed());
         return List.copyOf(sorted);
     }
 
-    /** Escapes the characters an XML attribute value can carry escaped. */
+    /**
+     * Escapes every character an XML attribute value can carry as a predefined entity,
+     * the apostrophe included. This is the full-entity form other XML serializers produce;
+     * the request document's own form comes from {@link UspsXmlCodec#attributeValue}.
+     */
     private static String xmlEscape(String value) {
         return value.replace("&", "&amp;")
                 .replace("<", "&lt;")

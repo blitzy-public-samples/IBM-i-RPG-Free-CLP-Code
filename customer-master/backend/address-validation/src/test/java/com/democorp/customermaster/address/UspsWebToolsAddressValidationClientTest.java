@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -28,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -60,7 +62,22 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  *       {@code Content-Length}. A body of exactly that size is accepted.</li>
  *   <li>Codec faults on a 200 response: a Web Tools root {@code <Error>} and a malformed
  *       document.</li>
- *   <li>An address-level error ({@code Address Not Found.}), which is a normal result.</li>
+ *   <li>An address-level error ({@code Address Not Found.}), which is a normal result and
+ *       is logged with its error number and documented description.</li>
+ *   <li>Log-line injection: a {@code Description} holding LF, CR LF, NEL, LINE SEPARATOR
+ *       and PARAGRAPH SEPARATOR as character references is returned exactly as decoded,
+ *       while the log shows one INFO line with the unlisted-description marker and its
+ *       length, no forged line and none of those characters. {@code logSafe} escapes CR,
+ *       LF, TAB, ESC, DEL, NEL, U+2028, U+2029, U+202E and a supplementary format
+ *       character, and keeps ASCII and accented letters.</li>
+ *   <li>Sensitive response text: a {@code Description} echoing a street, ZIP code, name and
+ *       URL is returned unchanged and logged only as the marker with its length.</li>
+ *   <li>Credential forms: with the password {@code p'&q}, the request carries the
+ *       {@code PASSWORD} attribute exactly as {@link UspsXmlCodec#attributeValue} writes
+ *       it, {@code p'&amp;q}; the mask removes that wire form, the raw form, the
+ *       {@code &apos;} entity form and the URL encoding of each from the decoded document,
+ *       the raw query and other text; and a {@code Description} echoing the wire form and
+ *       its URL encoding leaves no form in the captured output.</li>
  *   <li>Secret hygiene: in every case, success included, neither the captured output nor
  *       any exception message in the cause chain carries the {@code USERID} attribute name
  *       or a credential in its raw, XML-escaped or URL-encoded form. The captured output
@@ -76,7 +93,9 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  *
  * <p><b>Test values.</b> The credentials {@code TESTUSER123} and {@code pl&ce"holder} are
  * fictitious placeholders; the password carries {@code &} and {@code "} so that its
- * escaped and encoded forms differ from the raw one. The address is the fictitious base
+ * escaped and encoded forms differ from the raw one. The fictitious password
+ * {@code p'&q} carries an apostrophe, which the request writer leaves literal while a
+ * full-entity escaper writes {@code &apos;}. The address is the fictitious base
  * row of the {@code usps/*.xml} fixtures. The test never prints the captured query or the
  * decoded request document, and its failure messages name what is missing rather than
  * quoting either.
@@ -96,6 +115,18 @@ class UspsWebToolsAddressValidationClientTest {
 
     /** {@link #PASSWORD} as the request document's attribute writer escapes it. */
     private static final String PASSWORD_XML_ESCAPED = "pl&amp;ce&quot;holder";
+
+    /**
+     * Fictitious password with an apostrophe, which the request document's attribute
+     * writer leaves literal while a full-entity escaper writes {@code &apos;}.
+     */
+    private static final String APOSTROPHE_PASSWORD = "p'&q";
+
+    /** {@link #APOSTROPHE_PASSWORD} as the request document's attribute writer escapes it. */
+    private static final String APOSTROPHE_PASSWORD_WIRE = "p'&amp;q";
+
+    /** {@link #APOSTROPHE_PASSWORD} with every predefined entity, the apostrophe included. */
+    private static final String APOSTROPHE_PASSWORD_ENTITIES = "p&apos;&amp;q";
 
     /** Path of the fake Web Tools endpoint. */
     private static final String ENDPOINT_PATH = "/ShippingAPI.dll";
@@ -241,6 +272,57 @@ class UspsWebToolsAddressValidationClientTest {
         assertThat(result.errorNumber()).isEqualTo(-2147219401);
         assertThat(result.errorSource()).isEqualTo("clsAMS");
         assertThat(result.errorDescription()).isEqualTo("Address Not Found.");
+        assertThat(output.getAll().lines()
+                        .anyMatch(line -> line.contains("errorNumber=-2147219401 errorDescription=Address Not Found.")))
+                .withFailMessage("captured output lacks the documented error number and description")
+                .isTrue();
+        assertNoCredentials(output, null);
+    }
+
+    @Test
+    @DisplayName("line breaks and separators in an address-level Description cannot forge or split log lines")
+    void addressErrorDescriptionCannotForgeLogLines(CapturedOutput output) {
+        byte[] body = addressErrorBody("Address Not Found.&#10;ERROR forged entry one&#13;&#10;"
+                + "WARN forged entry two&#x85;INFO three&#x2028;INFO four&#x2029;end");
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+        String decoded = "Address Not Found.\nERROR forged entry one\r\nWARN forged entry two\u0085"
+                + "INFO three\u2028INFO four\u2029end";
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorDescription()).isEqualTo(decoded);
+        // The console ends each line with the platform separator; nothing else may break one.
+        String captured = output.getAll().replace(System.lineSeparator(), "\n");
+        List<String> lines = captured.lines().toList();
+        assertThat(lines.stream().filter(line -> line.contains("USPS address not standardized")))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains("errorNumber=-2147219401 errorDescription=[unlisted, 89 characters]");
+        assertThat(lines).noneMatch(line -> line.contains("forged"));
+        assertThat(captured).doesNotContain("\r", "\u0085", "\u2028", "\u2029");
+        assertNoCredentials(output, null);
+    }
+
+    @Test
+    @DisplayName("an unlisted Description is logged as its length only, never as the text it echoes")
+    void unlistedDescriptionIsLoggedAsLengthOnly(CapturedOutput output) {
+        String description = "Address 123 MAIN ST, ANYTOWN CA 90210 for JOHN DOE see https://example.invalid/x";
+        byte[] body = addressErrorBody(description);
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorDescription()).isEqualTo(description);
+        String captured = output.getAll();
+        assertThat(captured).doesNotContain("MAIN ST", "90210", "JOHN DOE", "https://", "example.invalid");
+        assertThat(captured).contains("errorNumber=-2147219401 errorDescription=[unlisted, 80 characters]");
         assertNoCredentials(output, null);
     }
 
@@ -431,6 +513,107 @@ class UspsWebToolsAddressValidationClientTest {
         assertNoCredentials(output, thrown);
     }
 
+    @Test
+    @DisplayName("logSafe escapes control, format and line-separator characters and keeps every other character")
+    void logSafeEscapesLineBreakingCharacters() {
+        Map<String, String> escapes = new LinkedHashMap<>();
+        escapes.put("CR", "\r");
+        escapes.put("LF", "\n");
+        escapes.put("TAB", "\t");
+        escapes.put("ESC", "\u001B");
+        escapes.put("DEL", "\u007F");
+        escapes.put("NEL", "\u0085");
+        escapes.put("LINE SEPARATOR", "\u2028");
+        escapes.put("PARAGRAPH SEPARATOR", "\u2029");
+        escapes.put("RIGHT-TO-LEFT OVERRIDE", "\u202E");
+        escapes.put("LANGUAGE TAG (supplementary)", new String(Character.toChars(0xE0001)));
+        Map<String, String> expected = Map.of(
+                "CR", "\\u000D",
+                "LF", "\\u000A",
+                "TAB", "\\u0009",
+                "ESC", "\\u001B",
+                "DEL", "\\u007F",
+                "NEL", "\\u0085",
+                "LINE SEPARATOR", "\\u2028",
+                "PARAGRAPH SEPARATOR", "\\u2029",
+                "RIGHT-TO-LEFT OVERRIDE", "\\u202E",
+                "LANGUAGE TAG (supplementary)", "\\uE0001");
+        escapes.forEach((name, character) ->
+                assertThat(UspsWebToolsAddressValidationClient.logSafe("a" + character + "b"))
+                        .as(name)
+                        .isEqualTo("a" + expected.get(name) + "b"));
+
+        assertThat(UspsWebToolsAddressValidationClient.logSafe("Address Not Found.\nERROR forged\r\n"))
+                .isEqualTo("Address Not Found.\\u000AERROR forged\\u000D\\u000A");
+        String ascii = "Address Not Found. 123 [x] {y} ~!@#$%^&*()_+-=|;:'\",.<>/?`";
+        assertThat(UspsWebToolsAddressValidationClient.logSafe(ascii)).isEqualTo(ascii);
+        String accented = "Caf\u00E9 S\u00E3o Paulo Z\u00FCrich \u00C5ngstr\u00F6m \u00D1and\u00FA";
+        assertThat(UspsWebToolsAddressValidationClient.logSafe(accented)).isEqualTo(accented);
+        assertThat(UspsWebToolsAddressValidationClient.logSafe("")).isEmpty();
+        assertThat(UspsWebToolsAddressValidationClient.logSafe(null)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("masks a password with an apostrophe in its request-wire, full-entity and URL-encoded forms")
+    void masksApostrophePasswordInEveryWrittenForm(CapturedOutput output) {
+        String wireEncoded = URLEncoder.encode(APOSTROPHE_PASSWORD_WIRE, StandardCharsets.UTF_8);
+        String rawEncoded = URLEncoder.encode(APOSTROPHE_PASSWORD, StandardCharsets.UTF_8);
+        String entitiesEncoded = URLEncoder.encode(APOSTROPHE_PASSWORD_ENTITIES, StandardCharsets.UTF_8);
+        assertThat(wireEncoded).isEqualTo("p%27%26amp%3Bq");
+        assertThat(rawEncoded).isEqualTo("p%27%26q");
+        // The parsed Description echoes the wire form and its URL encoding.
+        String echoed = APOSTROPHE_PASSWORD_WIRE + " and " + wireEncoded;
+        AtomicReference<String> rawQuery = new AtomicReference<>();
+        byte[] body = addressErrorBody("p'&amp;amp;q and p%27%26amp%3Bq");
+        handler.set(exchange -> {
+            rawQuery.set(exchange.getRequestURI().getRawQuery());
+            drainAndRespond(exchange, 200, body);
+        });
+
+        AddressValidationResult result;
+        String query;
+        String document;
+        String maskedDocument;
+        String maskedQuery;
+        String maskedEntities;
+        String maskedEntitiesEncoded;
+        try (UspsWebToolsAddressValidationClient client = client(
+                "http://127.0.0.1:" + port + ENDPOINT_PATH, APOSTROPHE_PASSWORD, NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+            query = rawQuery.get();
+            assertThat(query).withFailMessage("request has no query string").isNotNull();
+            document = URLDecoder.decode(query.substring(query.indexOf("XML=") + 4), StandardCharsets.UTF_8);
+            maskedDocument = client.mask(document);
+            maskedQuery = client.mask(query);
+            maskedEntities = client.mask("x " + APOSTROPHE_PASSWORD_ENTITIES + " y");
+            maskedEntitiesEncoded = client.mask("x " + entitiesEncoded + " y");
+        }
+
+        String passwordAttribute = attributeText(document, "PASSWORD");
+        assertThat(passwordAttribute.equals(UspsXmlCodec.attributeValue(APOSTROPHE_PASSWORD)))
+                .withFailMessage("PASSWORD attribute differs from UspsXmlCodec.attributeValue")
+                .isTrue();
+        assertThat(passwordAttribute.equals(APOSTROPHE_PASSWORD_WIRE))
+                .withFailMessage("PASSWORD attribute is not the literal-apostrophe wire form")
+                .isTrue();
+        assertThat(query.contains(wireEncoded))
+                .withFailMessage("raw query lacks the URL-encoded wire form")
+                .isTrue();
+
+        assertAbsent(maskedDocument, "masked request document", APOSTROPHE_PASSWORD_WIRE, APOSTROPHE_PASSWORD);
+        assertAbsent(maskedQuery, "masked raw query", wireEncoded, rawEncoded);
+        assertThat(maskedEntities).isEqualTo("x " + AddressValidationProperties.MASK + " y");
+        assertThat(maskedEntitiesEncoded).isEqualTo("x " + AddressValidationProperties.MASK + " y");
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorDescription().equals(echoed))
+                .withFailMessage("returned description is not the parsed Description")
+                .isTrue();
+        assertAbsent(output.getAll(), "captured output", APOSTROPHE_PASSWORD, APOSTROPHE_PASSWORD_WIRE,
+                APOSTROPHE_PASSWORD_ENTITIES, rawEncoded, wireEncoded, entitiesEncoded);
+        assertNoCredentials(output, null);
+    }
+
     // ---------------------------------------------------------------- helpers
 
     /** Builds a client for the fake endpoint with the given read timeout. */
@@ -440,11 +623,59 @@ class UspsWebToolsAddressValidationClientTest {
 
     /** Builds a client for {@code baseUrl} with the placeholder credentials. */
     private static UspsWebToolsAddressValidationClient client(String baseUrl, Duration readTimeout) {
+        return client(baseUrl, PASSWORD, readTimeout);
+    }
+
+    /** Builds a client for {@code baseUrl} with the placeholder user id and {@code password}. */
+    private static UspsWebToolsAddressValidationClient client(
+            String baseUrl, String password, Duration readTimeout) {
         return new UspsWebToolsAddressValidationClient(new AddressValidationProperties(
                 true,
                 AddressValidationProperties.Client.USPS,
                 new AddressValidationProperties.Usps(
-                        baseUrl, USER_ID, PASSWORD, Duration.ofSeconds(5), readTimeout)));
+                        baseUrl, USER_ID, password, Duration.ofSeconds(5), readTimeout)));
+    }
+
+    /**
+     * A 200 body holding an address-level error: blank {@code City}, {@code Number}
+     * {@code -2147219401}, {@code Source} {@code clsAMS} and {@code descriptionXml} as the
+     * {@code Description} content, inserted as XML markup so it can carry character
+     * references.
+     */
+    private static byte[] addressErrorBody(String descriptionXml) {
+        return ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                + "<AddressValidateResponse><Address ID=\"0\">"
+                + "<Address2>8 ELMWOOD DR</Address2><City></City><State>CT</State><Zip5>06399</Zip5>"
+                + "<Error><Number>-2147219401</Number><Source>clsAMS</Source>"
+                + "<Description>" + descriptionXml + "</Description></Error>"
+                + "</Address></AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Returns the text between the quotes of attribute {@code name} in the decoded request
+     * document; failure messages name the attribute and never quote the document.
+     */
+    private static String attributeText(String document, String name) {
+        String start = " " + name + "=\"";
+        int from = document.indexOf(start);
+        assertThat(from).withFailMessage("decoded request document lacks the %s attribute", name).isNotNegative();
+        int valueStart = from + start.length();
+        int valueEnd = document.indexOf('"', valueStart);
+        assertThat(valueEnd).withFailMessage("the %s attribute is not closed", name).isNotNegative();
+        return document.substring(valueStart, valueEnd);
+    }
+
+    /**
+     * Asserts that {@code text} contains none of {@code forms}. Failure messages name
+     * {@code where} and the form found, never the text, which may be a request document or
+     * query.
+     */
+    private static void assertAbsent(String text, String where, String... forms) {
+        for (String form : forms) {
+            assertThat(text.contains(form))
+                    .withFailMessage("%s contains %s", where, form)
+                    .isFalse();
+        }
     }
 
     /**
@@ -560,4 +791,3 @@ class UspsWebToolsAddressValidationClientTest {
         }
     }
 }
-

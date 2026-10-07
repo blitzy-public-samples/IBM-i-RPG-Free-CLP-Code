@@ -391,4 +391,3 @@ class UspsXmlCodecTest {
         return matches.get(0);
     }
 }
-

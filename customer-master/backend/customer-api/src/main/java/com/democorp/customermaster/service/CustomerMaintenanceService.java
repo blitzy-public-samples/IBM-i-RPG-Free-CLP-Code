@@ -693,4 +693,3 @@ public class CustomerMaintenanceService {
         return "SET LOCAL lock_timeout = '" + lockTimeout.toMillis() + "ms'";
     }
 }
-

@@ -86,6 +86,9 @@ public class StateService {
     /** The {@code LIKE} wildcard wrapped around a non-blank filter: "Name Contains". */
     private static final String ANY = "%";
 
+    /** U+0000, which no PostgreSQL text value can hold; a filter carrying it is rejected. */
+    private static final char NUL = '\u0000';
+
     /** PostgreSQL's default {@code LIKE} escape character, which Db2 does not have. */
     private static final String BACKSLASH = "\\";
 
@@ -162,9 +165,12 @@ public class StateService {
      *       APP0400 on field {@code nameContains}, the API's "length over the column size" rule. The
      *       screen prevented such input by its field length; the UI prevents it with
      *       {@code maxLength}.</li>
-     *   <li><b>Sort.</b> {@code null} or blank means {@code "name"}, PMTSTATER's initial order.
-     *       Exactly {@code "name"} or {@code "code"} is accepted; anything else is rejected with APP0400
-     *       on field {@code sort}.</li>
+     *   <li><b>U+0000.</b> A {@code nameContains} that contains U+0000, which PostgreSQL text cannot
+     *       hold, is rejected with APP0400 on field {@code nameContains}, so it never reaches the
+     *       query; the character is not stripped or replaced instead.</li>
+     *   <li><b>Sort.</b> {@code null} or empty means {@code "name"}, PMTSTATER's initial order.
+     *       Exactly {@code "name"} or {@code "code"} is accepted; anything else, a blank value such
+     *       as {@code " "} included, is rejected with APP0400 on field {@code sort}.</li>
      *   <li><b>Pattern.</b> The filter is normalized with {@link TextNormalizer#filter(String)}
      *       (trimmed at both ends, as {@code %trim(SC_NAME)}, and uppercased, because PMTSTATED's field
      *       has no {@code CHECK(LC)}). Every {@code \} is doubled, because PostgreSQL treats {@code \} as
@@ -177,15 +183,17 @@ public class StateService {
      * {@code rpad(upper(name), 30)}, so a typed {@code _} can match a pad blank of the 30-character name
      * as on Db2 ({@code texas_} finds Texas), and orders by {@code name} or {@code state} under the
      * {@code customer_sort} collation. This method neither filters nor sorts in Java and opens no
-     * transaction of its own; the repository's read-only default suffices.
+     * transaction itself; the repository call runs in the read-only transaction {@link StateRepository}
+     * declares.
      *
      * @param nameContains the "Name Contains" filter as received; may be {@code null}, which, like a
      *                     blank filter, lists every state
-     * @param sort         {@code "name"} or {@code "code"}; {@code null} or blank means {@code "name"}
+     * @param sort         {@code "name"} or {@code "code"}; {@code null} or empty means {@code "name"}
      * @return the matching states in the requested order; empty when none matches, never {@code null}
      * @throws InvalidSearchCriteriaException with code APP0400, on field {@code nameContains} when the
-     *                                        filter is too long, or on field {@code sort} when the sort
-     *                                        is not {@code name} or {@code code}
+     *                                        filter is too long or contains U+0000, or on field
+     *                                        {@code sort} when the sort is not {@code name} or
+     *                                        {@code code}
      */
     public List<State> list(String nameContains, String sort) {
         if (nameContains != null
@@ -195,18 +203,31 @@ public class StateService {
                     "nameContains",
                     List.of("nameContains must be at most " + NAME_CONTAINS_MAX_LENGTH + " characters"));
         }
-        return stateRepository.search(namePattern(nameContains), sortKey(sort));
+        if (nameContains != null && nameContains.indexOf(NUL) >= 0) {
+            throw new InvalidSearchCriteriaException(
+                    InvalidSearchCriteriaException.APP0400,
+                    "nameContains",
+                    List.of("nameContains must not contain U+0000"));
+        }
+        final String key = sortKey(sort);
+        return stateRepository.search(namePattern(nameContains), key);
     }
 
     /**
      * Resolves the sort parameter to the repository's sort key.
+     *
+     * <p>Only an absent ({@code null}) or empty value means {@code "name"}, the default order; the
+     * controller's default already turns {@code sort=} into {@code "name"}. Otherwise the value must
+     * be exactly {@code "name"} or {@code "code"}: it is neither trimmed nor case-folded, so a blank,
+     * padded or differently cased value such as {@code " "}, {@code "name "} or {@code "NAME"} is an
+     * unknown sort.
      *
      * @param sort the parameter as received; may be {@code null}
      * @return {@code "name"} or {@code "code"}
      * @throws InvalidSearchCriteriaException APP0400 on field {@code sort} for any other value
      */
     private static String sortKey(String sort) {
-        if (sort == null || sort.isBlank() || SORT_BY_NAME.equals(sort)) {
+        if (sort == null || sort.isEmpty() || SORT_BY_NAME.equals(sort)) {
             return SORT_BY_NAME;
         }
         if (SORT_BY_CODE.equals(sort)) {

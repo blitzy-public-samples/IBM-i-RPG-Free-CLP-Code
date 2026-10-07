@@ -76,13 +76,17 @@ final class AddressValidationPropertiesTest {
     /** Fictitious value of the dedicated password setting. */
     private static final String PASSWORD = "test-password";
 
-    /** Message of every base URL rejected after parsing. */
+    /** Message of a parsed base URL rejected for its scheme, host or fragment. */
     private static final String NOT_HTTP_MESSAGE = AddressValidationProperties.PREFIX
             + ".usps.base-url must be an absolute http or https URL with a host and no fragment";
 
     /** Message of a base URL that is not a valid URI. */
     private static final String NOT_VALID_MESSAGE = AddressValidationProperties.PREFIX
             + ".usps.base-url is not a valid URL";
+
+    /** Message of an http or https base URL whose explicit port is not between 1 and 65535. */
+    private static final String PORT_MESSAGE = AddressValidationProperties.PREFIX
+            + ".usps.base-url must have a port between 1 and 65535";
 
     /**
      * Configured base URLs that carry user-info or a query, each with its expected
@@ -239,7 +243,22 @@ final class AddressValidationPropertiesTest {
                         "/ShippingAPI.dll?token=" + QUERY_SECRET, NOT_HTTP_MESSAGE),
                 Arguments.of("illegal character inside user-info",
                         "https://" + URL_USER + ":" + URL_PASSWORD + " x@gateway.example.test/ShippingAPI.dll",
-                        NOT_VALID_MESSAGE));
+                        NOT_VALID_MESSAGE),
+                Arguments.of("port one above the range",
+                        "https://gateway.example.test:65536/ShippingAPI.dll", PORT_MESSAGE),
+                Arguments.of("port above the range that still fits an int",
+                        "https://gateway.example.test:99999/ShippingAPI.dll", PORT_MESSAGE),
+                Arguments.of("port 0",
+                        "https://gateway.example.test:0/ShippingAPI.dll", PORT_MESSAGE),
+                Arguments.of("port above the range on an IPv6 literal",
+                        "http://[2001:db8::1]:65536/ShippingAPI.dll", PORT_MESSAGE),
+                Arguments.of("port above the range with user-info and a query secret",
+                        "https://" + USER_INFO + "@gateway.example.test:65536/ShippingAPI.dll?token=" + QUERY_SECRET,
+                        PORT_MESSAGE),
+                Arguments.of("port too large for an int, with user-info and a query secret",
+                        "https://" + USER_INFO + "@gateway.example.test:2147483648/ShippingAPI.dll?token="
+                                + QUERY_SECRET,
+                        NOT_HTTP_MESSAGE));
     }
 
     @ParameterizedTest(name = "[{index}] {0}")
@@ -261,6 +280,22 @@ final class AddressValidationPropertiesTest {
                 .rootCause()
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage(message);
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "https://gateway.example.test:1/ShippingAPI.dll",
+        "https://gateway.example.test:443/ShippingAPI.dll",
+        "https://gateway.example.test:8443/ShippingAPI.dll",
+        "https://gateway.example.test:65535/ShippingAPI.dll",
+        "https://[::1]:8443/ShippingAPI.dll",
+        "https://gateway.example.test:/ShippingAPI.dll",
+        AddressValidationProperties.DEFAULT_BASE_URL
+    })
+    @DisplayName("a base URL with a port between 1 and 65535, or with none, is accepted directly and when bound")
+    void portInRangeOrAbsentIsAccepted(String configured) {
+        assertThat(usps(configured, USER_ID, PASSWORD).baseUrl()).isEqualTo(configured);
+        assertThat(bind(settings(configured)).usps().baseUrl()).isEqualTo(configured);
     }
 
     @Test

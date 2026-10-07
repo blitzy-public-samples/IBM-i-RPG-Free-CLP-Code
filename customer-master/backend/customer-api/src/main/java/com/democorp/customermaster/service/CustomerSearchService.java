@@ -71,14 +71,16 @@ import org.springframework.stereotype.Service;
  *       <td>APP0400 on {@code size}</td></tr>
  *   <tr><td>{@code name}, {@code city}</td><td>At most 13 code points as received, the width of
  *       {@code SC_NAME}/{@code SC_CITY} [5250_Subfile/PMTCUSTD.DSPF:95-98] and of the
- *       {@code varchar(13)} host variables [5250_Subfile/PMTCUSTR.SQLRPGLE:201-202]; then
+ *       {@code varchar(13)} host variables [5250_Subfile/PMTCUSTR.SQLRPGLE:201-202]; then free of
+ *       U+0000, which PostgreSQL text cannot hold; then
  *       {@link TextNormalizer#filter(String)}: trimmed at both ends, as {@code %trim(SC_NAME)},
  *       and uppercased by the length-preserving rule</td>
  *       <td>APP0400 on {@code name} or {@code city}</td></tr>
  *   <tr><td>{@code state}</td><td>Normalized as above; blank selects every state, exactly 2 code
- *       points is an exact filter. An unknown 2-letter code simply matches nothing; it is not
- *       checked against STATES, as the source did not check it</td>
- *       <td>DEM0007 on {@code state}</td></tr>
+ *       points is an exact filter, and any other length is DEM0007. A 2-code-point value that
+ *       contains U+0000 is then rejected. An unknown 2-letter code simply matches nothing; it is
+ *       not checked against STATES, as the source did not check it</td>
+ *       <td>DEM0007 on {@code state}; APP0400 on {@code state} for U+0000</td></tr>
  *   <tr><td>{@code includeInactive}</td><td>F9: {@code false} lists active customers only</td>
  *       <td>None</td></tr>
  *   <tr><td>{@code cursor}</td><td>Blank means the first page; otherwise a cursor this class
@@ -128,6 +130,9 @@ public class CustomerSearchService {
 
     /** Width of the state entry, {@code SC_STATE 2A}, and of the stored {@code state char(2)}. */
     private static final int STATE_WIDTH = 2;
+
+    /** U+0000, which no PostgreSQL text value can hold; a filter carrying it is rejected. */
+    private static final char NUL = '\u0000';
 
     /**
      * Longest cursor accepted. An issued cursor holds at most 40 + 20 + 2 + 4 characters of keys
@@ -221,9 +226,10 @@ public class CustomerSearchService {
      * @return the page; never {@code null}
      * @throws InvalidSearchCriteriaException DEM0007 on {@code state} for a state that is neither
      *                                        blank nor 2 characters; APP0400 on {@code size},
-     *                                        {@code name}, {@code city} or {@code cursor} for an
-     *                                        out-of-range size, an over-long filter or a cursor
-     *                                        this service did not issue
+     *                                        {@code name}, {@code city}, {@code state} or
+     *                                        {@code cursor} for an out-of-range size, an
+     *                                        over-long filter, a filter containing U+0000 or a
+     *                                        cursor this service did not issue
      * @throws org.springframework.dao.DataAccessException if the query fails; the API answers it
      *                                        with 500 DEM9999
      */
@@ -306,7 +312,8 @@ public class CustomerSearchService {
     }
 
     /**
-     * Checks a name or city entry against the 13-character screen width, then normalizes it.
+     * Checks a name or city entry against the 13-character screen width and for U+0000, then
+     * normalizes it.
      *
      * <p>The width is measured on the value as received, before trimming, because the screen field
      * itself held at most 13 characters, blanks included. No pattern is built here; the repository
@@ -316,32 +323,55 @@ public class CustomerSearchService {
      * @param field the request property, {@code name} or {@code city}
      * @return the trimmed, uppercased entry; {@code ""} for none
      * @throws InvalidSearchCriteriaException APP0400 on {@code field} when the entry is too long
+     *                                        or, failing that, contains U+0000
      */
     private static String normalizePrefix(String value, String field) {
         if (value != null && value.codePointCount(0, value.length()) > FILTER_WIDTH) {
             throw new InvalidSearchCriteriaException(InvalidSearchCriteriaException.APP0400,
                     field, List.of(field + " must be at most " + FILTER_WIDTH + " characters"));
         }
+        rejectNul(value, field);
         return TextNormalizer.filter(value);
     }
 
     /**
      * Normalizes the state entry and applies the PMTCUSTR rule: blank selects every state, and a
      * value whose trimmed length is not 2 is rejected with DEM0007
-     * [5250_Subfile/PMTCUSTR.SQLRPGLE:635-646].
+     * [5250_Subfile/PMTCUSTR.SQLRPGLE:635-646]. A 2-character value that contains U+0000 is then
+     * rejected with APP0400; the source rule keeps precedence, so a lone U+0000 is DEM0007.
      *
      * @param value the entry, or {@code null}
      * @return {@code ""} for every state, otherwise the 2-character uppercased code
-     * @throws InvalidSearchCriteriaException DEM0007 on {@code state}
+     * @throws InvalidSearchCriteriaException DEM0007 on {@code state} for a trimmed length other
+     *                                        than 0 or 2; APP0400 on {@code state} for a
+     *                                        2-character value containing U+0000
      */
     private static String normalizeState(String value) {
         String normalized = TextNormalizer.filter(value);
         if (normalized.isEmpty()
                 || normalized.codePointCount(0, normalized.length()) == STATE_WIDTH) {
+            rejectNul(value, FIELD_STATE);
             return normalized;
         }
         throw new InvalidSearchCriteriaException(InvalidSearchCriteriaException.DEM0007,
                 FIELD_STATE, List.of());
+    }
+
+    /**
+     * Rejects a filter entry that contains U+0000, before any repository call. PostgreSQL text
+     * cannot hold that character, so the query would otherwise fail as 500 DEM9999; the entry is
+     * never stripped or altered instead. The reason is fixed per field and never echoes the entry.
+     *
+     * @param value the entry as received, or {@code null}
+     * @param field the request property, {@code name}, {@code city} or {@code state}
+     * @throws InvalidSearchCriteriaException APP0400 on {@code field} when {@code value} contains
+     *                                        U+0000
+     */
+    private static void rejectNul(String value, String field) {
+        if (value != null && value.indexOf(NUL) >= 0) {
+            throw new InvalidSearchCriteriaException(InvalidSearchCriteriaException.APP0400,
+                    field, List.of(field + " must not contain U+0000"));
+        }
     }
 
     /**
@@ -511,4 +541,3 @@ public class CustomerSearchService {
         }
     }
 }
-

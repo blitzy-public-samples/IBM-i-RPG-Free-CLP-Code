@@ -16,10 +16,12 @@ import java.util.Objects;
  *       {@code state} drives the highlight and focus in the client.</li>
  *   <li><b>{@value #APP0400}</b> "Request is not valid: {0}" for API guards the 5250 screen enforced
  *       through field lengths or never needed: {@code size} outside 1-100, {@code name} or {@code city}
- *       longer than 13 characters, a malformed {@code cursor}, and, in the state list, a {@code sort}
- *       other than {@code name} or {@code code} or a {@code nameContains} longer than 10 characters.
- *       Exactly one argument is required: a short, fixed reason written by the thrower, such as
- *       {@code "size must be between 1 and 100"}, {@code "cursor is malformed"} or
+ *       longer than 13 characters, a {@code name}, {@code city} or 2-character {@code state} filter
+ *       containing U+0000 (which PostgreSQL text cannot hold), a malformed {@code cursor}, and, in the
+ *       state list, a {@code sort} other than {@code name} or {@code code} or a {@code nameContains}
+ *       longer than 10 characters or containing U+0000. Exactly one argument is required: a short,
+ *       fixed reason written by the thrower, such as {@code "size must be between 1 and 100"},
+ *       {@code "cursor is not valid"}, {@code "name must not contain U+0000"} or
  *       {@code "sort must be name or code"}.</li>
  * </ul>
  *

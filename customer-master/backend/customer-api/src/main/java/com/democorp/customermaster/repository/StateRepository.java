@@ -5,6 +5,7 @@ import java.util.List;
 import org.springframework.data.jdbc.repository.query.Query;
 import org.springframework.data.repository.Repository;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Read access to the 58-row {@code states} table, as a Spring Data JDBC repository of {@link State}.
@@ -37,8 +38,15 @@ import org.springframework.data.repository.query.Param;
  * {@code AK}; "By Name" begins {@code Alabama}, {@code Alaska}, {@code American Samoa}.
  *
  * <p>The repository is read-only: it declares no save or delete method, because only migration V2
- * writes {@code states}.
+ * writes {@code states}, and every method runs in the read-only Spring transaction declared on this
+ * interface, which replaces {@code DataCur}'s {@code for fetch only}. The transaction uses the default
+ * READ COMMITTED isolation, holds no row lock and ends when the call returns, or joins one the caller
+ * already holds. The declaration is required, because Spring Data gives a declared query method such
+ * as {@link #searchOrderByName(String)} no transaction of its own when no base-repository method backs
+ * it. {@link #search(String, String)} opens the transaction, and the statement it delegates to joins
+ * it.
  */
+@Transactional(readOnly = true)
 public interface StateRepository extends Repository<State, String> {
 
     /**
