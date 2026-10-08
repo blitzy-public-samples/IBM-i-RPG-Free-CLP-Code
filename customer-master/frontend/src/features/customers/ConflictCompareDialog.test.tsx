@@ -16,8 +16,9 @@
  *   alert region stays empty, because `useProblemPresenter` publishes no
  *   toast for DEM1002 when the detail dialog handles the conflict.
  * - **Differing fields marked.** One comparison row per customer field in
- *   screen order, labelled as `CUSTOMER_FORM_FIELDS` labels the form, with the
- *   user's value, the current value and "Changed" exactly where they differ.
+ *   screen order, labelled as the detail form labels it ({@link SCREEN_FIELDS},
+ *   written out independently of the form's field table), with the user's
+ *   value, the current value and "Changed" exactly where they differ.
  * - **Refresh loads `current`.** The Refresh button, F12 and Escape (which
  *   the key scope delivers as F12) each call `onRefresh` once, the source
  *   outcome of a stale update.
@@ -59,7 +60,6 @@ import { MessageCatalogProvider } from '../../messages/MessageCatalogProvider';
 import { catalog, customerDetail, messageText, users } from '../../test/handlers';
 import { ConflictCompareDialog } from './ConflictCompareDialog';
 import type { ConflictCompareDialogProps } from './ConflictCompareDialog';
-import { CUSTOMER_FORM_FIELDS } from './CustomerForm';
 import type { CustomerFieldName } from './CustomerForm';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,26 @@ import type { CustomerFieldName } from './CustomerForm';
 
 /** The nine customer data fields, every one present as a string. */
 type FieldValues = Record<CustomerFieldName, string>;
+
+/**
+ * The nine customer data fields in MTNCUSTD screen order (Active, Name,
+ * Address, City, State, ZIP, Account Manager Phone, Account Manager Name,
+ * Corporate Phone; 5250_Subfile/MTNCUSTD.DSPF:61-125), each with the label
+ * the detail window shows. Written out here rather than read from the form's
+ * field table, so a reordered, renamed or missing row fails these specs
+ * instead of moving with the component.
+ */
+const SCREEN_FIELDS: ReadonlyArray<{ readonly field: CustomerFieldName; readonly label: string }> = [
+  { field: 'active', label: 'Active (Y/N)' },
+  { field: 'name', label: 'Name' },
+  { field: 'addr', label: 'Address' },
+  { field: 'city', label: 'City' },
+  { field: 'state', label: 'State +' },
+  { field: 'zip', label: 'ZIP' },
+  { field: 'acctPhone', label: 'Account Manager Phone' },
+  { field: 'acctMgr', label: 'Account Manager Name' },
+  { field: 'corpPhone', label: 'Corporate Phone' },
+];
 
 /**
  * The nine customer data fields of a stored record, without `custId`,
@@ -287,7 +307,7 @@ describe('ConflictCompareDialog', () => {
           .getAllByRole('cell')
           .map((cell) => cell.textContent),
       }));
-      const expected = CUSTOMER_FORM_FIELDS.map(({ field, label }) => ({
+      const expected = SCREEN_FIELDS.map(({ field, label }) => ({
         label,
         cells: [mine[field], current[field], DIFFERING_FIELDS.has(field) ? 'Changed' : ''],
       }));
@@ -399,7 +419,7 @@ describe('ConflictCompareDialog', () => {
       expect(call).toBeDefined();
       if (call !== undefined) {
         const [body, version] = call;
-        expect(Object.keys(body).sort()).toEqual(CUSTOMER_FORM_FIELDS.map(({ field }) => field).sort());
+        expect(Object.keys(body).sort()).toEqual(SCREEN_FIELDS.map(({ field }) => field).sort());
         expect(body).not.toHaveProperty('custId');
         expect(body).not.toHaveProperty('version');
         expect(body.city).toBe(current.city);

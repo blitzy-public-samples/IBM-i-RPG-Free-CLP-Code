@@ -17,10 +17,13 @@
   through the customer-master-parent POM, so no <version> element appears here.
 
   Transport and XML: the real client uses Spring RestClient over the JDK
-  java.net.http.HttpClient, and the codec uses the JDK java.xml module (StAX,
-  DOM, XPath). Neither needs a dependency beyond spring-web and the JDK, so no
-  HTTP-client, XML or JSON library (Jackson included) is declared. The stub
-  reads its fixtures through Spring Boot's JsonParserFactory instead.
+  java.net.http.HttpClient, and the codec uses the JDK java.xml module (StAX
+  and DOM): StAX writes the request, and the response is read from a hardened
+  DOM by walking its direct child elements, with no XPath (the "USPS response
+  reader" entry in customer-master/docs/deviations-and-open-questions.md).
+  Neither needs a dependency beyond spring-web and the JDK, so no HTTP-client,
+  XML or JSON library (Jackson included) is declared. The stub reads its
+  fixtures through Spring Boot's JsonParserFactory instead.
 
   Packaging: no <build> section and no spring-boot-maven-plugin. The compiler
   (release 21, -parameters), Surefire and Failsafe come from the parent. A

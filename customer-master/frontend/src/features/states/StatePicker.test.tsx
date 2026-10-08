@@ -41,7 +41,10 @@
  *   made obsolete is aborted, and its answer, even a failure, shows no
  *   alert, marks nothing and moves no focus; so is the load StrictMode's
  *   simulated unmount aborts; a reopened window sends its own request; a
- *   current failure is still presented exactly once.
+ *   current failure is still presented exactly once. These failures are the
+ *   500 DEM9999 any request can meet; the API's 400 APP0400 on `nameContains`
+ *   answers only an entry over 10 characters, which maxLength keeps a user
+ *   from typing, so it is driven as a labelled defensive case.
  *
  * Fixtures. The rows are the 58 STATES rows of 5250_Subfile/States.sql as
  * served by the default `GET /api/states` handler of `src/test/handlers.ts`.
@@ -57,13 +60,14 @@
  *
  * Harness. The providers are mounted in the order `src/App.tsx` uses, with a
  * fresh `QueryClient` per test. Every `/api/states` request is recorded from
- * MSW's `request:start` event, so the default handler keeps answering. A
+ * MSW's `request:start` event, and its finished exchange from `request:end`,
+ * so the default handler keeps answering. A
  * probe reads `useMessages().ready`, so message assertions start only once
  * the catalog has loaded (until then `format` returns the bare code).
  */
 import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -80,7 +84,7 @@ import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider, useToasts } from '../../components/ToastRegion';
 import { KeyScopeProvider } from '../../keyboard/KeyScopeProvider';
 import { MessageCatalogProvider, useMessages } from '../../messages/MessageCatalogProvider';
-import { messageText, problem, requestNotValid, states, users } from '../../test/handlers';
+import { messageText, problem, states, users } from '../../test/handlers';
 import { server } from '../../test/server';
 import { StatePicker } from './StatePicker';
 import type { StatePickerProps } from './StatePicker';
@@ -136,11 +140,33 @@ const MAINTENANCE_USER = (() => {
 /** Every `GET /api/states` that reached MSW since the picker was rendered, in order. */
 const stateRequests: URL[] = [];
 
+/**
+ * Every `GET /api/states` whose exchange MSW has finished since the picker was
+ * rendered, in order. MSW 3.0.2 emits `request:end` only after the matching
+ * handler's resolver has returned and its answer has been passed on, so a
+ * request here has no resolver left running.
+ */
+const endedStateRequests: URL[] = [];
+
+/** The URL of a state-list request; `undefined` for every other route. */
+function statesRequestUrl(request: Request): URL | undefined {
+  const url = new URL(request.url);
+  return request.method === 'GET' && url.pathname === STATES_PATH ? url : undefined;
+}
+
 /** MSW `request:start` listener: records the state-list requests, ignores every other route. */
 function recordStatesRequest({ request }: { request: Request }): void {
-  const url = new URL(request.url);
-  if (request.method === 'GET' && url.pathname === STATES_PATH) {
+  const url = statesRequestUrl(request);
+  if (url !== undefined) {
     stateRequests.push(url);
+  }
+}
+
+/** MSW `request:end` listener: records the state-list exchanges that have finished, ignores every other route. */
+function recordStatesRequestEnd({ request }: { request: Request }): void {
+  const url = statesRequestUrl(request);
+  if (url !== undefined) {
+    endedStateRequests.push(url);
   }
 }
 
@@ -159,11 +185,28 @@ beforeEach(() => {
   // Stored as after a real sign-in: the states endpoint answers 401 without them.
   setCredentials({ username: MAINTENANCE_USER.username, password: MAINTENANCE_USER.password });
   stateRequests.length = 0;
+  endedStateRequests.length = 0;
   server.events.on('request:start', recordStatesRequest);
+  server.events.on('request:end', recordStatesRequestEnd);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A hold the test made (`holdStatesAnswer`) is released here if the
+  // test did not get to it, and settled either way, before the listeners go
+  // and the credentials are forgotten, so no held resolver reaches the next
+  // test. Inside `act`, because src/test/setup.ts unmounts the tree only
+  // after this hook, so a render the released answer causes stays in `act`.
+  const made = holds.splice(0);
+  if (made.length > 0) {
+    await act(async () => {
+      for (const held of made) {
+        held.release();
+      }
+      await Promise.all(made.map((held) => held.settled()));
+    });
+  }
   server.events.removeListener('request:start', recordStatesRequest);
+  server.events.removeListener('request:end', recordStatesRequestEnd);
   setCredentials(null);
 });
 
@@ -210,6 +253,7 @@ type PickerView = PickerCallbacks & { user: UserEvent; setOpen(open: boolean): v
  */
 function renderPicker({ open = true, strict = false }: { open?: boolean; strict?: boolean } = {}): PickerView {
   stateRequests.length = 0;
+  endedStateRequests.length = 0;
   const user = userEvent.setup();
   const onSelect = vi.fn<StatePickerProps['onSelect']>();
   const onCancel = vi.fn<StatePickerProps['onCancel']>();
@@ -315,37 +359,87 @@ function statusLine(dialog: HTMLElement): HTMLElement {
   return region;
 }
 
-/** A response the test holds back until it calls `release`. */
-type Gate = { promise: Promise<void>; release(): void };
-
-/** A closed {@link Gate}. */
-function gate(): Gate {
-  let release: () => void = () => undefined;
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { promise, release: () => release() };
+/** A `GET /api/states` answer the test holds back: what {@link holdStatesAnswer} returns. */
+interface HeldAnswer {
+  /** Lets the held resolver return its answer. Calling it again changes nothing. */
+  release(): void;
+  /**
+   * Resolves once the held resolver has returned its answer (or thrown), so
+   * nothing of the hold is still running; at once when no request reached it.
+   */
+  settled(): Promise<void>;
 }
 
 /**
- * The 400 APP0400 the API answers for a rejected "Name Contains" entry. It
- * names the filter, so presenting it alerts, marks the filter and focuses it.
+ * Every hold the current test made, registered as it is made; `afterEach`
+ * releases and settles them, so no held resolver outlives its test, even one
+ * whose test failed before releasing it.
  */
-function filterProblem(): Response {
-  return requestNotValid(STATES_PATH, [{ field: 'nameContains', reason: 'nameContains is too long' }]);
+const holds: HeldAnswer[] = [];
+
+/**
+ * Holds the next `GET /api/states` until `release()` is called, as a slow
+ * server would, then answers it with `answer()`. The override is `once`, so
+ * every later request reaches the default handler. The resolver records
+ * that the request reached it and when it has returned, which `settled`
+ * waits for.
+ */
+function holdStatesAnswer(answer: () => Response): HeldAnswer {
+  let open: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  let finish: () => void = () => undefined;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let arrived = false;
+  server.use(
+    http.get(
+      STATES_PATH,
+      async () => {
+        arrived = true;
+        try {
+          await gate;
+          return answer();
+        } finally {
+          finish();
+        }
+      },
+      { once: true },
+    ),
+  );
+  const held: HeldAnswer = {
+    release: () => open(),
+    settled: () => (arrived ? finished : Promise.resolve()),
+  };
+  holds.push(held);
+  return held;
+}
+
+/**
+ * The 500 DEM9999 the API answers when the state lookup itself fails (the
+ * catch-all of its error model, AAP 0.4.5): a failure any state-list request
+ * can meet, whatever its filter. A blank or short filter is never rejected
+ * (AAP 0.7.2: blank means all, a filter matching nothing is an empty list),
+ * so this, not a 400 on `nameContains`, is how such a request fails. It names
+ * no field, so presenting it publishes its alert and marks nothing.
+ */
+function serviceFailure(): Response {
+  return problem(500, 'DEM9999', { instance: STATES_PATH });
 }
 
 /**
  * Releases a held-back failing response and waits, inside `act`, until call
- * `call` of the `statesApi.list` spy has rejected and React has rendered
- * whatever that rejection caused. The call is an obsolete request, which the
- * hook aborted as it became obsolete, so it rejects with the abort reason (an
- * `AbortError`) and never with the `ApiError` the held answer would have
- * produced. The hook attached its own handler to the call's promise when the
- * request started, before this wait did, so that handler has run by the time
- * the wait ends.
+ * `call` of the `statesApi.list` spy has rejected, the held resolver has
+ * returned its answer, and React has rendered whatever that rejection caused.
+ * The call is an obsolete request, which the hook aborted as it became
+ * obsolete, so it rejects with the abort reason (an `AbortError`) and never
+ * with the `ApiError` the held answer would have produced. The hook attached
+ * its own handler to the call's promise when the request started, before
+ * this wait did, so that handler has run by the time the wait ends.
  */
-async function failLate(held: Gate, list: MockInstance<typeof statesApi.list>, call: number): Promise<void> {
+async function failLate(held: HeldAnswer, list: MockInstance<typeof statesApi.list>, call: number): Promise<void> {
   const result = list.mock.results[call];
   if (result === undefined || result.type !== 'return') {
     throw new Error(`statesApi.list call ${call + 1} returned no promise`);
@@ -353,9 +447,31 @@ async function failLate(held: Gate, list: MockInstance<typeof statesApi.list>, c
   await act(async () => {
     held.release();
     await expect(result.value).rejects.toHaveProperty('name', 'AbortError');
+    await held.settled();
     // One more macrotask, so nothing queued behind the rejection is left over.
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+/**
+ * Waits, inside `act`, until every call the `statesApi.list` spy has seen so
+ * far has settled, either way, and returns the outcomes in call order. The
+ * hook attached its own handler to each call's promise when the request
+ * started, before this wait did, so whatever that handler did with an outcome
+ * (an `onError` call and the alert it publishes) has run, and `act` has
+ * flushed the render it caused, by the time the wait ends. Fails the test
+ * when a call returned no promise.
+ */
+async function settleListCalls(
+  list: MockInstance<typeof statesApi.list>,
+): Promise<Array<PromiseSettledResult<StateResponse[]>>> {
+  const calls = list.mock.results.map((result, index) => {
+    if (result.type !== 'return') {
+      throw new Error(`statesApi.list call ${index + 1} returned no promise`);
+    }
+    return result.value;
+  });
+  return act(() => Promise.allSettled(calls));
 }
 
 /**
@@ -692,17 +808,7 @@ describe('StatePicker', () => {
     it('shows "Loading..." with the table busy while the list loads, then the page summary beside More...', async () => {
       const byName = await serverRows('', 'name');
       expect(byName).toHaveLength(58);
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return HttpResponse.json(byName);
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(() => HttpResponse.json(byName));
 
       renderPicker();
       const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
@@ -717,7 +823,7 @@ describe('StatePicker', () => {
 
       await act(async () => {
         held.release();
-        await held.promise;
+        await held.settled();
       });
 
       await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
@@ -834,17 +940,7 @@ describe('StatePicker', () => {
 
   describe('obsolete requests', () => {
     it('a request failing after the window closed shows no alert and moves no focus', async () => {
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return filterProblem();
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const list = vi.spyOn(statesApi, 'list');
 
       const { user, setOpen, onCancel } = renderPicker();
@@ -868,17 +964,7 @@ describe('StatePicker', () => {
     });
 
     it('F5 during a pending request that then fails shows no alert, no label and no filter error', async () => {
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return filterProblem();
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const list = vi.spyOn(statesApi, 'list');
 
       const { user } = renderPicker();
@@ -909,17 +995,7 @@ describe('StatePicker', () => {
       expect(news.map((row) => row.name)).toEqual(['New Hampshire', 'New Jersey', 'New Mexico', 'New York']);
 
       const { user, dialog, table, filter } = await openPicker();
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return filterProblem();
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const list = vi.spyOn(statesApi, 'list');
 
       await user.type(filter, 'car');
@@ -932,7 +1008,7 @@ describe('StatePicker', () => {
       await user.keyboard('{Enter}');
       await waitFor(() => expect(dataRows(table)).toEqual(news));
 
-      // Focus in the newer list, where presenting the old failure would take it away.
+      // Focus in the newer list, where the old failure must leave it.
       const option = within(dialog).getByRole('textbox', { name: `Option for ${rowAt(news, 3).name}` });
       await user.click(option);
       expect(option).toHaveFocus();
@@ -954,17 +1030,7 @@ describe('StatePicker', () => {
 
     it('a reopened window sends its own request, and the closed one failing late shows nothing', async () => {
       const byName = await serverRows('', 'name');
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return problem(500, 'DEM9999', { instance: STATES_PATH });
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const list = vi.spyOn(statesApi, 'list');
 
       const { user, setOpen } = renderPicker();
@@ -992,17 +1058,7 @@ describe('StatePicker', () => {
     });
 
     it('closing the window (F12) while the list request is pending aborts it, and its failing answer shows no alert', async () => {
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return filterProblem();
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const signals = statesFetchSignals();
       const list = vi.spyOn(statesApi, 'list');
 
@@ -1027,17 +1083,7 @@ describe('StatePicker', () => {
     });
 
     it('F5 while the list request is pending aborts it: no alert, no filter error and no new request', async () => {
-      const held = gate();
-      server.use(
-        http.get(
-          STATES_PATH,
-          async () => {
-            await held.promise;
-            return filterProblem();
-          },
-          { once: true },
-        ),
-      );
+      const held = holdStatesAnswer(serviceFailure);
       const signals = statesFetchSignals();
       const list = vi.spyOn(statesApi, 'list');
 
@@ -1065,32 +1111,90 @@ describe('StatePicker', () => {
     it('under StrictMode the load the simulated unmount aborted shows no alert, and the remount loads the list', async () => {
       const byName = await serverRows('', 'name');
       const signals = statesFetchSignals();
+      const list = vi.spyOn(statesApi, 'list');
 
       renderPicker({ strict: true });
       const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
       const table = within(dialog).getByRole('table', { name: TABLE_NAME });
       await waitForCatalog();
       await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      });
 
+      // Development's extra effect cycle aborted the first load; the remount's
+      // load answered. Both calls have settled, and the hook has handled both.
+      const [aborted, answered, ...further] = await settleListCalls(list);
+      expect(further).toEqual([]);
+      expect(aborted?.status).toBe('rejected');
+      expect(aborted?.status === 'rejected' ? aborted.reason : undefined).toHaveProperty('name', 'AbortError');
+      expect(answered).toEqual({ status: 'fulfilled', value: byName });
+      // Every exchange that reached MSW has finished, so no resolver is still
+      // running. The aborted load's signal aborts in the same commit as its
+      // `fetch`, before the request goes out, so it may never reach MSW at
+      // all (with MSW 3.0.2 under Node's fetch it does not).
+      await waitFor(() => expect(endedStateRequests.map(String)).toEqual(stateRequests.map(String)));
+      expect(requestedQueries()).toContainEqual({ nameContains: '', sort: 'name' });
+
+      await waitFor(() =>
+        expect(within(statusLine(dialog)).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument(),
+      );
       expect(alertRegion()).toBeEmptyDOMElement();
-      expect(within(statusLine(dialog)).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument();
-      // Development's extra effect cycle aborted the first load; the remount's load answered.
       const sent = signals();
       expect(sent).toHaveLength(2);
       expect(sent[0]?.aborted).toBe(true);
       expect(sent[1]?.aborted).toBe(false);
     });
 
-    it('a current failure is still presented exactly once: one alert, the filter marked and focused', async () => {
-      const text = messageText('APP0400', ['nameContains is too long']);
+    it('a current failure is still presented exactly once: one alert and "States not loaded.", the filter not marked', async () => {
+      const text = messageText('DEM9999');
+      expect(text).toBe('Program Error! Please contact IT now.');
 
       const { user, dialog, table, filter } = await openPicker();
-      server.use(http.get(STATES_PATH, () => filterProblem(), { once: true }));
+      server.use(http.get(STATES_PATH, () => serviceFailure(), { once: true }));
 
       await user.type(filter, 'car');
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(within(statusLine(dialog)).getByText(FAILED_LABEL)).toBeInTheDocument());
+      expect(within(alertRegion()).getAllByText(text)).toHaveLength(1);
+      expect(alertRegion().children).toHaveLength(1);
+      // A 500 names no field, so the alert is all that is presented.
+      expect(filter).not.toHaveAttribute('aria-invalid');
+      expect(filter).not.toHaveAccessibleDescription();
+      expect(filter).toHaveFocus();
+      expect(filter).toHaveValue('CAR');
+      expect(dataRows(table)).toEqual([]);
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: 'CAR', sort: 'name' },
+      ]);
+    });
+
+    it('defensive boundary: an 11-character filter set past maxLength is answered 400 APP0400 on nameContains, presented once on the filter', async () => {
+      // StateService.list rejects a filter of more than 10 code points; the
+      // default handler answers exactly that, so nothing here is overridden.
+      const reason = 'nameContains must be at most 10 characters';
+      const text = messageText('APP0400', [reason]);
+      expect(text).toBe(`Request is not valid: ${reason}`);
+      const overLong = 'north carol';
+      expect([...overLong]).toHaveLength(11);
+
+      const { user, dialog, table, filter } = await openPicker();
+      // SC_NAME is 10A (PMTSTATED:88): the browser's maxLength stops a user at
+      // ten characters, so no keyed entry reaches the API's length check.
+      expect(filter).toHaveAttribute('maxlength', '10');
+      // Defensive boundary only: a scripted value, which maxLength does not
+      // limit, goes through the field's own change handler (uppercased as
+      // typed), as no user can enter it.
+      fireEvent.change(filter, { target: { value: overLong } });
+      expect(filter).toHaveValue('NORTH CAROL');
+
+      // Enter on its legend key, focused as a keyboard user reaches it, so
+      // focus starts away from the filter and the presenter's move back to it
+      // is observable (a mouse press on a legend key keeps focus in the field).
+      const enterKey = within(dialog).getByRole('button', { name: 'Enter' });
+      await act(async () => {
+        enterKey.focus();
+      });
+      expect(enterKey).toHaveFocus();
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(within(statusLine(dialog)).getByText(FAILED_LABEL)).toBeInTheDocument());
@@ -1102,7 +1206,7 @@ describe('StatePicker', () => {
       expect(dataRows(table)).toEqual([]);
       expect(requestedQueries()).toEqual([
         { nameContains: '', sort: 'name' },
-        { nameContains: 'CAR', sort: 'name' },
+        { nameContains: 'NORTH CAROL', sort: 'name' },
       ]);
     });
   });

@@ -31,6 +31,12 @@
  *
  * What is pinned down here (AAP 0.3.8 "Detail flows", 0.8.3
  * `CustomerDetailDialog.test.tsx`):
+ * - The field contract: the display, edit and add forms and both
+ *   confirmations show Customer Id (length 4), then the nine fields in screen
+ *   order, each named by its `<label for>` and limited by `maxlength` to its
+ *   DDS length, against {@link FIELD_CONTRACT}, which is written out here
+ *   rather than read from the form's table; an editable field takes no
+ *   character past its length.
  * - Display read-only; Enter, F4, F5, F12 and Escape close with no picker and
  *   no reload; F3 shows DEM0003 and the window stays; a missing row DEM0599.
  * - Closing the window while its opening read is pending aborts that read,
@@ -75,19 +81,22 @@
  * assertions start only once the catalog has loaded (until then `format`
  * returns the bare code).
  */
+import { subscribe, unsubscribe } from 'node:diagnostics_channel';
+import type { Socket } from 'node:net';
 import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, notifyManager } from '@tanstack/react-query';
 // MSW 3 serves `http` and `HttpResponse` from its `msw/http` entry point, the
 // one src/test/handlers.ts and the other suites import them from.
 import { http, HttpResponse } from 'msw/http';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Mock } from 'vitest';
+import type { Mock, MockInstance } from 'vitest';
 import { setCredentials } from '../../api/client';
+import { customersApi } from '../../api/customers';
 import type { CustomerResponse, CustomerUpdateRequest, ReviewRequest } from '../../api/customers';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider, useToasts } from '../../components/ToastRegion';
@@ -97,7 +106,6 @@ import { customerDetail, messageText, problem, users } from '../../test/handlers
 import { server } from '../../test/server';
 import { CustomerDetailDialog } from './CustomerDetailDialog';
 import type { CustomerDetailDialogProps, DetailMode } from './CustomerDetailDialog';
-import { CUSTOMER_FORM_FIELDS } from './CustomerForm';
 import type { CustomerFieldName } from './CustomerForm';
 import { formatChangeStamp } from './formatChangeStamp';
 
@@ -189,11 +197,44 @@ const CONFIRM_GROUP_NAME = 'Confirm customer';
 /** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
 
-/** The visible label of each customer field, from the one label table the form and the panel share. */
+/** One customer data field as the window must show it: its JSON name, its visible label and its length. */
+interface FieldContract {
+  readonly field: CustomerFieldName;
+  readonly label: string;
+  /** The DDS field length, which the input enforces as its `maxlength`. */
+  readonly width: number;
+}
+
+/**
+ * The nine customer data fields in MTNCUSTD screen order (Active, Name,
+ * Address, City, State, ZIP, Account Manager Phone, Account Manager Name,
+ * Corporate Phone), each with its label and DDS length
+ * (5250_Subfile/MTNCUSTD.DSPF:61-125). Active is the one-character Y/N text
+ * input "Active (Y/N)"; "State +" keeps the 5250 "+" of the field F4 prompts.
+ * Written out here rather than read from the form's field table, so a
+ * reordered, renamed, missing or resized field fails these specs instead of
+ * moving with the component.
+ */
+const FIELD_CONTRACT: readonly FieldContract[] = [
+  { field: 'active', label: 'Active (Y/N)', width: 1 },
+  { field: 'name', label: 'Name', width: 40 },
+  { field: 'addr', label: 'Address', width: 40 },
+  { field: 'city', label: 'City', width: 20 },
+  { field: 'state', label: 'State +', width: 2 },
+  { field: 'zip', label: 'ZIP', width: 10 },
+  { field: 'acctPhone', label: 'Account Manager Phone', width: 20 },
+  { field: 'acctMgr', label: 'Account Manager Name', width: 40 },
+  { field: 'corpPhone', label: 'Corporate Phone', width: 20 },
+];
+
+/** The protected Customer Id ahead of the nine fields: SD_CUSTID, four base-36 characters. */
+const CUSTOMER_ID_CONTRACT = { label: 'Customer Id', width: 4 } as const;
+
+/** The visible label of each customer field, from {@link FIELD_CONTRACT}. */
 function labelOf(field: CustomerFieldName): string {
-  const spec = CUSTOMER_FORM_FIELDS.find((candidate) => candidate.field === field);
+  const spec = FIELD_CONTRACT.find((candidate) => candidate.field === field);
   if (spec === undefined) {
-    throw new Error(`CUSTOMER_FORM_FIELDS has no entry for ${field}`);
+    throw new Error(`FIELD_CONTRACT has no entry for ${field}`);
   }
   return spec.label;
 }
@@ -246,7 +287,215 @@ async function bodiesOf<T>(method: string, path: string): Promise<T[]> {
   return texts.map((text) => JSON.parse(text) as T);
 }
 
+// ---------------------------------------------------------------------------
+// Held responses
+// ---------------------------------------------------------------------------
+
+/**
+ * A response held back until released: an MSW resolver answers through
+ * {@link Hold.answer}, so its request stays pending until the test, or the
+ * teardown, releases the hold. {@link hold} registers every hold as it is
+ * created, and the top-level `afterEach` drains them ({@link releaseHolds}):
+ * it releases every hold, including one a resolver creates only after the
+ * drain began, which is born released, and waits until every request has
+ * settled. A test that fails before its own release, or before its request
+ * even reached MSW, therefore leaves no resolver waiting and no teardown
+ * hung.
+ */
+interface Hold {
+  /** Lets every resolver waiting on this hold answer; calling it again changes nothing. */
+  readonly release: () => void;
+  /**
+   * Run by an MSW resolver: waits until the hold is released, then answers
+   * with `respond()`. The run is tracked until it has returned.
+   */
+  readonly answer: (respond: () => Response) => Promise<Response>;
+  /** Resolves once every resolver run that waited on this hold so far has returned, either way; at once when none came. */
+  readonly settled: () => Promise<void>;
+}
+
+/** Every hold made since the last drain, in creation order. */
+const holds: Hold[] = [];
+
+/** Every resolver run that waited on a hold since the last drain, in arrival order. */
+const heldAnswers: Promise<Response>[] = [];
+
+/**
+ * Whether the holds are being drained: set when {@link releaseHolds} begins
+ * and kept until the next test's `beforeEach`, so every hold created from the
+ * start of the drain on is born released.
+ */
+let draining = false;
+
+/**
+ * The pass-through spy on the global `fetch` installed before each test and
+ * restored before the next by `restoreMocks`: every request the test made,
+ * with the promise each call returned.
+ */
+let fetchCalls: MockInstance<typeof globalThis.fetch> | undefined;
+
+/** The promise of every `fetch` the current test made, in call order. */
+function fetchesMade(): Promise<Response>[] {
+  return (fetchCalls?.mock.results ?? []).flatMap((result) => (result.type === 'return' ? [result.value] : []));
+}
+
+/**
+ * A {@link Hold}, registered for the teardown. It starts closed, except once
+ * a drain has begun ({@link draining}): a resolver whose request reached MSW
+ * only after the teardown started, because its test failed first, then gets
+ * a hold that is already released and answers at once, instead of waiting on
+ * a hold the drain has already passed over.
+ */
+function hold(): Hold {
+  let open: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  if (draining) {
+    open();
+  }
+  const answers: Promise<Response>[] = [];
+  const created: Hold = {
+    release: () => {
+      open();
+    },
+    answer: (respond) => {
+      const answered = released.then(respond);
+      answers.push(answered);
+      heldAnswers.push(answered);
+      return answered;
+    },
+    settled: async () => {
+      await Promise.allSettled(answers);
+    },
+  };
+  holds.push(created);
+  return created;
+}
+
+/**
+ * Drains the holds. From its start every hold is released: those already
+ * made, and every one a resolver makes later, until the next test begins
+ * ({@link draining}). It waits, inside `act`, until each resolver that waited
+ * on a hold has returned its answer and every `fetch` the test made has
+ * settled, either way, and again for as long as new resolver runs or fetches
+ * appeared meanwhile, so a request whose resolver creates its hold only
+ * after the drain began is settled too. Calling it again is harmless. `act`
+ * flushes every React update their continuations queued before the tree is
+ * unmounted.
+ */
+async function releaseHolds(): Promise<void> {
+  await act(async () => {
+    draining = true;
+    let awaited: number;
+    do {
+      for (const held of holds) {
+        held.release();
+      }
+      const pending = [...heldAnswers, ...fetchesMade()];
+      awaited = pending.length;
+      await Promise.allSettled(pending);
+    } while (heldAnswers.length + fetchesMade().length !== awaited);
+  });
+  holds.length = 0;
+  heldAnswers.length = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Connections
+// ---------------------------------------------------------------------------
+//
+// Closing the window aborts its pending read, and the undici that Node 24
+// bundles (7.x) then opens a new connection to the origin with nothing to
+// send on it. MSW's socket interception passes a connection that carries no
+// request through to the real network, where `localhost:3000` refuses it
+// later; a request the next test sends on that pooled connection meanwhile
+// fails with ECONNREFUSED instead of reaching its handler. The connections
+// are observed through the diagnostics channels undici publishes, and the
+// teardown closes every one that carried no request
+// ({@link closeIdleConnections}).
+
+/** Connection attempts undici began in the current test that have neither connected nor failed yet. */
+let connecting = 0;
+
+/** Every socket undici connected or wrote a request on in the current test, mapped to whether it carried one. */
+const connectedSockets = new Map<Socket, boolean>();
+
+/** Waits for {@link connecting} to reach zero. */
+const connectWaiters: Array<() => void> = [];
+
+/** `undici:client:beforeConnect`: an attempt begins. */
+function onBeforeConnect(): void {
+  connecting += 1;
+}
+
+/** `undici:client:connectError`, and the end of `undici:client:connected`: an attempt has settled. */
+function onConnectSettled(): void {
+  connecting = Math.max(0, connecting - 1);
+  if (connecting === 0) {
+    for (const wake of connectWaiters.splice(0)) {
+      wake();
+    }
+  }
+}
+
+/** `undici:client:connected`: the attempt's socket, which has carried no request yet. */
+function onConnected(message: unknown): void {
+  const { socket } = message as { socket: Socket };
+  connectedSockets.set(socket, connectedSockets.get(socket) ?? false);
+  onConnectSettled();
+}
+
+/** `undici:client:sendHeaders`: a request was written on the socket. */
+function onSendHeaders(message: unknown): void {
+  const { socket } = message as { socket: Socket };
+  connectedSockets.set(socket, true);
+}
+
+/** The undici diagnostics channels the connection tracking listens on, with their listeners. */
+const CONNECTION_CHANNELS: ReadonlyArray<readonly [string, (message: unknown) => void]> = [
+  ['undici:client:beforeConnect', onBeforeConnect],
+  ['undici:client:connected', onConnected],
+  ['undici:client:connectError', onConnectSettled],
+  ['undici:client:sendHeaders', onSendHeaders],
+];
+
+/**
+ * Waits until every connection attempt of the current test has connected or
+ * failed, then destroys each connected socket that never carried a request
+ * and waits for it to close; again while that started more attempts. Runs
+ * once every `fetch` of the test has settled, so no request is cut short.
+ */
+async function closeIdleConnections(): Promise<void> {
+  for (;;) {
+    if (connecting > 0) {
+      await new Promise<void>((resolve) => {
+        connectWaiters.push(resolve);
+      });
+    }
+    const idle = [...connectedSockets].filter(([socket, carried]) => !carried && !socket.destroyed).map(([socket]) => socket);
+    if (idle.length === 0) {
+      return;
+    }
+    await Promise.all(
+      idle.map(
+        (socket) =>
+          new Promise<void>((resolve) => {
+            socket.once('close', () => resolve());
+            socket.destroy();
+          }),
+      ),
+    );
+  }
+}
+
 beforeEach(() => {
+  // The previous test's drain is over: this test's holds start closed.
+  draining = false;
+  for (const [channel, listener] of CONNECTION_CHANNELS) {
+    subscribe(channel, listener);
+  }
+  fetchCalls = vi.spyOn(globalThis, 'fetch');
   // Stored as after a real sign-in: every customer route answers 401 without them.
   setCredentials({ username: MAINTENANCE_USER.username, password: MAINTENANCE_USER.password });
   served = { ...STORED };
@@ -263,7 +512,19 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A response a failed test left held is released and settled here, while
+  // the tree is still mounted, the credentials still set and the test's
+  // handlers still in place (src/test/setup.ts unmounts and resets them after
+  // this hook), so nothing it resolves can reach the next test.
+  await releaseHolds();
+  await closeIdleConnections();
+  for (const [channel, listener] of CONNECTION_CHANNELS) {
+    unsubscribe(channel, listener);
+  }
+  connectedSockets.clear();
+  connecting = 0;
+  fetchCalls = undefined;
   server.events.removeListener('request:start', recordRequest);
   setCredentials(null);
 });
@@ -431,7 +692,7 @@ async function retype(user: UserEvent, scope: HTMLElement, field: CustomerFieldN
 
 /** Types every field of `values` but Active, which the add form already presets. */
 async function fillForm(user: UserEvent, scope: HTMLElement, values: FieldValues): Promise<void> {
-  for (const { field } of CUSTOMER_FORM_FIELDS) {
+  for (const { field } of FIELD_CONTRACT) {
     if (field !== 'active') {
       await retype(user, scope, field, values[field]);
     }
@@ -516,8 +777,144 @@ describe('CustomerDetailDialog', () => {
     expect(STORED.state).toBe('CA');
     expect(STORED.version).toBe(0);
     expect(NEW_CUSTOMER.state).not.toBe(STORED.state);
-    expect(CUSTOMER_FORM_FIELDS.map(({ label }) => label)).toContain('Name');
-    expect(CUSTOMER_FORM_FIELDS.map(({ label }) => label)).toContain('Account Manager Name');
+    // The field oracle holds each of the nine fields once, in the order of the
+    // value fixtures, and nine distinct labels, so the exact label query for
+    // "Name" resolves only the customer name, never "Account Manager Name".
+    expect(FIELD_CONTRACT.map(({ field }) => field)).toEqual(Object.keys(BLANK));
+    expect(new Set(FIELD_CONTRACT.map(({ label }) => label)).size).toBe(9);
+  });
+
+  // -------------------------------------------------------------------------
+  // Held responses: the teardown's drain
+  // -------------------------------------------------------------------------
+
+  describe('held responses', () => {
+    it('a hold its resolver creates only after the drain began is born released, so the drain settles that request', async () => {
+      // The request reaches MSW, but its resolver makes its hold only once
+      // `arrive` is called: the order a test leaves behind when it fails
+      // after sending a request and before the request's resolver ran.
+      let arrive: () => void = () => undefined;
+      const arrival = new Promise<void>((resolve) => {
+        arrive = resolve;
+      });
+      const created: Hold[] = [];
+      server.use(
+        http.get<{ custId: string }>('/api/customers/:custId', async () => {
+          await arrival;
+          const read = hold();
+          created.push(read);
+          return read.answer(() => HttpResponse.json({ ...STORED }));
+        }),
+      );
+
+      const read = customersApi.get(STORED.custId);
+      try {
+        await waitFor(() => expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1));
+        expect(created).toHaveLength(0);
+
+        const drained = releaseHolds();
+        arrive();
+        await drained;
+      } finally {
+        // Should an assertion above fail first, the resolver still goes on to
+        // its hold, which the teardown then releases; a second call is a no-op.
+        arrive();
+      }
+
+      expect(created).toHaveLength(1);
+      await expect(read).resolves.toEqual(STORED);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Field contract (MTNCUSTD.DSPF:61-125): screen order, labels, lengths
+  // -------------------------------------------------------------------------
+
+  describe('field contract', () => {
+    /** One textbox as the window shows it: the text of its `<label for>` and its `maxlength`. */
+    interface ShownField {
+      label: string | null;
+      maxLength: string | null;
+    }
+
+    /**
+     * Every textbox inside `scope`, in DOM order, as its label and length. The
+     * label is read only from a `<label>` whose `for` names the input's id, so
+     * a field labelled any other way shows `null`.
+     */
+    function shownFields(scope: HTMLElement): ShownField[] {
+      return within(scope)
+        .getAllByRole('textbox')
+        .map((input) => {
+          const labels = input instanceof HTMLInputElement && input.labels !== null ? Array.from(input.labels) : [];
+          const [forLabel, ...others] = labels.filter((label) => input.id !== '' && label.htmlFor === input.id);
+          return {
+            label: forLabel !== undefined && others.length === 0 ? forLabel.textContent : null,
+            maxLength: input.getAttribute('maxlength'),
+          };
+        });
+    }
+
+    /** What every phase must show: the Customer Id, then the nine fields of {@link FIELD_CONTRACT}, in that order. */
+    const EXPECTED_FIELDS: readonly ShownField[] = [
+      { label: CUSTOMER_ID_CONTRACT.label, maxLength: String(CUSTOMER_ID_CONTRACT.width) },
+      ...FIELD_CONTRACT.map(({ label, width }) => ({ label, maxLength: String(width) })),
+    ];
+
+    it.each(['display', 'edit', 'add'] as const)(
+      'the %s form shows Customer Id, then the nine fields in screen order, each labelled and limited to its length',
+      async (mode) => {
+        const { dialog } = await openDialog(mode);
+
+        expect(shownFields(dialog)).toEqual(EXPECTED_FIELDS);
+        expect(within(dialog).getByLabelText(CUSTOMER_ID_CONTRACT.label)).toHaveAttribute('readonly');
+        for (const { field } of FIELD_CONTRACT) {
+          if (mode === 'display') {
+            expect(inputOf(dialog, field)).toHaveAttribute('readonly');
+          } else {
+            expect(inputOf(dialog, field)).not.toHaveAttribute('readonly');
+          }
+        }
+      },
+    );
+
+    it('the edit confirmation shows the same ten fields, labels and lengths, every one protected', async () => {
+      const { user, dialog } = await openDialog('edit');
+      await retype(user, dialog, 'name', 'contract name co');
+
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+
+      expect(shownFields(panel)).toEqual(EXPECTED_FIELDS);
+      for (const input of within(panel).getAllByRole('textbox')) {
+        expect(input).toHaveAttribute('readonly');
+      }
+    });
+
+    it('the add confirmation shows the same ten fields, labels and lengths, every one protected', async () => {
+      const { user, dialog } = await openDialog('add');
+      await fillForm(user, dialog, NEW_CUSTOMER);
+
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0009');
+
+      expect(shownFields(panel)).toEqual(EXPECTED_FIELDS);
+      for (const input of within(panel).getAllByRole('textbox')) {
+        expect(input).toHaveAttribute('readonly');
+      }
+    });
+
+    it('each editable field keeps exactly its length: one character more is not taken', async () => {
+      const { user, dialog } = await openDialog('edit');
+
+      for (const { field, width } of FIELD_CONTRACT) {
+        const input = inputOf(dialog, field);
+        await user.clear(input);
+        await user.type(input, 'x'.repeat(width + 1));
+        // Uppercased as typed, which keeps the length, and stopped at the width.
+        expect(input).toHaveValue('X'.repeat(width));
+      }
+      expect(traffic).toHaveLength(1);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -533,7 +930,7 @@ describe('CustomerDetailDialog', () => {
       expect(within(dialog).getByLabelText('Customer Id')).toHaveValue(STORED.custId);
       const inputs = within(dialog).getAllByRole('textbox');
       // The protected Customer Id plus the nine data fields (ProtectAll).
-      expect(inputs).toHaveLength(CUSTOMER_FORM_FIELDS.length + 1);
+      expect(inputs).toHaveLength(1 + 9);
       for (const input of inputs) {
         expect(input).toHaveAttribute('readonly');
       }
@@ -585,10 +982,83 @@ describe('CustomerDetailDialog', () => {
     describe('the opening read, when the window closes before it answers', () => {
       /** What {@link renderWhileReading} returns: the rendered window and its held reads. */
       interface ReadingDialog extends RenderedDialog {
-        /** The reads held so far, in arrival order. */
-        held: readonly (() => void)[];
-        /** Lets the held read at `index` answer 404 DEM0599. */
-        release: (index: number) => void;
+        /** The reads held so far, in arrival order, each by its own registered {@link Hold}. */
+        held: readonly Hold[];
+        /**
+         * Lets the held read at `index` answer 404 DEM0599 and waits until it
+         * has settled with `inFlight` reads still fetching ({@link settleReads}).
+         */
+        release: (index: number, inFlight: number) => Promise<void>;
+      }
+
+      /** The pass-through spy on `customersApi.get` of the current test: every read of a customer, in call order. */
+      let customerGets: MockInstance<typeof customersApi.get>;
+
+      beforeEach(() => {
+        customerGets = vi.spyOn(customersApi, 'get');
+      });
+
+      /**
+       * What read `index` of the stored customer settles through: its `fetch`,
+       * and the `customersApi.get` call the window's query function awaits.
+       * That function awaited the call before anyone else, so its own handling
+       * of the outcome (the alert it presents, or withholds) has run once an
+       * await of the call here resumes.
+       */
+      function readPromises(index: number): Promise<unknown>[] {
+        const calls = fetchCalls?.mock.calls ?? [];
+        const results = fetchCalls?.mock.results ?? [];
+        const fetches = calls.flatMap(([input], call) => {
+          const result = results[call];
+          const isRead = new URL(String(input), window.location.href).pathname === CUSTOMER_PATH;
+          return isRead && result?.type === 'return' ? [result.value] : [];
+        });
+        const fetched = fetches[index];
+        const read = customerGets.mock.results[index];
+        if (fetched === undefined || read?.type !== 'return') {
+          throw new Error(`No read #${index} of ${CUSTOMER_PATH} was made`);
+        }
+        return [fetched, read.value];
+      }
+
+      /**
+       * Resolves once the query cache shows exactly `inFlight` fetching
+       * queries, and only after react-query has handed that change to its
+       * observers: the resolve is queued on react-query's own notification
+       * queue, behind the observers' notifications, so the window has been
+       * told to render the settled read by then.
+       */
+      function queriesSettled(queryClient: QueryClient, inFlight: number): Promise<void> {
+        return new Promise((resolve) => {
+          const cache = queryClient.getQueryCache();
+          let unsubscribe: () => void = () => undefined;
+          const check = (): void => {
+            if (queryClient.isFetching() === inFlight) {
+              unsubscribe();
+              notifyManager.schedule(resolve);
+            }
+          };
+          unsubscribe = cache.subscribe(check);
+          check();
+        });
+      }
+
+      /**
+       * Releases `read`, when given, and waits inside the same `act` until the
+       * reads at `indexes` have settled: the held resolver has returned its
+       * answer, and each read's `fetch` and client call have settled, either
+       * way ({@link readPromises}); then until `inFlight` queries are fetching
+       * ({@link queriesSettled}). A read whose window closed was aborted, so
+       * its fetch rejected before the release, while its resolver returns only
+       * after it. `act` flushes every React update these continuations
+       * queued, so an empty alert region afterwards is observed, not raced.
+       */
+      async function settleReads(queryClient: QueryClient, inFlight: number, indexes: readonly number[], read?: Hold): Promise<void> {
+        await act(async () => {
+          read?.release();
+          await Promise.allSettled([read?.settled(), ...indexes.flatMap(readPromises)]);
+          await queriesSettled(queryClient, inFlight);
+        });
       }
 
       /**
@@ -598,53 +1068,39 @@ describe('CustomerDetailDialog', () => {
        * no window shown yet.
        */
       async function renderWhileReading(mode: 'display' | 'edit'): Promise<ReadingDialog> {
-        const held: (() => void)[] = [];
+        const held: Hold[] = [];
         server.use(
-          http.get<{ custId: string }>('/api/customers/:custId', async ({ params }) => {
-            await new Promise<void>((resolve) => {
-              held.push(resolve);
-            });
-            return problem(404, 'DEM0599', { instance: `/api/customers/${params.custId}` });
+          http.get<{ custId: string }>('/api/customers/:custId', ({ params }) => {
+            const read = hold();
+            held.push(read);
+            return read.answer(() => problem(404, 'DEM0599', { instance: `/api/customers/${params.custId}` }));
           }),
         );
         const rendered = renderDialog({ mode, custId: STORED.custId });
         await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
         await waitFor(() => expect(held).toHaveLength(1));
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-        const release = (index: number): void => {
-          const answer = held[index];
-          if (answer === undefined) {
+        const release = async (index: number, inFlight: number): Promise<void> => {
+          const read = held[index];
+          if (read === undefined) {
             throw new Error(`No read #${index} is held`);
           }
-          answer();
+          await settleReads(rendered.queryClient, inFlight, [index], read);
         };
         return { ...rendered, held, release };
-      }
-
-      /**
-       * Waits until only `inFlight` reads are still pending, then lets
-       * whatever the settled reads published render, so an empty alert region
-       * is observed and not raced.
-       */
-      async function settleReads(queryClient: QueryClient, inFlight: number): Promise<void> {
-        await waitFor(() => expect(queryClient.isFetching()).toBe(inFlight));
-        await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        });
       }
 
       it.each([
         ['display', 'Escape'],
         ['edit', 'F12'],
       ] as const)('%s: a read answering DEM0599 after %s closed the window shows no alert', async (mode, key) => {
-        const { user, onClose, queryClient, setOpen, release } = await renderWhileReading(mode);
+        const { user, onClose, setOpen, release } = await renderWhileReading(mode);
 
         await user.keyboard(`{${key}}`);
         expect(onClose).toHaveBeenCalledTimes(1);
         expect(onClose).toHaveBeenCalledWith();
         setOpen(false);
-        release(0);
-        await settleReads(queryClient, 0);
+        await release(0, 0);
 
         expect(alertRegion()).toBeEmptyDOMElement();
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -666,7 +1122,7 @@ describe('CustomerDetailDialog', () => {
 
       it('edit: F12 while the opening read is pending aborts it, and the DEM0599 it would answer shows no alert', async () => {
         const signals = customerReadSignals();
-        const { user, onClose, queryClient, setOpen, release } = await renderWhileReading('edit');
+        const { user, onClose, setOpen, release } = await renderWhileReading('edit');
         expect(signals()).toHaveLength(1);
         expect(signals()[0]?.aborted).toBe(false);
 
@@ -675,8 +1131,7 @@ describe('CustomerDetailDialog', () => {
         setOpen(false);
 
         await waitFor(() => expect(signals()[0]?.aborted).toBe(true));
-        release(0);
-        await settleReads(queryClient, 0);
+        await release(0, 0);
 
         expect(alertRegion()).toBeEmptyDOMElement();
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -690,28 +1145,28 @@ describe('CustomerDetailDialog', () => {
 
         const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
         await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
-        await settleReads(queryClient, 0);
+        // Both reads: the one the simulated unmount aborted and the remount's.
+        await settleReads(queryClient, 0, [0, 1]);
 
-        expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
+        await waitFor(() => expect(valuesOf(dialog)).toEqual(fieldsOf(STORED)));
         expect(alertRegion()).toBeEmptyDOMElement();
         // Development's extra effect cycle aborted the first read; the remount's read answered.
         expect(signals().map((signal) => signal?.aborted)).toEqual([true, false]);
       });
 
       it('a read answering DEM0599 while the window stays open shows the alert and opens on blank fields', async () => {
-        const { onClose, queryClient, release } = await renderWhileReading('display');
+        const { onClose, release } = await renderWhileReading('display');
 
-        release(0);
-        await settleReads(queryClient, 0);
+        await release(0, 0);
 
-        expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1);
+        await waitFor(() => expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1));
         const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
         expect(valuesOf(dialog)).toEqual(BLANK);
         expect(onClose).not.toHaveBeenCalled();
       });
 
       it('a reopening while the closed window still reads sends its own read, and only that read alerts', async () => {
-        const { user, onClose, queryClient, setOpen, held, release } = await renderWhileReading('display');
+        const { user, onClose, setOpen, held, release } = await renderWhileReading('display');
 
         await user.keyboard('{Escape}');
         setOpen(false);
@@ -720,15 +1175,13 @@ describe('CustomerDetailDialog', () => {
         expect(sent('GET', CUSTOMER_PATH)).toHaveLength(2);
 
         // The closed window's read answers first: nothing is shown for it.
-        release(0);
-        await settleReads(queryClient, 1);
+        await release(0, 1);
         expect(alertRegion()).toBeEmptyDOMElement();
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
         // The open window's read answers: its DEM0599, once, and the blank window.
-        release(1);
-        await settleReads(queryClient, 0);
-        expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1);
+        await release(1, 0);
+        await waitFor(() => expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1));
         const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
         expect(valuesOf(dialog)).toEqual(BLANK);
         expect(onClose).toHaveBeenCalledTimes(1);
@@ -748,7 +1201,7 @@ describe('CustomerDetailDialog', () => {
         ...fieldsOf(STORED),
         name: 'NIBH LOR HOLDINGS',
         addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
-        acctMgr: 'NORMAN, ABBOT R.',
+        acctMgr: 'NORMAN,  ABBOT R.',
       };
       const saved: CustomerResponse = {
         ...STORED,
@@ -817,16 +1270,8 @@ describe('CustomerDetailDialog', () => {
 
     it('a held Enter repeating while the review is in flight sends no second review, PUT or POST', async () => {
       // The review answer is held back until the test releases it.
-      let releaseReview: () => void = () => undefined;
-      const reviewHeld = new Promise<void>((resolve) => {
-        releaseReview = resolve;
-      });
-      server.use(
-        http.post(REVIEW_PATH, async () => {
-          await reviewHeld;
-          return reviewPassed('EDIT', fieldsOf(STORED));
-        }),
-      );
+      const review = hold();
+      server.use(http.post(REVIEW_PATH, () => review.answer(() => reviewPassed('EDIT', fieldsOf(STORED)))));
       const { user, dialog, onClose } = await openDialog('edit');
       const name = inputOf(dialog, 'name');
 
@@ -841,7 +1286,7 @@ describe('CustomerDetailDialog', () => {
         }
         expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
       } finally {
-        releaseReview();
+        review.release();
       }
 
       await within(statusRegion()).findByText(messageText('DEM0000'));
@@ -992,16 +1437,93 @@ describe('CustomerDetailDialog', () => {
       expect(onClose).not.toHaveBeenCalled();
     });
 
-    it('a 409 DEM1002 opens the comparison with its text and no toast; Refresh loads the current record', async () => {
-      const current: CustomerResponse = {
-        ...STORED,
-        city: 'PORTLAND',
-        chgTime: '2026-10-05T14:10:00Z',
-        chgUser: 'other-user',
-        version: STORED.version + 1,
+    // A stale update (UpdateRecd :593-599). After the window read the record,
+    // another user changed City and raised the stored version to 1.
+
+    /** The customer as now stored: another user's City PORTLAND under version 1. */
+    const CONCURRENT: CustomerResponse = {
+      ...STORED,
+      city: 'PORTLAND',
+      chgTime: '2026-10-05T14:10:00Z',
+      chgUser: 'other-user',
+      version: STORED.version + 1,
+    };
+
+    /**
+     * The first review's answer to the Name {@link confirmEdit} types: Name
+     * NEW NAME CO, with Account Manager normalized (uppercased, its interior
+     * blanks kept) and Address standardized, so it differs from the stored
+     * record in those three fields. The rejected PUT sends exactly these values.
+     */
+    const FIRST_REVIEWED: FieldValues = {
+      ...fieldsOf(STORED),
+      name: 'NEW NAME CO',
+      addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
+      acctMgr: 'NORMAN,  ABBOT R.',
+    };
+
+    /** The record the API answers a successful save with: `values` under the next version, stamped by the principal. */
+    function savedAs(values: FieldValues): CustomerResponse {
+      return {
+        ...CONCURRENT,
+        ...values,
+        chgTime: '2026-10-05T15:00:00Z',
+        chgUser: MAINTENANCE_USER.username,
+        version: CONCURRENT.version + 1,
       };
-      answerUpdate(() => problem(409, 'DEM1002', { current, instance: CUSTOMER_PATH }));
+    }
+
+    /**
+     * Stores {@link CONCURRENT} as the API's conditional UPDATE sees it: a
+     * re-read serves it, a PUT carrying its version saves and is answered
+     * `saved`, and a PUT carrying any other version is stale and is answered
+     * 409 DEM1002 with it. Called once the window has read the record.
+     */
+    function storeConcurrentChange(saved: CustomerResponse): void {
+      served = { ...CONCURRENT };
+      server.use(
+        http.put(CUSTOMER_PATH, async ({ request }) => {
+          const { version } = (await request.json()) as CustomerUpdateRequest;
+          return version === CONCURRENT.version
+            ? HttpResponse.json(saved)
+            : problem(409, 'DEM1002', { current: CONCURRENT, instance: CUSTOMER_PATH });
+        }),
+      );
+    }
+
+    /**
+     * Answers the reviews in order, the n-th passing with the n-th of
+     * `answers` and DEM0000. A review beyond them is answered 500 DEM9999,
+     * so an unexpected review shows as an alert and an extra request body.
+     */
+    function answerReviewsInOrder(...answers: FieldValues[]): void {
+      let answered = 0;
+      answerReview(() => {
+        const customer = answers[answered];
+        answered += 1;
+        return customer === undefined
+          ? problem(500, 'DEM9999', { instance: REVIEW_PATH })
+          : reviewPassed('EDIT', customer, true);
+      });
+    }
+
+    /** The method and path of every recorded request, in the order they were sent. */
+    function requestOrder(): string[] {
+      return traffic.map(({ method, path }) => `${method} ${path}`);
+    }
+
+    it('a 409 DEM1002 opens the comparison with its text and no toast; Refresh loads the current record, whose version the next save carries', async () => {
+      const current = CONCURRENT;
+      // The Refreshed record reviewed again: Account Manager normalized and Address standardized.
+      const refreshedReviewed: FieldValues = {
+        ...fieldsOf(current),
+        addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
+        acctMgr: 'NORMAN,  ABBOT R.',
+      };
+      const saved = savedAs(refreshedReviewed);
+      answerReviewsInOrder(FIRST_REVIEWED, refreshedReviewed);
       const { user, dialog, onClose } = await confirmEdit();
+      storeConcurrentChange(saved);
 
       await user.keyboard('{Enter}');
 
@@ -1020,6 +1542,99 @@ describe('CustomerDetailDialog', () => {
       expect(onClose).not.toHaveBeenCalled();
       // The current record came with the conflict: no re-read was needed.
       expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
+
+      // Enter reviews the refreshed fields; Enter at the confirmation saves
+      // the reviewed values under the version Refresh took from `current`.
+      await user.click(inputOf(dialog, 'name'));
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
+        { purpose: 'EDIT', ...fieldsOf(STORED), name: 'NEW NAME CO' },
+        { purpose: 'EDIT', ...fieldsOf(current) },
+      ]);
+      expect(valuesOf(panel)).toEqual(refreshedReviewed);
+
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ saved });
+      expect(await bodiesOf<CustomerUpdateRequest>('PUT', CUSTOMER_PATH)).toEqual([
+        { ...FIRST_REVIEWED, version: STORED.version },
+        { ...refreshedReviewed, version: current.version },
+      ]);
+      expect(requestOrder()).toEqual([
+        `GET ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+        `PUT ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+        `PUT ${CUSTOMER_PATH}`,
+      ]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it("a 409 DEM1002 then Re-apply my changes reviews the user's changes on the current record and saves the reviewed values under its version", async () => {
+      // Re-apply copies the fields the rejected values changed (Name, the
+      // standardized Address and the normalized Account Manager) onto the
+      // current record, so another user's City PORTLAND is kept.
+      const merged: FieldValues = {
+        ...fieldsOf(CONCURRENT),
+        name: 'NEW NAME CO',
+        addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
+        acctMgr: 'NORMAN,  ABBOT R.',
+      };
+      expect(merged.city).toBe('PORTLAND');
+      // The merged fields reviewed: the address service gives the Portland
+      // address a new ZIP+4, so the values to save differ from the merged ones.
+      const reviewed: FieldValues = { ...merged, zip: '04101-3509' };
+      expect(reviewed).not.toEqual(merged);
+      const saved = savedAs(reviewed);
+      answerReviewsInOrder(FIRST_REVIEWED, reviewed);
+      const { user, dialog, panel, onClose } = await confirmEdit();
+      storeConcurrentChange(saved);
+
+      await user.keyboard('{Enter}');
+
+      const compare = await screen.findByRole('dialog', { name: CONFLICT_NAME });
+      expect(alertRegion()).toBeEmptyDOMElement();
+
+      await user.click(within(compare).getByRole('button', { name: 'Re-apply my changes' }));
+
+      // Re-apply returns to review by itself: the merged fields are reviewed,
+      // and the passed review shows a new confirmation, focused, with DEM0000.
+      await waitFor(() => expect(compare).not.toBeInTheDocument());
+      await within(statusRegion()).findByText(messageText('DEM0000'));
+      const confirmation = await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+      expect(confirmation).not.toBe(panel);
+      await waitFor(() => expect(confirmation).toHaveFocus());
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
+        { purpose: 'EDIT', ...fieldsOf(STORED), name: 'NEW NAME CO' },
+        { purpose: 'EDIT', ...merged },
+      ]);
+      expect(valuesOf(confirmation)).toEqual(reviewed);
+      // Re-apply itself writes nothing and re-reads nothing.
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(onClose).not.toHaveBeenCalled();
+
+      await user.keyboard('{Enter}');
+
+      // The save sends the reviewed values, conditional on the current
+      // record's version rather than the stale one the window first read.
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ saved });
+      expect(await bodiesOf<CustomerUpdateRequest>('PUT', CUSTOMER_PATH)).toEqual([
+        { ...FIRST_REVIEWED, version: STORED.version },
+        { ...reviewed, version: CONCURRENT.version },
+      ]);
+      expect(requestOrder()).toEqual([
+        `GET ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+        `PUT ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+        `PUT ${CUSTOMER_PATH}`,
+      ]);
+      expect(alertRegion()).toBeEmptyDOMElement();
     });
   });
 
@@ -1245,16 +1860,8 @@ describe('CustomerDetailDialog', () => {
     });
 
     it.each(PAGING_KEYS)('while the opening read is pending: %s is swallowed with no message, no close and no native paging', async (key) => {
-      let release: () => void = () => undefined;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      server.use(
-        http.get(CUSTOMER_PATH, async () => {
-          await held;
-          return HttpResponse.json({ ...STORED });
-        }),
-      );
+      const read = hold();
+      server.use(http.get(CUSTOMER_PATH, () => read.answer(() => HttpResponse.json({ ...STORED }))));
       const { user, onClose } = renderDialog({ mode: 'edit', custId: STORED.custId });
       try {
         await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
@@ -1267,7 +1874,7 @@ describe('CustomerDetailDialog', () => {
         expect(onClose).not.toHaveBeenCalled();
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       } finally {
-        release();
+        read.release();
       }
 
       // The window then opens on the stored record, read once.
@@ -1533,6 +2140,88 @@ describe('CustomerDetailDialog', () => {
 
       expect(inputOf(dialog, 'state')).toHaveValue('CA');
     });
+
+    it('a passed review takes the reviewed State, standardized: NV reviewed into TX, F4 at the confirmation, AZ cancelled back to TX', async () => {
+      // The address service standardized the typed NV into TX, with the street
+      // and the ZIP, so the reviewed State is neither the stored CA nor the typed NV.
+      const reviewed: FieldValues = {
+        ...fieldsOf(STORED),
+        addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
+        state: 'TX',
+        zip: '75201-0103',
+        acctMgr: 'NORMAN,  ABBOT R.',
+      };
+      answerReview(() => reviewPassed('EDIT', reviewed, true));
+      const { user, dialog, onClose } = await openDialog('edit');
+      await retype(user, dialog, 'state', 'nv');
+      expect(inputOf(dialog, 'state')).toHaveValue('NV');
+
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
+        { purpose: 'EDIT', ...fieldsOf(STORED), state: 'NV' },
+      ]);
+      expect(within(statusRegion()).getByText('Press Enter to update. F12 to Cancel.')).toBeInTheDocument();
+      expect(inputOf(panel, 'state')).toHaveValue('TX');
+      expect(valuesOf(panel)).toEqual(reviewed);
+      expect(within(panel).getByText('Address standardized.')).toBeInTheDocument();
+
+      // F4 at the edit confirmation: DEM0003, then the form with the reviewed entries kept and no re-read.
+      await user.keyboard('{F4}');
+
+      await waitForForm(dialog);
+      expect(within(alertRegion()).getByText('Key is not active now')).toBeInTheDocument();
+      expect(valuesOf(dialog)).toEqual(reviewed);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+
+      await retype(user, dialog, 'state', 'az');
+      expect(inputOf(dialog, 'state')).toHaveValue('AZ');
+      await cancelStatePrompt(user, dialog);
+
+      // The reviewed TX: not the stored CA, the typed NV or the AZ typed since.
+      expect(inputOf(dialog, 'state')).toHaveValue('TX');
+      await waitFor(() => expect(inputOf(dialog, 'state')).toHaveFocus());
+      // Only State is put back: every other field stays as reviewed.
+      expect(valuesOf(dialog)).toEqual(reviewed);
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('a DEM9898 address failure carrying stateAccepted NV makes it NV: AZ cancelled back to NV', async () => {
+      const { user, dialog, onClose } = await openDialog('edit');
+      // The typed NV passes the State rule; the stub address service then does
+      // not find a street holding BADADDR, so the default review answers 422
+      // DEM9898 with stateAccepted NV, the normalized input State.
+      await retype(user, dialog, 'state', 'nv');
+      await retype(user, dialog, 'addr', 'badaddr 1 main street');
+      const typed: FieldValues = { ...fieldsOf(STORED), addr: 'BADADDR 1 MAIN STREET', state: 'NV' };
+
+      await user.keyboard('{Enter}');
+
+      await within(alertRegion()).findByText('USPS: Address Not Found.');
+      expect(messageText('DEM9898', ['Address Not Found.'])).toBe('USPS: Address Not Found.');
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([{ purpose: 'EDIT', ...typed }]);
+      await waitFor(() => expect(inputOf(dialog, 'addr')).toHaveFocus());
+      for (const field of ['addr', 'city', 'state', 'zip'] as const) {
+        expect(inputOf(dialog, field)).toHaveAttribute('aria-invalid', 'true');
+      }
+      expect(queryConfirmation(dialog)).not.toBeInTheDocument();
+
+      await retype(user, dialog, 'state', 'az');
+      expect(inputOf(dialog, 'state')).toHaveValue('AZ');
+      await cancelStatePrompt(user, dialog);
+
+      // The accepted NV: not the stored CA or the AZ typed since.
+      expect(inputOf(dialog, 'state')).toHaveValue('NV');
+      await waitFor(() => expect(inputOf(dialog, 'state')).toHaveFocus());
+      // Only State is put back: every other field stays as typed.
+      expect(valuesOf(dialog)).toEqual(typed);
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1540,21 +2229,6 @@ describe('CustomerDetailDialog', () => {
   // -------------------------------------------------------------------------
 
   describe('while a request is pending', () => {
-    /** A gate a handler awaits, so its request stays pending until the test opens it. */
-    interface Gate {
-      opened: Promise<void>;
-      open: () => void;
-    }
-
-    /** A closed {@link Gate}. */
-    function closedGate(): Gate {
-      let open: () => void = () => undefined;
-      const opened = new Promise<void>((resolve) => {
-        open = resolve;
-      });
-      return { opened, open };
-    }
-
     /** One key-bar button of the window, by its legend. */
     function keyButton(dialog: HTMLElement, legend: string): HTMLElement {
       const bar = within(dialog).getByRole('toolbar', { name: 'Function keys' });
@@ -1584,14 +2258,9 @@ describe('CustomerDetailDialog', () => {
     }
 
     it('a pending review protects the form and disables Enter, F4 and F5; the confirmation then shows the reviewed values', async () => {
-      const gate = closedGate();
+      const gate = hold();
       const reviewed: FieldValues = { ...fieldsOf(STORED), name: 'NEW NAME CO' };
-      server.use(
-        http.post(REVIEW_PATH, async () => {
-          await gate.opened;
-          return reviewPassed('EDIT', reviewed);
-        }),
-      );
+      server.use(http.post(REVIEW_PATH, () => gate.answer(() => reviewPassed('EDIT', reviewed))));
       const { user, dialog } = await openDialog('edit');
       await retype(user, dialog, 'name', 'new name co');
 
@@ -1602,7 +2271,7 @@ describe('CustomerDetailDialog', () => {
       await expectProtectedForm(user, dialog, 'NEW NAME CO');
       expect(queryConfirmation(dialog)).not.toBeInTheDocument();
 
-      gate.open();
+      gate.release();
 
       const panel = await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
       expect(valuesOf(panel)).toEqual(reviewed);
@@ -1615,13 +2284,8 @@ describe('CustomerDetailDialog', () => {
     });
 
     it('F12 and the F12=Cancel button still close the window while a review is pending', async () => {
-      const gate = closedGate();
-      server.use(
-        http.post(REVIEW_PATH, async () => {
-          await gate.opened;
-          return reviewPassed('EDIT', fieldsOf(STORED));
-        }),
-      );
+      const gate = hold();
+      server.use(http.post(REVIEW_PATH, () => gate.answer(() => reviewPassed('EDIT', fieldsOf(STORED)))));
       const { user, dialog, onClose } = await openDialog('edit');
 
       await user.keyboard('{Enter}');
@@ -1635,20 +2299,15 @@ describe('CustomerDetailDialog', () => {
       expect(onClose).toHaveBeenLastCalledWith();
 
       // The harness keeps the window rendered after onClose; let the review land.
-      gate.open();
+      gate.release();
       await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
     });
 
     it('a pending F5 reload protects the form and disables Enter, F4 and F5; the form then shows the reloaded values, editable', async () => {
       const { user, dialog } = await openDialog('edit');
       const reloaded: CustomerResponse = { ...STORED, name: 'NIBH RELOADED CO', chgUser: 'other-user', version: 4 };
-      const gate = closedGate();
-      server.use(
-        http.get<{ custId: string }>('/api/customers/:custId', async () => {
-          await gate.opened;
-          return HttpResponse.json({ ...reloaded });
-        }),
-      );
+      const gate = hold();
+      server.use(http.get('/api/customers/:custId', () => gate.answer(() => HttpResponse.json({ ...reloaded }))));
       await retype(user, dialog, 'city', 'bangor');
 
       await user.keyboard('{F5}');
@@ -1658,11 +2317,11 @@ describe('CustomerDetailDialog', () => {
       await expectProtectedForm(user, dialog, STORED.name);
       expect(inputOf(dialog, 'city')).toHaveValue('BANGOR');
 
-      gate.open();
+      gate.release();
 
       await waitFor(() => expect(inputOf(dialog, 'name')).toHaveValue('NIBH RELOADED CO'));
       expect(valuesOf(dialog)).toEqual(fieldsOf(reloaded));
-      for (const { field } of CUSTOMER_FORM_FIELDS) {
+      for (const { field } of FIELD_CONTRACT) {
         expect(inputOf(dialog, field)).not.toHaveAttribute('readonly');
       }
       for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
@@ -1675,12 +2334,13 @@ describe('CustomerDetailDialog', () => {
     });
 
     it('a key-bar Enter pressed from the keyboard leaves focus inside the window, also after a 502 that moves none', async () => {
-      const gate = closedGate();
+      const gate = hold();
+      // The stored values pass the State rule, so the address service's
+      // failure carries the accepted input State, as the review answers it.
       server.use(
-        http.post(REVIEW_PATH, async () => {
-          await gate.opened;
-          return problem(502, 'APP0502');
-        }),
+        http.post(REVIEW_PATH, () =>
+          gate.answer(() => problem(502, 'APP0502', { stateAccepted: STORED.state, instance: REVIEW_PATH })),
+        ),
       );
       const { user, dialog } = await openDialog('edit');
       const enterKey = keyButton(dialog, 'Enter');
@@ -1693,7 +2353,7 @@ describe('CustomerDetailDialog', () => {
       await waitFor(() => expect(document.activeElement).toHaveAttribute('aria-busy', 'true'));
       expect(dialog).toContainElement(document.activeElement as HTMLElement);
 
-      gate.open();
+      gate.release();
 
       await within(alertRegion()).findByText(messageText('APP0502'));
       await waitFor(() => expect(enterKey).toBeEnabled());
@@ -1705,14 +2365,13 @@ describe('CustomerDetailDialog', () => {
       await waitFor(() => expect(sent('POST', REVIEW_PATH)).toHaveLength(2));
     });
 
-    it('a pending save disables all four keys at the confirmation; a 503 then leaves the confirmation focused', async () => {
-      const gate = closedGate();
+    it('a pending save disables all four keys at the confirmation; a 500 DEM9999 then leaves the confirmation focused', async () => {
+      const gate = hold();
       answerReview(() => reviewPassed('EDIT', fieldsOf(STORED)));
       server.use(
-        http.put('/api/customers/:custId', async () => {
-          await gate.opened;
-          return problem(503, 'APP0503');
-        }),
+        http.put('/api/customers/:custId', () =>
+          gate.answer(() => problem(500, 'DEM9999', { instance: CUSTOMER_PATH })),
+        ),
       );
       const { user, dialog, onClose } = await openDialog('edit');
       const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
@@ -1728,13 +2387,48 @@ describe('CustomerDetailDialog', () => {
       await waitFor(() => expect(panel).toHaveFocus());
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
 
-      gate.open();
+      gate.release();
 
-      await within(alertRegion()).findByText(messageText('APP0503'));
+      await within(alertRegion()).findByText(messageText('DEM9999'));
+      expect(messageText('DEM9999')).toBe('Program Error! Please contact IT now.');
       await waitFor(() => expect(enterKey).toBeEnabled());
       expect(queryConfirmation(dialog)).toBe(panel);
       expect(panel).toHaveFocus();
       expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('a pending add disables all four keys at the add confirmation; a 503 APP0503 then leaves the confirmation focused', async () => {
+      // Only an add allocates a customer id, so only it can find the ids exhausted.
+      const gate = hold();
+      server.use(http.post(ADD_PATH, () => gate.answer(() => problem(503, 'APP0503', { instance: ADD_PATH }))));
+      const { user, dialog, onClose } = await openDialog('add');
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0009');
+      const enterKey = keyButton(dialog, 'Enter');
+      act(() => enterKey.focus());
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(enterKey).toBeDisabled());
+
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
+        expect(keyButton(dialog, legend)).toBeDisabled();
+      }
+      await waitFor(() => expect(panel).toHaveFocus());
+      expect(sent('POST', ADD_PATH)).toHaveLength(1);
+
+      gate.release();
+
+      await within(alertRegion()).findByText(messageText('APP0503'));
+      expect(messageText('APP0503')).toBe('No customer ids are left. Contact IT.');
+      await waitFor(() => expect(enterKey).toBeEnabled());
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
+        expect(keyButton(dialog, legend)).toBeEnabled();
+      }
+      expect(queryConfirmation(dialog)).toBe(panel);
+      expect(panel).toHaveFocus();
+      expect(valuesOf(panel)).toEqual(NEW_CUSTOMER);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
     });
   });
 

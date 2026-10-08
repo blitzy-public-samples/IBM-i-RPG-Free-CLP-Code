@@ -12,10 +12,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,30 +25,46 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.converter.json.ProblemDetailJacksonMixin;
 import org.springframework.lang.Nullable;
 
 /**
- * Holds the two error bodies the Compose {@code frontend}'s nginx writes itself under {@code /api/} to
- * the bodies {@link ProblemFactory} builds.
+ * Holds the error bodies the Compose {@code frontend}'s nginx writes itself under {@code /api/} to the
+ * bodies the API builds for the same status, so every error under {@code /api/} reaches the UI as an
+ * API problem.
  *
- * <p><b>Why.</b> Every error body the API sends comes from {@link ProblemFactory}. When no API answer
- * exists for nginx to forward, because {@code app} is unreachable or its answer outlasts the
- * {@code proxy_read_timeout} cutoff, nginx answers 502 or 504 from the named locations
- * {@code @api_bad_gateway} and {@code @api_gateway_timeout} of {@code frontend/nginx.conf}, whose
- * bodies are text in that file. Each must equal what
- * {@code create(status, "DEM9999", List.of(), instance)} serializes to: the same members, values and
- * member order, the catalog's DEM9999 {@code detail} and the empty {@code args} included. A change to
- * the DEM9999 text or to the problem shape that is not carried into nginx.conf fails here.
+ * <p><b>Why.</b> Every error body the API sends comes from {@link ProblemFactory}. nginx answers an
+ * {@code /api/} request itself in two cases, from bodies that are text in {@code frontend/nginx.conf}:
+ * <ul>
+ *   <li><b>Gateway.</b> No API answer exists for nginx to forward, because {@code app} is unreachable
+ *       or its answer outlasts the {@code proxy_read_timeout} cutoff. nginx answers 502 or 504 from the
+ *       named locations {@code @api_bad_gateway} and {@code @api_gateway_timeout}, and each body must
+ *       equal what {@code create(status, "DEM9999", List.of(), instance)} serializes to.</li>
+ *   <li><b>Rejection.</b> nginx rejects the request before forwarding it: a malformed or oversized
+ *       request line, header or body, {@code TRACE}, an unknown transfer coding or HTTP version. The
+ *       {@code error_page} lists of the server block and of {@code location /api/} send each such
+ *       status to its internal page under {@code /_nginx/rejection/}, which answers problem+json when
+ *       {@code $api_request} places the request target under {@code /api/}, and nginx's own HTML page
+ *       otherwise. For 400, 405, 413, 414 and 494 (which nginx sends as 400) the body must equal what
+ *       {@link ProblemErrorController#problemFor} builds for the status sent, as for a request Tomcat's
+ *       connector rejects: {@code APP0400} with the lower-case reason phrase. For 501 and 505 it must
+ *       equal DEM9999 at that status, as for the gateway.</li>
+ * </ul>
+ * Equal means the same members, values and member order, the catalog's {@code detail} and the
+ * {@code args} included, with no member repeated. A change to a catalog text or to the problem shape
+ * that is not carried into nginx.conf fails here.
  *
  * <p><b>{@code instance}.</b> nginx fills it from the map {@code $api_problem_instance} over
  * {@code $request_path_no_query}, the raw request path cut at its query, which is the
- * {@code getRequestURI()} that {@link ProblemFactory} receives. The test evaluates that map as nginx
- * does (exact keys, then regular expressions in order, then the default) with
+ * {@code getRequestURI()} that {@link ProblemFactory} receives. The test evaluates each map as nginx
+ * does (exact keys, then regular expressions in order, then the default; a value may reference the
+ * map's source variable and the groups of the expression that matched) with
  * {@link java.util.regex}, which reads its ASCII character classes, escapes and {@code \z} anchor as
  * PCRE does. The member must be present exactly when the path lies under {@code /api/} and holds only
  * characters a URI path allows as they are, so it is never broken JSON and always the path
@@ -55,8 +73,18 @@ import org.springframework.lang.Nullable;
  * {@code $api_problem_instance}, and the map's value none other than {@code $request_path_no_query}, so
  * nothing else from the request is echoed.
  *
+ * <p><b>Classification and logging.</b> {@code $api_request} is evaluated over request lines as the
+ * client sends them: API targets in origin and absolute form, lines nginx cuts short or cannot parse,
+ * and targets outside {@code /api/} that must keep nginx's page. Because {@code error_page} turns a
+ * rejected request into a GET of its page, the {@code redacted} access-log format must log the method
+ * from the request line ({@code $request_line_method}), never {@code $request_method}, and that map
+ * must yield only a method-shaped first word or {@code -}, never other text of a malformed line.
+ *
  * <p><b>Wiring.</b> {@code location /api/} must route nginx's 502 and 504 to those named locations,
- * and each must answer {@code application/problem+json}.
+ * and each must answer {@code application/problem+json}. The server block and {@code location /api/}
+ * must each route every rejection status to its page exactly once. Each page must be internal, discard
+ * its error log, answer {@code application/problem+json}, return the status without a body for a
+ * non-API request, and end with the problem body.
  *
  * <p><b>Configuration file.</b> System property {@value #NGINX_CONF_PATH_PROPERTY} names it. When
  * absent, the path {@value #DEFAULT_NGINX_CONF_PATH} is resolved against the working directory, which
@@ -66,7 +94,8 @@ import org.springframework.lang.Nullable;
  * Spring's {@code ProblemDetail} mixin, as Boot configures it: no Spring context, no database, no
  * Docker, no nginx.
  */
-@DisplayName("nginx.conf: nginx's own 502 and 504 under /api/ are ProblemFactory's DEM9999 problems")
+@DisplayName("nginx.conf: nginx's own error bodies under /api/, for gateway errors and request rejections,"
+        + " are the API's problems")
 final class NginxGatewayProblemTest {
 
     /** System property naming the nginx configuration file. */
@@ -75,7 +104,7 @@ final class NginxGatewayProblemTest {
     /** The nginx configuration file relative to the {@code customer-api} module directory. */
     private static final String DEFAULT_NGINX_CONF_PATH = "../../frontend/nginx.conf";
 
-    /** The catalog key of every body nginx writes itself. */
+    /** The catalog key of nginx's gateway bodies and of its 5xx rejection bodies. */
     private static final String PROGRAM_ERROR = "DEM9999";
 
     /** The variable nginx's bodies insert the {@code instance} member from. */
@@ -83,6 +112,21 @@ final class NginxGatewayProblemTest {
 
     /** The source variable of the {@code instance} map: the raw request path without its query. */
     private static final String PATH_VARIABLE = "request_path_no_query";
+
+    /** The raw request line, the source variable of the request classification and method maps. */
+    private static final String REQUEST_VARIABLE = "request";
+
+    /** {@code "1"} for a request whose target lies under {@code /api/}, {@code ""} otherwise. */
+    private static final String API_REQUEST_VARIABLE = "api_request";
+
+    /** The method as the request line carries it, which the access log records. */
+    private static final String METHOD_VARIABLE = "request_line_method";
+
+    /** The method variable an error page rewrites to {@code GET}, which the access log must not use. */
+    private static final String REWRITTEN_METHOD_VARIABLE = "request_method";
+
+    /** The access-log format of the server. */
+    private static final String ACCESS_LOG_FORMAT = "redacted";
 
     /** A request path under {@code /api/}, expected back as {@code instance}. */
     private static final String SAMPLE_PATH = "/api/customers/AAAD";
@@ -111,13 +155,25 @@ final class NginxGatewayProblemTest {
     /** The real factory, with the real catalog. */
     private static final ProblemFactory PROBLEMS = new ProblemFactory(new MessageCatalog(), MAPPER);
 
+    /** The real ERROR-dispatch status map, which also answers requests Tomcat's connector rejects. */
+    private static final ProblemErrorController ERRORS = new ProblemErrorController(PROBLEMS);
+
     /** The parsed top level of nginx.conf: the directives of the {@code http} block it is included in. */
     private static List<Directive> config;
 
     /** The {@code $api_problem_instance} map. */
     private static NginxMap instanceMap;
 
-    /** The two statuses nginx answers itself under {@code /api/}, with their named locations. */
+    /** The {@code $api_request} map. */
+    private static NginxMap apiRequestMap;
+
+    /** The {@code $request_line_method} map. */
+    private static NginxMap methodMap;
+
+    /**
+     * The two statuses nginx answers itself under {@code /api/} when no API answer exists, with their
+     * named locations.
+     */
     enum Gateway {
 
         /** {@code app} is stopped, refuses connections or cannot be resolved. */
@@ -144,8 +200,55 @@ final class NginxGatewayProblemTest {
         }
     }
 
+    /** The statuses nginx rejects a request with, the status it sends for each, and the page answering. */
+    enum Rejection {
+
+        /** A malformed request line, URI, header or chunked body. */
+        BAD_REQUEST(400, 400, "/_nginx/rejection/400"),
+
+        /** A header line over nginx's buffer, or headers beyond its buffers; nginx sends it as 400. */
+        REQUEST_HEADER_TOO_LARGE(494, 400, "/_nginx/rejection/494"),
+
+        /** {@code TRACE} or {@code CONNECT}. */
+        METHOD_NOT_ALLOWED(405, 405, "/_nginx/rejection/405"),
+
+        /** A body over {@code client_max_body_size}. */
+        PAYLOAD_TOO_LARGE(413, 413, "/_nginx/rejection/413"),
+
+        /** A request line over nginx's buffer. */
+        URI_TOO_LONG(414, 414, "/_nginx/rejection/414"),
+
+        /** An unknown {@code Transfer-Encoding}. */
+        NOT_IMPLEMENTED(501, 501, "/_nginx/rejection/501"),
+
+        /** An HTTP major version above 1. */
+        HTTP_VERSION_NOT_SUPPORTED(505, 505, "/_nginx/rejection/505");
+
+        /** The status nginx gives the rejection, which {@code error_page} matches. */
+        private final int nginxStatus;
+
+        /** The status nginx sends. */
+        private final int wireStatus;
+
+        /** The internal page that answers the rejection. */
+        private final String page;
+
+        /**
+         * Pairs nginx's status with the status sent and the page.
+         *
+         * @param nginxStatus the status nginx gives the rejection
+         * @param wireStatus the status nginx sends
+         * @param page the internal page that answers the rejection
+         */
+        Rejection(int nginxStatus, int wireStatus, String page) {
+            this.nginxStatus = nginxStatus;
+            this.wireStatus = wireStatus;
+            this.page = page;
+        }
+    }
+
     /**
-     * Reads and parses nginx.conf once, and finds the {@code instance} map.
+     * Reads and parses nginx.conf once, and finds its maps.
      *
      * @throws IOException if the file cannot be read
      */
@@ -157,10 +260,9 @@ final class NginxGatewayProblemTest {
         assertThat(file).as("nginx configuration (system property %s)", NGINX_CONF_PATH_PROPERTY)
                 .isRegularFile();
         config = parse(Files.readString(file, StandardCharsets.UTF_8));
-        Directive map = only(config, d -> d.isBlock("map")
-                && d.args().equals(List.of("$" + PATH_VARIABLE, "$" + INSTANCE_VARIABLE)),
-                "map $" + PATH_VARIABLE + " $" + INSTANCE_VARIABLE);
-        instanceMap = NginxMap.of(map);
+        instanceMap = NginxMap.of(map(PATH_VARIABLE, INSTANCE_VARIABLE));
+        apiRequestMap = NginxMap.of(map(REQUEST_VARIABLE, API_REQUEST_VARIABLE));
+        methodMap = NginxMap.of(map(REQUEST_VARIABLE, METHOD_VARIABLE));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -210,6 +312,9 @@ final class NginxGatewayProblemTest {
         for (Gateway gateway : Gateway.values()) {
             assertSameProblem(nginxBody(gateway, path), factoryBody(gateway, path));
         }
+        for (Rejection rejection : Rejection.values()) {
+            assertSameProblem(nginxBody(rejection, path), apiBody(rejection, path));
+        }
     }
 
     @ParameterizedTest(name = "<{0}>")
@@ -222,6 +327,9 @@ final class NginxGatewayProblemTest {
 
         for (Gateway gateway : Gateway.values()) {
             assertSameProblem(nginxBody(gateway, path), factoryBody(gateway, null));
+        }
+        for (Rejection rejection : Rejection.values()) {
+            assertSameProblem(nginxBody(rejection, path), apiBody(rejection, null));
         }
     }
 
@@ -240,9 +348,129 @@ final class NginxGatewayProblemTest {
             for (Gateway gateway : Gateway.values()) {
                 assertSameProblem(nginxBody(gateway, path), factoryBody(gateway, expected ? path : null));
             }
+            for (Rejection rejection : Rejection.values()) {
+                assertSameProblem(nginxBody(rejection, path), apiBody(rejection, expected ? path : null));
+            }
         }
 
         assertThat(mismatches).as("characters the instance map judges wrongly").isEmpty();
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Rejection.class)
+    @DisplayName("a rejection's body for a path under /api/ is the API's, with the path as instance")
+    void rejectionBodyWithInstanceIsTheApisBody(Rejection rejection) throws IOException {
+        assertThat(instanceMap.valueFor(SAMPLE_PATH)).isNotEmpty();
+
+        assertSameProblem(nginxBody(rejection, SAMPLE_PATH), apiBody(rejection, SAMPLE_PATH));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Rejection.class)
+    @DisplayName("a rejection's body without a usable path, as when nginx cannot parse it, is the API's"
+            + " without instance")
+    void rejectionBodyWithoutInstanceIsTheApisBody(Rejection rejection) throws IOException {
+        // An unparsable request line or URI leaves $request_uri empty, and so the path.
+        assertThat(instanceMap.valueFor("")).isEmpty();
+
+        assertSameProblem(nginxBody(rejection, ""), apiBody(rejection, null));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Rejection.class)
+    @DisplayName("the server block and location /api/ each route the rejection to its page exactly once")
+    void rejectionReachesItsPageAtServerAndApiLevel(Rejection rejection) {
+        Directive server = server();
+        String status = String.valueOf(rejection.nginxStatus);
+        for (Directive level : List.of(server, apiLocation())) {
+            String where = level == server ? "server" : "location /api/";
+            List<Directive> routes = level.children().stream()
+                    .filter(d -> d.name().equals("error_page")
+                            && d.args().subList(0, Math.max(0, d.args().size() - 1)).contains(status))
+                    .toList();
+            assertThat(routes).as("error_page %s in %s", status, where).hasSize(1);
+            assertThat(routes.get(0).args()).as("error_page %s in %s", status, where)
+                    .containsExactly(status, rejection.page);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Rejection.class)
+    @DisplayName("a rejection page is internal and answers problem+json for /api/, nginx's status otherwise")
+    void rejectionPageAnswersProblemJsonOnlyForApiRequests(Rejection rejection) {
+        List<Directive> page = rejectionPage(rejection).children();
+
+        assertThat(only(page, d -> d.name().equals("internal"), "internal in " + rejection.page).args())
+                .isEmpty();
+        assertThat(only(page, d -> d.name().equals("error_log"), "error_log in " + rejection.page).args())
+                .containsExactly("/dev/null");
+        assertThat(only(page, d -> d.isBlock("types"), "types in " + rejection.page).children())
+                .as("the empty types block of %s", rejection.page).isEmpty();
+        assertThat(only(page, d -> d.name().equals("default_type"), "default_type in " + rejection.page)
+                .args()).containsExactly("application/problem+json");
+
+        Directive condition = only(page, d -> d.isBlock("if"), "if in " + rejection.page);
+        assertThat(condition.args()).as("the condition in %s", rejection.page)
+                .containsExactly("($" + API_REQUEST_VARIABLE, "=", "", ")");
+        assertThat(condition.children()).as("the non-API answer in %s", rejection.page)
+                .containsExactly(new Directive("return", List.of(String.valueOf(rejection.nginxStatus)),
+                        null));
+
+        Directive answer = only(page, d -> d.name().equals("return"), "return in " + rejection.page);
+        assertThat(page.indexOf(condition)).as("the if precedes the return in %s", rejection.page)
+                .isLessThan(page.indexOf(answer));
+        assertThat(page.get(page.size() - 1)).as("the last directive of %s", rejection.page).isEqualTo(answer);
+    }
+
+    @ParameterizedTest(name = "<{0}>")
+    @ValueSource(strings = {"GET /api/customers HTTP/1.1", "GET /api/ HTTP/1.1", "GET /api/a%zz HTTP/1.1",
+            "GET /api/a%zz?name=SMITH HTTP/1.1", "GET /api/../../x HTTP/1.1", "GET /api/x%00y HTTP/1.1",
+            "TRACE /api/customers HTTP/1.1", "POST /api/customers HTTP/1.1", "GET  /api/a%zz HTTP/1.1",
+            "GET /api/customers?cursor=xxxx", "get /api/x HTTP/1.1", "GET /api/x HTTP/2.0",
+            "GET http://h/api/a%zz HTTP/1.1", "TRACE http://h/api/x HTTP/1.1",
+            "GET HTTPS://h:8080/api/x HTTP/1.1", "GET svn+ssh://[::1]:22/api/x HTTP/1.1"})
+    @DisplayName("a request line whose target, as sent, lies under /api/ is an API request")
+    void requestUnderApiIsAnApiRequest(String requestLine) {
+        assertThat(apiRequestMap.valueFor(requestLine)).isEqualTo("1");
+    }
+
+    @ParameterizedTest(name = "<{0}>")
+    @ValueSource(strings = {"", "GET / HTTP/1.1", "GET /customers%zz HTTP/1.1", "GET /api HTTP/1.1",
+            "GET /api%zz HTTP/1.1", "GET /apix/a HTTP/1.1", "GET /API/a HTTP/1.1", "GET /%61pi/a HTTP/1.1",
+            "CONNECT t:443 HTTP/1.1", "GET http://h/customers HTTP/1.1", "GET http://h?/api/ HTTP/1.1",
+            "GET http://h/x/api/ HTTP/1.1", "GET /customers?next=/api/ HTTP/1.1",
+            "GET /customers /api/ HTTP/1.1", "GET api/x HTTP/1.1", "GET 1http://h/api/x HTTP/1.1"})
+    @DisplayName("any other request line is not an API request and keeps nginx's page")
+    void otherRequestIsNotAnApiRequest(String requestLine) {
+        assertThat(apiRequestMap.valueFor(requestLine)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("the access log records the method of the request line, not the one error_page rewrites")
+    void accessLogRecordsTheRequestLineMethod() {
+        Directive format = only(config, d -> d.name().equals("log_format") && !d.args().isEmpty()
+                && d.args().get(0).equals(ACCESS_LOG_FORMAT), "log_format " + ACCESS_LOG_FORMAT);
+        Matcher reference = VARIABLE.matcher(String.join("", format.args().subList(1, format.args().size())));
+        List<String> logged = new ArrayList<>();
+        while (reference.find()) {
+            logged.add(reference.group(1) != null ? reference.group(1) : reference.group(2));
+        }
+        assertThat(logged).as("variables of log_format %s", ACCESS_LOG_FORMAT)
+                .contains(METHOD_VARIABLE)
+                .doesNotContain(REWRITTEN_METHOD_VARIABLE);
+
+        Directive accessLog = only(server().children(), d -> d.name().equals("access_log"), "access_log");
+        assertThat(accessLog.args()).as("the server's access_log").endsWith(ACCESS_LOG_FORMAT);
+    }
+
+    @ParameterizedTest(name = "<{0}> logs {1}")
+    @CsvSource({"'TRACE /api/x HTTP/1.1', TRACE", "'POST /api/customers HTTP/1.1', POST",
+            "'GET / HTTP/1.1', GET", "'GET /api/customers?cursor=xxxx', GET", "'M-SEARCH * HTTP/1.1', M-SEARCH",
+            "'', -", "'get /x HTTP/1.1', -", "'GET/api?name=SMITH HTTP/1.1', -", "' /api/x HTTP/1.1', -",
+            "'GE(T /api/x?name=SMITH HTTP/1.1', -", "'GET', -"})
+    @DisplayName("the logged method is the request line's method-shaped first word, or - for any other line")
+    void loggedMethodIsTheRequestLinesMethodOrDash(String requestLine, String method) {
+        assertThat(methodMap.valueFor(requestLine)).isEqualTo(method);
     }
 
     /**
@@ -313,6 +541,85 @@ final class NginxGatewayProblemTest {
         Directive server = only(config, d -> d.isBlock("server"), "server");
         return only(server.children(), d -> d.isBlock("location") && d.args().equals(List.of(gateway.location)),
                 "location " + gateway.location);
+    }
+
+    /**
+     * Returns the body the API builds for the status nginx sends for a rejection: for a 4xx, what the
+     * ERROR-dispatch status map, which also answers requests Tomcat's connector rejects, builds for that
+     * status with no exception; for a 5xx, DEM9999 at that status, as for the gateway. Serialized as
+     * {@link ProblemFactory#write} serializes it.
+     *
+     * @param rejection the rejection
+     * @param instance the request path, or {@code null} for none
+     * @return the JSON text
+     * @throws IOException if serialization fails
+     */
+    private static String apiBody(Rejection rejection, @Nullable String instance) throws IOException {
+        HttpStatusCode status = HttpStatusCode.valueOf(rejection.wireStatus);
+        ProblemDetail problem = status.is4xxClientError()
+                ? ERRORS.problemFor(rejection.wireStatus, null, instance)
+                : PROBLEMS.create(status, PROGRAM_ERROR, List.of(), instance);
+        return new String(MAPPER.writeValueAsBytes(problem), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Returns the body nginx writes for an API request it rejects, by request path: the {@code return}
+     * text of the rejection's page with {@code $api_problem_instance} expanded through the map. The page
+     * must return the status nginx sends for the rejection.
+     *
+     * @param rejection the rejection
+     * @param path the raw request path without its query, empty when nginx could not read one
+     * @return the JSON text
+     */
+    private static String nginxBody(Rejection rejection, String path) {
+        Directive answer = only(rejectionPage(rejection).children(), d -> d.name().equals("return"),
+                "return in " + rejection.page);
+        assertThat(answer.args()).as("return in %s", rejection.page).hasSize(2);
+        assertThat(answer.args().get(0)).isEqualTo(String.valueOf(rejection.wireStatus));
+        return expand(answer.args().get(1), Map.of(INSTANCE_VARIABLE, instanceMap.valueFor(path)));
+    }
+
+    /**
+     * Returns the server's exact location of a rejection's page.
+     *
+     * @param rejection the rejection
+     * @return the {@code location = <page>} block
+     */
+    private static Directive rejectionPage(Rejection rejection) {
+        return only(server().children(),
+                d -> d.isBlock("location") && d.args().equals(List.of("=", rejection.page)),
+                "location = " + rejection.page);
+    }
+
+    /**
+     * Returns the server block.
+     *
+     * @return the {@code server} block
+     */
+    private static Directive server() {
+        return only(config, d -> d.isBlock("server"), "server");
+    }
+
+    /**
+     * Returns the server's {@code location /api/}.
+     *
+     * @return the {@code location /api/} block
+     */
+    private static Directive apiLocation() {
+        return only(server().children(), d -> d.isBlock("location") && d.args().equals(List.of("/api/")),
+                "location /api/");
+    }
+
+    /**
+     * Returns the top-level {@code map} from one variable to another.
+     *
+     * @param source the map's source variable, without {@code $}
+     * @param target the variable the map sets, without {@code $}
+     * @return the {@code map} block
+     */
+    private static Directive map(String source, String target) {
+        return only(config, d -> d.isBlock("map") && d.args().equals(List.of("$" + source, "$" + target)),
+                "map $" + source + " $" + target);
     }
 
     /**
@@ -394,14 +701,17 @@ final class NginxGatewayProblemTest {
 
     /**
      * An nginx {@code map} as nginx evaluates it: an exact key first, then the regular expressions in
-     * the order written, then the default ({@code ""} when none is given). Every value is taken as
-     * written; the caller expands its variables.
+     * the order written, then the default ({@code ""} when none is given). The value found is expanded
+     * with the map's source variable and, after a regular expression matched, its numbered and named
+     * groups; a reference to any other variable fails the test.
      *
+     * @param source the map's source variable, without {@code $}
      * @param defaultValue the value when nothing matches
      * @param exact the exact keys and their values
      * @param patterns the regular expressions and their values, in order
      */
-    private record NginxMap(String defaultValue, Map<String, String> exact, Map<Pattern, String> patterns) {
+    private record NginxMap(String source, String defaultValue, Map<String, String> exact,
+            Map<Pattern, String> patterns) {
 
         /**
          * Reads a {@code map} block whose keys are plain strings or {@code ~} / {@code ~*} regular
@@ -411,6 +721,9 @@ final class NginxGatewayProblemTest {
          * @return the map
          */
         static NginxMap of(Directive map) {
+            assertThat(map.args()).as("map %s", map.args()).hasSize(2);
+            String sourceVariable = map.args().get(0);
+            assertThat(sourceVariable).as("source of map %s", map.args()).startsWith("$");
             String defaultValue = "";
             Map<String, String> exact = new LinkedHashMap<>();
             Map<Pattern, String> patterns = new LinkedHashMap<>();
@@ -429,26 +742,39 @@ final class NginxGatewayProblemTest {
                     exact.put(key.startsWith("\\") ? key.substring(1) : key, value);
                 }
             }
-            return new NginxMap(defaultValue, Map.copyOf(exact), patterns);
+            return new NginxMap(sourceVariable.substring(1), defaultValue, Map.copyOf(exact), patterns);
         }
 
         /**
-         * Returns the expanded value of the map for a source string: {@code $request_path_no_query}
-         * becomes the source itself.
+         * Returns the expanded value of the map for a source string: a reference to the map's source
+         * variable becomes the source string itself, and a reference to a numbered ({@code $1}) or named
+         * group of the regular expression that matched becomes the text it captured ({@code ""} when it
+         * captured nothing).
          *
-         * @param source the value of the map's source variable
+         * @param sourceValue the value of the map's source variable
          * @return the value
          */
-        String valueFor(String source) {
-            String value = exact.get(source);
+        String valueFor(String sourceValue) {
+            Map<String, String> variables = new HashMap<>();
+            String value = exact.get(sourceValue);
             if (value == null) {
-                value = patterns.entrySet().stream()
-                        .filter(entry -> entry.getKey().matcher(source).find())
-                        .map(Map.Entry::getValue)
-                        .findFirst()
-                        .orElse(defaultValue);
+                value = defaultValue;
+                for (Map.Entry<Pattern, String> entry : patterns.entrySet()) {
+                    Matcher matcher = entry.getKey().matcher(sourceValue);
+                    if (matcher.find()) {
+                        for (int group = 1; group <= matcher.groupCount(); group++) {
+                            variables.put(String.valueOf(group),
+                                    Objects.requireNonNullElse(matcher.group(group), ""));
+                        }
+                        matcher.namedGroups().forEach((name, group) ->
+                                variables.put(name, Objects.requireNonNullElse(matcher.group(group), "")));
+                        value = entry.getValue();
+                        break;
+                    }
+                }
             }
-            return expand(value, Map.of(PATH_VARIABLE, source));
+            variables.put(source, sourceValue);
+            return expand(value, variables);
         }
     }
 

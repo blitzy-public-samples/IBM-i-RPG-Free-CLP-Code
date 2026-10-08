@@ -38,8 +38,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw/http';
 import { server } from '../test/server';
-import { basicAuth, catalog, customerDetail, DEFAULT_ERROR_ID, messageText, problem } from '../test/handlers';
+import { basicAuth, catalog, customerDetail, DEFAULT_ERROR_ID, messageText, problem, users } from '../test/handlers';
+import type { CustomerFieldsFixture, CustomerResponseFixture, Role } from '../test/handlers';
 import { onUnauthorized, request, setCredentials } from './client';
+import type { Credentials } from './client';
 import { ApiError, fieldErrors, isApiError, syntheticProblem } from './problem';
 
 // ---------------------------------------------------------------------------
@@ -129,7 +131,94 @@ function htmlPage(status: number): Response {
   });
 }
 
-afterEach(() => {
+/**
+ * The credentials of the demo user in the shared `users` fixture that holds
+ * `role`: `sales` for MAINTENANCE, `inquiry` for INQUIRY.
+ *
+ * @throws Error when no demo user holds `role`
+ */
+function demoUser(role: Role): Credentials {
+  const user = users.find((candidate) => candidate.roles.includes(role));
+  if (user === undefined) {
+    throw new Error(`No demo user holds the ${role} role`);
+  }
+  return { username: user.username, password: user.password };
+}
+
+/** The demo user the API lets review, add and update. */
+const MAINTENANCE_USER = demoUser('MAINTENANCE');
+
+/** The demo user the API lets read only; its writes are refused with 403 APP0403. */
+const INQUIRY_USER = demoUser('INQUIRY');
+
+/**
+ * The nine `CustomerFields` of a stored customer, the only data properties a
+ * write body may carry. The `custId`, `chgTime`, `chgUser` and `version` of
+ * the response are left out: the API's binder refuses each as an unknown
+ * property (400 APP0400) before any rule runs, so a mocked 409, 422 or 502
+ * for a body carrying one would be an exchange the server never makes. A PUT
+ * adds `version` back and a review adds `purpose`. The keys are spelled out
+ * rather than taken from the client's own field list, so the bodies sent here
+ * stay an independent statement of the contract.
+ */
+function customerFields(customer: CustomerResponseFixture): CustomerFieldsFixture {
+  return {
+    active: customer.active,
+    name: customer.name,
+    addr: customer.addr,
+    city: customer.city,
+    state: customer.state,
+    zip: customer.zip,
+    acctPhone: customer.acctPhone,
+    acctMgr: customer.acctMgr,
+    corpPhone: customer.corpPhone,
+  };
+}
+
+/**
+ * Asserts that a stubbed write reached its route as one the API answers past
+ * its security filter and body binder: sent by `user` with exactly `body`,
+ * whose properties are the nine `CustomerFields` plus `version` on a PUT or
+ * `purpose` on a review, and nothing else. Sent anonymously, or with any other
+ * property, the same request would be answered 401 APP0401 or 400 APP0400
+ * instead of the mocked outcome.
+ */
+function expectSentBy(sent: Seen, user: Credentials, body: object): void {
+  expect(sent.headers.get('authorization')).toBe(basicAuth(user.username, user.password));
+  expect(JSON.parse(sent.body)).toEqual(body);
+  const bound = Object.keys(customerFields(customerDetail));
+  if (sent.method === 'PUT') {
+    bound.push('version');
+  } else if (sent.url.pathname === '/api/customers/review') {
+    bound.push('purpose');
+  }
+  expect(Object.keys(body).sort()).toEqual(bound.sort());
+}
+
+/**
+ * Every hold {@link holdGet} made in the current test; `afterEach` abandons
+ * their calls, releases them and awaits their settlement, so neither a held
+ * request nor a call waiting on one outlives its test.
+ */
+const holds: HeldRequest[] = [];
+
+afterEach(async () => {
+  // A request a failed test left held is settled here, before the
+  // credentials and the 401 handler are cleared. Its calls are abandoned
+  // first, as the test itself does before releasing, so the client drops the
+  // connection rather than completing it into the pool a later test draws
+  // on; then the hold is released and both the calls' outcomes and the
+  // route's answer are awaited. Its resolver never stays suspended, a call
+  // the test no longer awaits is handled rather than reported as an
+  // unhandled rejection, and nothing it answers reaches the next test. Every
+  // hold is released before any is awaited, so a call waiting on two holds
+  // cannot keep the teardown waiting.
+  const pending = holds.splice(0);
+  for (const held of pending) {
+    held.abandon();
+    held.release();
+  }
+  await Promise.all(pending.map((held) => held.settled()));
   // The client keeps its credentials and its 401 handler in module state;
   // clear both so no test sees another's.
   setCredentials(null);
@@ -342,14 +431,18 @@ describe('request URL, query and body', () => {
 
 describe('error responses', () => {
   it('parses a 409 DEM1002 problem+json body, current customer included, into an ApiError', async () => {
-    stub('put', '/api/customers/:custId', () =>
+    const seen = stub('put', '/api/customers/:custId', () =>
       problem(409, 'DEM1002', { current: { ...customerDetail, version: 1 }, instance: '/api/customers/AAAD' }),
     );
+    setCredentials(MAINTENANCE_USER);
+    // The nine fields with the version read earlier, now stale on the server.
+    const update = { ...customerFields(customerDetail), version: 0 };
 
-    const call = request('/api/customers/AAAD', { method: 'PUT', body: { ...customerDetail, version: 0 } });
+    const call = request('/api/customers/AAAD', { method: 'PUT', body: update });
     await expect(call).rejects.toBeInstanceOf(ApiError);
     const error = await rejectionOf(call);
 
+    expectSentBy(only(seen), MAINTENANCE_USER, update);
     expect(isApiError(error)).toBe(true);
     expect(error.name).toBe('ApiError');
     expect(error.status).toBe(409);
@@ -367,18 +460,20 @@ describe('error responses', () => {
   });
 
   it('keeps the field errors of a 422 problem in server order', async () => {
-    stub('post', '/api/customers/review', () =>
+    const seen = stub('post', '/api/customers/review', () =>
       problem(422, 'DEM0502', {
         args: ['Name'],
         errors: [{ field: 'name', code: 'DEM0502', message: messageText('DEM0502', ['Name']) }],
         instance: '/api/customers/review',
       }),
     );
+    setCredentials(MAINTENANCE_USER);
+    // Active is Y, so the first rule to fail is the blank Name.
+    const review = { purpose: 'EDIT', ...customerFields(customerDetail), name: '' };
 
-    const error = await rejectionOf(
-      request('/api/customers/review', { method: 'POST', body: { purpose: 'EDIT', ...customerDetail, name: '' } }),
-    );
+    const error = await rejectionOf(request('/api/customers/review', { method: 'POST', body: review }));
 
+    expectSentBy(only(seen), MAINTENANCE_USER, review);
     expect(error.status).toBe(422);
     expect(error.problem.code).toBe('DEM0502');
     expect(error.problem.detail).toBe('Name: Must not be blank');
@@ -389,12 +484,14 @@ describe('error responses', () => {
   });
 
   it('keeps stateAccepted on a review failure after the State rule passed', async () => {
-    stub('post', '/api/customers/review', () => problem(502, 'APP0502', { stateAccepted: 'NV' }));
+    const seen = stub('post', '/api/customers/review', () => problem(502, 'APP0502', { stateAccepted: 'NV' }));
+    setCredentials(MAINTENANCE_USER);
+    // Every field rule passes with the known State NV; the address service then fails.
+    const review = { purpose: 'EDIT', ...customerFields(customerDetail), state: 'NV' };
 
-    const error = await rejectionOf(
-      request('/api/customers/review', { method: 'POST', body: { purpose: 'EDIT', ...customerDetail, state: 'NV' } }),
-    );
+    const error = await rejectionOf(request('/api/customers/review', { method: 'POST', body: review }));
 
+    expectSentBy(only(seen), MAINTENANCE_USER, review);
     expect(error.status).toBe(502);
     expect(error.problem.code).toBe('APP0502');
     expect(error.problem.stateAccepted).toBe('NV');
@@ -595,19 +692,26 @@ describe('401 responses and onUnauthorized', () => {
   it('does not call the handler for 403, 404, 409 or 500 responses', async () => {
     const onUnauth = vi.fn<() => void>();
     registerUnauthorized(onUnauth);
-    stub('post', '/api/customers', () => problem(403, 'APP0403'));
+    const added = stub('post', '/api/customers', () => problem(403, 'APP0403'));
     stub('get', '/api/customers/:custId', () => problem(404, 'DEM0599'));
-    stub('put', '/api/customers/:custId', () => problem(409, 'DEM1001'));
+    const updated = stub('put', '/api/customers/:custId', () => problem(409, 'DEM1001'));
     stub('get', '/api/customers', () => htmlPage(500));
+    // The signed-in user may update; the add is tried with the INQUIRY user's
+    // per-call credentials, the caller the API refuses an add with 403.
+    setCredentials(MAINTENANCE_USER);
+    const fields = customerFields(customerDetail);
+    const update = { ...fields, version: 0 };
 
     const statuses = [
-      (await rejectionOf(request('/api/customers', { method: 'POST', body: {} }))).status,
+      (await rejectionOf(request('/api/customers', { method: 'POST', body: fields, credentials: INQUIRY_USER }))).status,
       (await rejectionOf(request('/api/customers/AAAD'))).status,
-      (await rejectionOf(request('/api/customers/AAAD', { method: 'PUT', body: {} }))).status,
+      (await rejectionOf(request('/api/customers/AAAD', { method: 'PUT', body: update }))).status,
       (await rejectionOf(request('/api/customers'))).status,
     ];
 
     expect(statuses).toEqual([403, 404, 409, 500]);
+    expectSentBy(only(added), INQUIRY_USER, fields);
+    expectSentBy(only(updated), MAINTENANCE_USER, update);
     expect(onUnauth).not.toHaveBeenCalled();
   });
 });
@@ -616,20 +720,49 @@ describe('401 responses and onUnauthorized', () => {
 // Aborting a read (RequestOptions.signal)
 // ---------------------------------------------------------------------------
 
-/** A request a route holds open: when it arrived, and the release of its answer. */
+/** A request a route holds open: when it arrived, the release of its answer, and the calls waiting on it. */
 interface HeldRequest {
   /** Resolves once the request reached the route. */
   readonly arrived: Promise<void>;
   /** Whether the route has answered the request. */
   answered(): boolean;
-  /** Lets the held request answer with `respond()`. */
+  /** Lets the held request answer with `respond()`; calling it again changes nothing. */
   release(): void;
+  /**
+   * Registers `call`, a client call waiting on this route, and returns it
+   * unchanged. Its outcome is observed at once, so a rejection is handled
+   * whenever it comes, before or after `release()`; the test still awaits
+   * and asserts the call itself. `controller` is the one whose signal the
+   * call carries, which `abandon()` aborts.
+   */
+  holding<T>(call: Promise<T>, controller?: AbortController): Promise<T>;
+  /**
+   * Aborts the controller of every call registered with `holding`, as a
+   * test does before its own `release()`: the client then gives the call up
+   * and drops its connection instead of reading an answer nobody awaits any
+   * more, so no connection a failed test left open is reused by a later
+   * test. A settled call is unaffected; calling it again changes nothing.
+   */
+  abandon(): void;
+  /**
+   * Resolves once every call registered with `holding` has settled and the
+   * route has answered every request it took, at once when there is none: a
+   * request arriving after `release()` is answered without waiting. It never
+   * rejects.
+   */
+  settled(): Promise<void>;
 }
 
 /**
  * Overrides `GET path` for the current test: holds each request until
  * `release` is called, then answers it with `respond()`. A call that settles
  * while `answered()` is still false settled without waiting for the server.
+ *
+ * The hold is registered in {@link holds} when it is made, and a test passes
+ * each call it makes on the route through `holding`, so the file's
+ * `afterEach` abandons those calls, releases the hold and awaits
+ * `settled()`, the calls' outcomes and the route's answers, even when the
+ * test failed before its own `release()`.
  */
 function holdGet(path: string, respond: () => Response): HeldRequest {
   let reached: () => void = () => undefined;
@@ -640,16 +773,58 @@ function holdGet(path: string, respond: () => Response): HeldRequest {
   const held = new Promise<void>((resolve) => {
     open = resolve;
   });
+  // One promise per request the route took, resolved once the route has
+  // answered that request, `respond()` throwing included.
+  const answers: Array<Promise<void>> = [];
+  // One promise per call registered with `holding`, fulfilled once that call
+  // has settled, whichever way, and the controllers those calls carry.
+  const calls: Array<Promise<unknown>> = [];
+  const controllers: AbortController[] = [];
   let done = false;
   server.use(
     http.get(path, async () => {
+      let answer: () => void = () => undefined;
+      answers.push(
+        new Promise<void>((resolve) => {
+          answer = resolve;
+        }),
+      );
       reached();
-      await held;
-      done = true;
-      return respond();
+      try {
+        await held;
+        done = true;
+        return respond();
+      } finally {
+        answer();
+      }
     }),
   );
-  return { arrived, answered: () => done, release: () => open() };
+  const hold: HeldRequest = {
+    arrived,
+    answered: () => done,
+    release: () => open(),
+    holding: (call, controller) => {
+      calls.push(Promise.allSettled([call]));
+      if (controller !== undefined) {
+        controllers.push(controller);
+      }
+      return call;
+    },
+    abandon: () => {
+      for (const controller of controllers) {
+        controller.abort();
+      }
+    },
+    settled: async () => {
+      // The calls first: once they have settled, every request of theirs
+      // that reached the route is in `answers`, which the route, released,
+      // answers without waiting.
+      await Promise.all(calls);
+      await Promise.all(answers);
+    },
+  };
+  holds.push(hold);
+  return hold;
 }
 
 /**
@@ -692,7 +867,7 @@ describe('aborting a read', () => {
     const route = holdGet('/api/customers', () => problem(401, 'APP0401', { instance: '/api/customers' }));
     const controller = new AbortController();
 
-    const call = request('/api/customers', { query: { name: 'SLOWA' }, signal: controller.signal });
+    const call = route.holding(request('/api/customers', { query: { name: 'SLOWA' }, signal: controller.signal }), controller);
     await route.arrived;
     // The request is in flight: the route holds it and its answer is pending.
     await nextMacrotask();
@@ -867,27 +1042,33 @@ describe('document', () => {
   it('is left unchanged by successful and failed calls alike', async () => {
     registerUnauthorized(vi.fn<() => void>());
     stub('get', '/api/customers', () => htmlPage(500));
-    stub('post', '/api/customers/review', () =>
+    const reviewed = stub('post', '/api/customers/review', () =>
       problem(422, 'DEM0503', {
         errors: [{ field: 'state', code: 'DEM0503', message: messageText('DEM0503') }],
         instance: '/api/customers/review',
       }),
     );
     stub('get', '/api/states', () => HttpResponse.error());
+    // An add whose Active, Name, Address and City pass and whose State is no
+    // known code: the State rule is the first to fail, with no stateAccepted.
+    const review = { purpose: 'ADD', ...customerFields(customerDetail), state: 'XX' };
     const bodyBefore = document.body.innerHTML;
     const documentBefore = document.documentElement.outerHTML;
 
     // Success: the default public catalog handler.
     await expect(request('/api/messages')).resolves.toEqual(catalog);
     // 401 from the default session handler, 500 HTML, 422 problem, network failure.
+    // Nothing is stored, so the session read stays anonymous; the review
+    // carries the MAINTENANCE user's credentials for itself alone.
     const failures = await Promise.allSettled([
       request('/api/session'),
       request('/api/customers'),
-      request('/api/customers/review', { method: 'POST', body: { purpose: 'ADD' } }),
+      request('/api/customers/review', { method: 'POST', body: review, credentials: MAINTENANCE_USER }),
       request('/api/states'),
     ]);
 
     expect(failures.map((outcome) => outcome.status)).toEqual(['rejected', 'rejected', 'rejected', 'rejected']);
+    expectSentBy(only(reviewed), MAINTENANCE_USER, review);
     expect(document.body.innerHTML).toBe(bodyBefore);
     expect(document.documentElement.outerHTML).toBe(documentBefore);
   });

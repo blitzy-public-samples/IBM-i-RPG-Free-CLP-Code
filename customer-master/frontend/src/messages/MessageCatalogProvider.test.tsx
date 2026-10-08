@@ -57,6 +57,9 @@ const MESSAGES_PATH = '/api/messages';
 /** Every `GET /api/messages` that reached MSW in the current test, in order. */
 const catalogRequests: Request[] = [];
 
+/** Every hold the current test made ({@link holdCatalog}); `afterEach` settles them, so no held request outlives its test. */
+const holds: HeldCatalog[] = [];
+
 /** MSW `request:start` listener: records the catalog requests, ignores every other route. */
 function recordCatalogRequest({ request }: { request: Request }): void {
   if (request.method === 'GET' && new URL(request.url).pathname === MESSAGES_PATH) {
@@ -69,7 +72,14 @@ beforeEach(() => {
   server.events.on('request:start', recordCatalogRequest);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A request a failed test left held is released and settled here, while
+  // the tree is still mounted (this hook runs before the setup file's
+  // cleanup) and its handler is still in place, so nothing it resolves can
+  // reach the next test.
+  for (const held of holds.splice(0)) {
+    await held.settle();
+  }
   server.events.removeListener('request:start', recordCatalogRequest);
 });
 
@@ -169,13 +179,69 @@ function textOf(label = 'probe'): string | null {
   return screen.getByTestId(`${label}-text`).textContent;
 }
 
-/** A promise the test resolves itself, to hold a handler's answer back. */
+/** A promise the test resolves itself; releasing it again changes nothing. */
 function deferred(): { promise: Promise<void>; release: () => void } {
   let resolvePromise: () => void = () => undefined;
   const promise = new Promise<void>((resolve) => {
     resolvePromise = resolve;
   });
   return { promise, release: () => resolvePromise() };
+}
+
+/** The handle {@link holdCatalog} returns. */
+interface HeldCatalog {
+  /** Lets the held catalog request be answered. Calling it again changes nothing. */
+  readonly release: () => void;
+  /**
+   * Releases the hold, then waits until the held resolver has returned its
+   * answer and `client` has nothing left in flight, so the catalog has
+   * reached the cache and its consumers have rendered it. When no request
+   * reached the resolver, it waits for `client` alone. Calling it again
+   * changes nothing.
+   */
+  readonly settle: () => Promise<void>;
+}
+
+/**
+ * Holds every `GET /api/messages` until `release()` is called, as a slow
+ * server would, then answers it with the `catalog` fixture. The hold is
+ * registered in {@link holds} when it is made, so `afterEach` settles it even
+ * when the test fails before its own `release()`.
+ *
+ * @param client the client whose catalog query the held request answers
+ */
+function holdCatalog(client: QueryClient): HeldCatalog {
+  const gate = deferred();
+  const answered = deferred();
+  let reached = false;
+  server.use(
+    http.get(MESSAGES_PATH, async () => {
+      reached = true;
+      try {
+        await gate.promise;
+        return HttpResponse.json({ ...catalog });
+      } finally {
+        // Runs once the response above is built: the answer has been produced.
+        answered.release();
+      }
+    }),
+  );
+  const held: HeldCatalog = {
+    release: gate.release,
+    settle: async () => {
+      gate.release();
+      if (reached) {
+        await act(async () => {
+          await answered.promise;
+        });
+      }
+      // react-query hands the settled query to its observers on a later
+      // task; `waitFor` lets that render run outside any act warning.
+      await waitFor(() => expect(client.isFetching()).toBe(0));
+    },
+  };
+  holds.push(held);
+  return held;
 }
 
 /** `useMessages()` rendered as a hook, returned once the catalog has loaded. */
@@ -241,18 +307,16 @@ describe('MessageCatalogProvider loading', () => {
   });
 
   it('renders its children at once and shows codes until the catalog arrives', async () => {
-    const gate = deferred();
-    server.use(
-      http.get(MESSAGES_PATH, async () => {
-        await gate.promise;
-        return HttpResponse.json({ ...catalog });
-      }),
-    );
+    const client = newQueryClient();
+    const held = holdCatalog(client);
 
-    renderWithCatalog([
-      <Probe key="plain" label="plain" code="DEM0003" />,
-      <Probe key="withArgs" label="withArgs" code="DEM0004" args={['X']} />,
-    ]);
+    renderWithCatalog(
+      [
+        <Probe key="plain" label="plain" code="DEM0003" />,
+        <Probe key="withArgs" label="withArgs" code="DEM0004" args={['X']} />,
+      ],
+      { client },
+    );
 
     // Nothing waits for the catalog: the children are already in the document.
     expect(screen.getByTestId('plain')).toBeInTheDocument();
@@ -267,7 +331,7 @@ describe('MessageCatalogProvider loading', () => {
     expect(readyOf('plain')).toBe('false');
     expect(textOf('plain')).toBe('DEM0003');
 
-    gate.release();
+    held.release();
     await waitFor(() => expect(readyOf('plain')).toBe('true'));
     expect(readyOf('withArgs')).toBe('true');
     expect(textOf('plain')).toBe(catalogText('DEM0003'));
