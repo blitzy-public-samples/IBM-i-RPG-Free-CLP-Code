@@ -35,8 +35,24 @@
  *   search page's keys until it closes.
  * - **Messages.** DEM0003 and DEM0004 come from the message catalog; a
  *   failed request is shown by `useProblemPresenter`, which highlights and
- *   focuses the filter when the problem names a field. The bundle holds no
- *   message text: the strings below are screen labels and key legends.
+ *   focuses the filter when the problem names a field. `useStates` reports a
+ *   failure only while its request is still the current one and the window
+ *   is still open, so a request that F5, a newer Enter or F7, or closing the
+ *   window made obsolete shows nothing. The bundle holds no message text: the
+ *   strings below are screen labels and key legends.
+ * - **List status.** One polite, atomic live region under the list, always
+ *   rendered while the window is open, carries the list's state, so each
+ *   change is both seen and announced: "Loading..." while a request is
+ *   pending (the table is also `aria-busy`); once rows are shown, the
+ *   SFLEND(*MORE) "More..." or "Bottom" (PMTSTATED:82-86) with a visually
+ *   hidden summary of the page in view, its row range, the row count and the
+ *   order, which changes with every filter, PageUp, PageDown and F7;
+ *   "No states match." when an applied filter matched nothing; and
+ *   "States not loaded." after a failure, whose problem the presenter has
+ *   already published as the one alert. After F5 the region is empty, as the
+ *   source blanks the list until the next Enter. These are screen labels,
+ *   never toasts. The region has no `status` role, which belongs to the
+ *   shared toast host.
  * - **Input.** "Name Contains" (SC_NAME 10A, no CHECK(LC), PMTSTATED:87-88)
  *   and the option fields uppercase as typed by the shared length-preserving
  *   rule. The filter is sent exactly as typed: trimming, uppercasing and the
@@ -145,6 +161,44 @@ const F7_LABEL: Readonly<Record<StateSort, string>> = { name: 'F7=By Code', code
 type RejectedOption = { index: number; code: string; option: string };
 
 /**
+ * What the list shows, decided in this order: a request is pending; nothing
+ * is applied (F5 emptied the list until the next Enter); the request failed;
+ * the applied filter matched no state; or rows.
+ */
+type ListStatus = 'pending' | 'cleared' | 'failed' | 'empty' | 'rows';
+
+/** The visible status line of each list state that shows no rows; a cleared list shows none. */
+const STATUS_LABEL: Readonly<Record<Exclude<ListStatus, 'cleared' | 'rows'>, string>> = {
+  pending: 'Loading...',
+  failed: 'States not loaded.',
+  empty: 'No states match.',
+};
+
+/** The {@link ListStatus} of the list `useStates` reports. */
+function listStatusOf(loading: boolean, error: unknown, applied: StateQuery | null, rowCount: number): ListStatus {
+  if (loading) {
+    return 'pending';
+  }
+  if (applied === null) {
+    return 'cleared';
+  }
+  if (error !== null) {
+    return 'failed';
+  }
+  return rowCount === 0 ? 'empty' : 'rows';
+}
+
+/**
+ * The spoken summary of the page in view: its 1-based row range, the number
+ * of rows and the order, as in "Showing 7 to 12 of 58 states, sorted by Name."
+ */
+function pageSummary(first: number, last: number, total: number, sort: StateSort): string {
+  const range = first === last ? `${first}` : `${first} to ${last}`;
+  const noun = total === 1 ? 'state' : 'states';
+  return `Showing ${range} of ${total} ${noun}, sorted by ${SORT_LABEL[sort]}.`;
+}
+
+/**
  * The 0-based first row of the last six-row page: the 1-based
  * `%int((RcdsInSfl - 1) / SFLPAGESIZE) * SFLPAGESIZE + 1` of PMTSTATER
  * (:336-341) less one, so row 19 of 20. An empty list starts at 0.
@@ -213,9 +267,9 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
     filterRef.current?.focus();
   }
 
-  const { rows, loading, applied, search, clear } = useStates({
+  const { rows, loading, error, applied, search, clear } = useStates({
     initial: INITIAL_QUERY,
-    onError: (error) => present(error, { setFieldErrors: showFilterErrors, focusField: focusFilter }),
+    onError: (failure) => present(failure, { setFieldErrors: showFilterErrors, focusField: focusFilter }),
   });
 
   // The page actually shown. `pageStart` is reset with every reload, so it is
@@ -224,6 +278,7 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   const firstRow = Math.min(pageStart, lastPageStart(rows.length));
   const pageRows = rows.slice(firstRow, firstRow + PAGE_SIZE);
   const hasMore = firstRow + PAGE_SIZE < rows.length;
+  const listStatus = listStatusOf(loading, error, applied, rows.length);
 
   /*
    * Focus recovery. Rows are keyed by their slot on the page, so paging keeps
@@ -503,8 +558,25 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
             ))}
           </tbody>
         </table>
-        {/* SFLEND(*MORE); nothing while the subfile holds no records (PMTSTATED:82-86). */}
-        {rows.length > 0 ? <p className="paging-indicator">{hasMore ? 'More...' : 'Bottom'}</p> : null}
+        {/*
+          The list status: always rendered, so assistive technology has
+          registered the region before its first change; atomic, so each change
+          is read whole. Not role="status", which is the toast host's.
+        */}
+        <div aria-live="polite" aria-atomic="true">
+          {listStatus === 'rows' ? (
+            <>
+              <p className="visually-hidden">
+                {pageSummary(firstRow + 1, firstRow + pageRows.length, rows.length, sort)}
+              </p>
+              {/* SFLEND(*MORE), shown only while the subfile holds records (PMTSTATED:82-86). */}
+              <p className="paging-indicator">{hasMore ? 'More...' : 'Bottom'}</p>
+            </>
+          ) : null}
+          {listStatus === 'pending' || listStatus === 'failed' || listStatus === 'empty' ? (
+            <p className="paging-indicator">{STATUS_LABEL[listStatus]}</p>
+          ) : null}
+        </div>
         <p className="footer-brand">Demo Corp of America</p>
         <FunctionKeyBar keys={keys} />
       </div>

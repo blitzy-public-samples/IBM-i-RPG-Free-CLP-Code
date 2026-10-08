@@ -62,7 +62,7 @@
  * returns the bare code).
  */
 import type { ReactElement, ReactNode } from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -883,6 +883,184 @@ describe('CustomerSearchPage', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Paging while a next page loads: every key stays live, the latest
+  // navigation decides the page shown, and focus follows to the page asked for
+  // -------------------------------------------------------------------------
+
+  describe('paging while a next page loads', () => {
+    /** The first page of the full list (F9 on), as the screen requests it. */
+    const INCLUDING_INACTIVE: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
+
+    /** The name on the first row of the 0-based page `page` of `rows`; throws when that page is empty. */
+    function firstNameOn(rows: readonly CustomerSummaryResponse[], page: number): string {
+      const name = pageNames(rows, page)[0];
+      if (name === undefined) {
+        throw new Error(`Page ${page + 1} of the fixture rows is empty`);
+      }
+      return name;
+    }
+
+    /**
+     * Holds the continuation page requested with `cursor` until the returned
+     * function is called; every other query is answered at once from the
+     * fixture. Registered over the suite's override, it records every query in
+     * {@link searches} as that override does. The returned function resolves
+     * once the held page has been answered and has reached the screen.
+     */
+    function holdContinuation(cursor: string): () => Promise<void> {
+      let open: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let answered = false;
+      server.use(
+        http.get(SEARCH_PATH, async ({ request }) => {
+          const query = readQuery(request);
+          searches.push(query);
+          if (query.cursor === cursor) {
+            await held;
+            answered = true;
+          }
+          return fixturePage(query);
+        }),
+      );
+      return async () => {
+        open();
+        await waitFor(() => expect(answered).toBe(true));
+        // The answer still travels through fetch and the query cache, which
+        // notifies its observers with setTimeout(0), before React renders it.
+        await act(
+          () =>
+            new Promise<void>((resolve) => {
+              setTimeout(resolve, 100);
+            }),
+        );
+      };
+    }
+
+    /**
+     * Inquiry with inactive rows included (F9: pages of 12, 12 and 6 rows),
+     * its second page shown and focus on that page's first option field.
+     */
+    async function showSecondOfThreePages(): Promise<UserEvent> {
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.keyboard('{F9}');
+      await waitForPage(ALL_ROWS, 0);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 1);
+      await user.click(optionInput(firstNameOn(ALL_ROWS, 1)));
+      expect(searches).toEqual([FIRST_PAGE, INCLUDING_INACTIVE, { ...INCLUDING_INACTIVE, cursor: 'c1' }]);
+      return user;
+    }
+
+    it('PageDown from an option field: when the next page arrives its first option has focus, and 5 + Enter displays that customer', async () => {
+      const release = holdContinuation('c1');
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.click(optionInput(FIRST_ACTIVE.name));
+      const target = seedRow(firstNameOn(ACTIVE_ROWS, 1));
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(searches.at(-1)).toEqual({ ...FIRST_PAGE, cursor: 'c1' }));
+      // The page shown stays while its successor loads.
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      await release();
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      await waitFor(() => expect(optionInput(target.name)).toHaveFocus());
+      // Focus is on a live option field, so typing reaches it and Enter is still a command.
+      await user.keyboard('5');
+      expect(optionInput(target.name)).toHaveValue('5');
+      await user.keyboard('{Enter}');
+
+      const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
+      expect(within(dialog).getByLabelText('Name')).toHaveValue(target.name);
+      expect(sent('GET', `${SEARCH_PATH}/${target.custId}`)).toHaveLength(1);
+      expect(searches).toHaveLength(2);
+    });
+
+    it('PageUp while the next page loads shows the previous page; the late page neither replaces it nor moves focus, and PageDown reaches it with no request', async () => {
+      const release = holdContinuation('c2');
+      const user = await showSecondOfThreePages();
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(searches.at(-1)).toEqual({ ...INCLUDING_INACTIVE, cursor: 'c2' }));
+      await user.keyboard('{PageUp}');
+
+      await waitForPage(ALL_ROWS, 0);
+      const firstOfPageOne = optionInput(firstNameOn(ALL_ROWS, 0));
+      await waitFor(() => expect(firstOfPageOne).toHaveFocus());
+
+      await release();
+
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 0));
+      expect(firstOfPageOne).toHaveFocus();
+      expect(searches).toHaveLength(4);
+
+      // The late page was kept with the loaded pages (the cursor stack).
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 1);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 2);
+      await waitFor(() => expect(optionInput(firstNameOn(ALL_ROWS, 2))).toHaveFocus());
+      expect(searches).toHaveLength(4);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('Enter with no option while the next page loads shows the last page loaded so far, and the late page does not replace it', async () => {
+      const release = holdContinuation('c2');
+      const user = await showSecondOfThreePages();
+      const firstOfPageTwo = optionInput(firstNameOn(ALL_ROWS, 1));
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(searches.at(-1)).toEqual({ ...INCLUDING_INACTIVE, cursor: 'c2' }));
+      await user.keyboard('{Enter}');
+
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
+
+      await release();
+
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
+      expect(firstOfPageTwo).toHaveFocus();
+      expect(searches).toHaveLength(4);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ALL_ROWS, 2);
+      expect(searches).toHaveLength(4);
+    });
+
+    it('PageDown after PageUp while the next page loads moves to the loaded page; a PageDown at the deepest page then shows the late page with no second request', async () => {
+      const release = holdContinuation('c2');
+      const user = await showSecondOfThreePages();
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(searches.at(-1)).toEqual({ ...INCLUDING_INACTIVE, cursor: 'c2' }));
+      await user.keyboard('{PageUp}');
+      await waitForPage(ALL_ROWS, 0);
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ALL_ROWS, 1);
+      await waitFor(() => expect(optionInput(firstNameOn(ALL_ROWS, 1))).toHaveFocus());
+      expect(searches).toHaveLength(4);
+
+      // At the deepest loaded page PageDown asks again for the page still loading.
+      await user.keyboard('{PageDown}');
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
+
+      await release();
+
+      await waitForPage(ALL_ROWS, 2);
+      await waitFor(() => expect(optionInput(firstNameOn(ALL_ROWS, 2))).toHaveFocus());
+      expect(searches).toHaveLength(4);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Rendering (PMTCUSTD SFLCTL and SFL records)
   // -------------------------------------------------------------------------
 
@@ -1053,5 +1231,233 @@ describe('CustomerSearchPanel in Selection mode', () => {
 
     expect(onExit).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// List status and option errors: what assistive technology learns while a
+// page loads, once it has loaded, and after a rejected option's alert clears
+// ---------------------------------------------------------------------------
+
+/** A search answer held back until the test releases it, so the screen can be observed while the request is pending. */
+interface HeldAnswer {
+  /** Settles once {@link HeldAnswer.release} is called. */
+  released: Promise<void>;
+  /** Lets every held request be answered. */
+  release: () => void;
+}
+
+/** A held answer, closed until its `release` is called. */
+function heldAnswer(): HeldAnswer {
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  return { released, release };
+}
+
+/**
+ * Answers the search queries `holds` selects with the fixture pages only once
+ * `held` is released; the others are answered at once. Registered over the
+ * suite's override, and records every query in {@link searches} as it does.
+ */
+function holdSearches(holds: (query: SearchQuery) => boolean, held: HeldAnswer): void {
+  server.use(
+    http.get(SEARCH_PATH, async ({ request }) => {
+      const query = readQuery(request);
+      searches.push(query);
+      if (holds(query)) {
+        await held.released;
+      }
+      return fixturePage(query);
+    }),
+  );
+}
+
+/**
+ * The list's polite live region: the one `aria-live="polite"` element without
+ * a role, so never the toast host's `status` region. Throws unless exactly
+ * one is rendered.
+ */
+function listStatus(): HTMLElement {
+  const regions = Array.from(document.querySelectorAll<HTMLElement>('[aria-live="polite"]')).filter(
+    (element) => !element.hasAttribute('role'),
+  );
+  const [region, ...others] = regions;
+  if (region === undefined || others.length > 0) {
+    throw new Error(`Expected one list status region, found ${regions.length}`);
+  }
+  return region;
+}
+
+describe('CustomerSearchPanel list status and option errors', () => {
+  it('Maintenance Enter: "Searching..." and aria-busy while the first page loads, then the page summary with "More..."', async () => {
+    const held = heldAnswer();
+    holdSearches((query) => query.cursor === null, held);
+    const user = await renderSearchPage('MAINTENANCE');
+    // No list and no request: the region is present and empty (ERASE(SFL)).
+    expect(listStatus()).toHaveAttribute('aria-atomic', 'true');
+    expect(listStatus()).toBeEmptyDOMElement();
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+
+    await user.keyboard('{Enter}');
+
+    const pending = await within(listStatus()).findByText('Searching...');
+    expect(pending).toHaveClass('paging-indicator');
+    expect(pending).not.toHaveClass('visually-hidden');
+    expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
+    expect(shownNames()).toEqual([]);
+    expect(pagingIndicator()).not.toBeInTheDocument();
+    // A screen label, never a message: neither toast region carries it.
+    expect(statusRegion()).toBeEmptyDOMElement();
+    expect(alertRegion()).toBeEmptyDOMElement();
+
+    held.release();
+
+    await waitForPage(ACTIVE_ROWS, 0);
+    await waitFor(() => expect(within(listStatus()).queryByText('Searching...')).not.toBeInTheDocument());
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+    expect(listStatus()).toHaveTextContent('Page 1, rows 1 to 12. More...');
+    expect(within(listStatus()).getByText('Page 1, rows 1 to 12.')).toHaveClass('visually-hidden');
+    expect(pagingIndicator()).toHaveClass('paging-indicator');
+    expect(pagingIndicator()).toHaveTextContent('More...');
+    expect(statusRegion()).toBeEmptyDOMElement();
+    expect(searches).toEqual([FIRST_PAGE]);
+  });
+
+  it('PageDown: "Loading next page..." and aria-busy while the next page loads, then the summary of page 2 with "Bottom"', async () => {
+    const held = heldAnswer();
+    holdSearches((query) => query.cursor !== null, held);
+    const user = await renderSearchPage('INQUIRY');
+    await waitForPage(ACTIVE_ROWS, 0);
+    expect(listStatus()).toHaveTextContent('Page 1, rows 1 to 12. More...');
+
+    await user.keyboard('{PageDown}');
+
+    const pending = await within(listStatus()).findByText('Loading next page...');
+    expect(pending).toHaveClass('paging-indicator');
+    expect(pending).not.toHaveClass('visually-hidden');
+    expect(within(listStatus()).queryByText('Searching...')).not.toBeInTheDocument();
+    expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
+    // The page shown and its indicator stay until the next page arrives.
+    expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+    expect(pagingIndicator()).toHaveTextContent('More...');
+    expect(statusRegion()).toBeEmptyDOMElement();
+
+    held.release();
+
+    await waitForPage(ACTIVE_ROWS, 1);
+    await waitFor(() => expect(within(listStatus()).queryByText('Loading next page...')).not.toBeInTheDocument());
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+    expect(listStatus()).toHaveTextContent('Page 2, rows 13 to 23. Bottom');
+    expect(pagingIndicator()).toHaveTextContent('Bottom');
+    expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
+
+    // PageUp needs no request; the summary follows the page shown.
+    await user.keyboard('{PageUp}');
+
+    await waitForPage(ACTIVE_ROWS, 0);
+    expect(listStatus()).toHaveTextContent('Page 1, rows 1 to 12. More...');
+    expect(searches).toHaveLength(2);
+  });
+
+  it('"Loading next page..." and aria-busy show only while the deepest loaded page is shown: PageUp drops them, PageDown back restores them', async () => {
+    const held = heldAnswer();
+    holdSearches((query) => query.cursor === 'c2', held);
+    const includingInactive: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
+    const user = await renderSearchPage('INQUIRY');
+    await waitForPage(ACTIVE_ROWS, 0);
+    // F9: pages of 12, 12 and 6 rows; the second page is the deepest loaded one.
+    await user.keyboard('{F9}');
+    await waitForPage(ALL_ROWS, 0);
+    await user.keyboard('{PageDown}');
+    await waitForPage(ALL_ROWS, 1);
+    expect(listStatus()).toHaveTextContent('Page 2, rows 13 to 24. More...');
+
+    await user.keyboard('{PageDown}');
+
+    await within(listStatus()).findByText('Loading next page...');
+    expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
+    expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
+
+    // Page 1's next page is already loaded: the pending load cannot change the page shown.
+    await user.keyboard('{PageUp}');
+
+    await waitForPage(ALL_ROWS, 0);
+    expect(within(listStatus()).queryByText('Loading next page...')).not.toBeInTheDocument();
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+    expect(listStatus()).toHaveTextContent('Page 1, rows 1 to 12. More...');
+
+    // Back at the deepest loaded page, whose next page is still loading.
+    await user.keyboard('{PageDown}');
+
+    await waitForPage(ALL_ROWS, 1);
+    expect(within(listStatus()).getByText('Loading next page...')).toHaveClass('paging-indicator');
+    expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
+    expect(within(listStatus()).getByText('Page 2, rows 13 to 24.')).toHaveClass('visually-hidden');
+    expect(pagingIndicator()).toHaveTextContent('More...');
+    expect(searches).toHaveLength(4);
+
+    held.release();
+
+    await waitFor(() => expect(within(listStatus()).queryByText('Loading next page...')).not.toBeInTheDocument());
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+    // The PageDown that moved is the newer navigation, so page 2 stays shown;
+    // the late page is kept and the next PageDown shows it with no request.
+    expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
+    await user.keyboard('{PageDown}');
+
+    await waitForPage(ALL_ROWS, 2);
+    expect(listStatus()).toHaveTextContent('Page 3, rows 25 to 30. Bottom');
+    expect(resultsTable()).not.toHaveAttribute('aria-busy');
+    expect(searches).toEqual([
+      FIRST_PAGE,
+      includingInactive,
+      { ...includingInactive, cursor: 'c1' },
+      { ...includingInactive, cursor: 'c2' },
+    ]);
+    expect(statusRegion()).toBeEmptyDOMElement();
+    expect(alertRegion()).toBeEmptyDOMElement();
+  });
+
+  it('a rejected option keeps its DEM0004 text as its description after the alert clears; a blank option and Enter drop both', async () => {
+    const user = await renderSearchPage('INQUIRY');
+    await waitForPage(ACTIVE_ROWS, 0);
+    const text = messageText('DEM0004', ['9']);
+    expect(text).toBe('9 is not a valid option at this time.');
+    const other = pageNames(ACTIVE_ROWS, 0)[1] ?? '';
+
+    await user.type(optionInput(FIRST_ACTIVE.name), '9');
+    await user.keyboard('{Enter}');
+
+    expect(within(alertRegion()).getByText(text)).toBeInTheDocument();
+    const option = optionInput(FIRST_ACTIVE.name);
+    expect(option).toHaveAttribute('aria-invalid', 'true');
+    const descriptionId = option.getAttribute('aria-describedby') ?? '';
+    expect(descriptionId).toBe(`${option.id}-error`);
+    const description = document.getElementById(descriptionId);
+    expect(description?.textContent).toBe(text);
+    expect(description).toHaveClass('visually-hidden');
+    expect(option).toHaveAccessibleDescription(text);
+    expect(optionInput(other)).not.toHaveAttribute('aria-invalid');
+    expect(optionInput(other)).not.toHaveAttribute('aria-describedby');
+
+    // A click is the next user action: the alert clears, the description stays.
+    await user.click(filterInput(NAME_FILTER));
+
+    expect(alertRegion()).toBeEmptyDOMElement();
+    expect(optionInput(FIRST_ACTIVE.name)).toHaveAttribute('aria-invalid', 'true');
+    expect(optionInput(FIRST_ACTIVE.name)).toHaveAttribute('aria-describedby', descriptionId);
+    expect(document.getElementById(descriptionId)?.textContent).toBe(text);
+
+    // A blank option clears the error at the next Enter.
+    await user.clear(optionInput(FIRST_ACTIVE.name));
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(optionInput(FIRST_ACTIVE.name)).not.toHaveAttribute('aria-invalid'));
+    expect(optionInput(FIRST_ACTIVE.name)).not.toHaveAttribute('aria-describedby');
+    expect(document.getElementById(descriptionId)).toBeNull();
+    expect(alertRegion()).toBeEmptyDOMElement();
+    expect(searches).toHaveLength(1);
   });
 });

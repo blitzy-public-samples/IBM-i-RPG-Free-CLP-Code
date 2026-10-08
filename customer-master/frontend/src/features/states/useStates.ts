@@ -18,9 +18,9 @@
  *
  * Behaviour:
  * - {@link UseStatesResult.search} always starts a new request, even for the
- *   same filter and order, because every call bumps a sequence number that is
- *   part of the query key. After F5 the next Enter must search again, as
- *   PMTSTATER forces with `NewSearchCriteria` (:257-260).
+ *   same filter and order, because every call takes a new sequence number
+ *   that is part of the query key. After F5 the next Enter must search again,
+ *   as PMTSTATER forces with `NewSearchCriteria` (:257-260).
  * - {@link UseStatesResult.clear} drops the current query: `rows` becomes
  *   empty, `applied` becomes `null`, and nothing is requested until the next
  *   `search`.
@@ -28,16 +28,30 @@
  *   `rpad(upper(name), 30) LIKE '%…%'` match are the server's, so the client
  *   never repeats them; the rows keep the server's order (by `name` or by
  *   `state`) and are never re-sorted here.
- * - Only the current query is shown. A response that arrives late for an
- *   older query lands in that query's own cache entry, never in `rows`.
- * - Nothing is cached across picker openings: `gcTime: 0` and the default
- *   `staleTime` of 0 make a fresh mount request again, as PMTSTATER reopened
- *   its cursor each time it was called. No retries and no refetch on focus or
- *   reconnect, so each request the picker asks for is sent exactly once.
+ * - Only the current query is shown, and only its failure is reported. A
+ *   response that arrives late for an older query lands in that query's own
+ *   cache entry, never in `rows` or `error`. The request itself is not
+ *   cancelled (`statesApi.list` takes no abort signal, and react-query does
+ *   not cancel a fetch whose observer went away), so a late rejection still
+ *   settles its own cache entry but reaches no callback.
+ * - Nothing is shared across picker openings: every query key carries an
+ *   identity of the mounted hook, a new one per mount, so a fresh mount
+ *   sends its own request, as PMTSTATER reopened its cursor each time it was
+ *   called, and never joins a request a closed picker left in flight;
+ *   `gcTime: 0` and the default `staleTime` of 0 drop each entry once it is
+ *   unobserved. No retries and no refetch on focus or reconnect, so each
+ *   request the picker asks for is sent exactly once.
  * - Errors are not presented here. A failed request (400 APP0400 for an
  *   unknown sort or an over-long filter, 401, 500 DEM9999, or the synthetic
- *   DEM9999 of `api/client.ts`) is passed unchanged to `onError` once and
- *   exposed as `error`; the picker shows it through `errors/useProblemPresenter`.
+ *   DEM9999 of `api/client.ts`) is passed unchanged to the latest `onError`
+ *   once, and exposed as `error`; the picker shows it through
+ *   `errors/useProblemPresenter`. `onError` is called only while the failed
+ *   request is still the current one and the hook is still mounted. A request
+ *   made obsolete before it failed (by `clear`, by a newer `search`, or by
+ *   the picker closing and unmounting the hook) reports nothing, so it can
+ *   neither publish an alert over the screen beneath nor move focus in a
+ *   newer list. The 401 handling of `api/client.ts` sits below this hook and
+ *   signs out on every 401, current or not.
  *
  * Constraints:
  * - Layer rule: imports come only from `react`, `@tanstack/react-query` and
@@ -45,8 +59,10 @@
  *   `api/states` aliases. Nothing here renders, holds message text or touches
  *   the DOM.
  * - React rules: no effect sets state and no ref is read or written during
- *   render; `search` and `clear` use the functional state updater only, so
- *   their identities are stable for the lifetime of the component.
+ *   render. The refs are written by `search` and `clear` and by effects that
+ *   only assign them, and read in the query function; `search` and `clear`
+ *   depend on refs and state setters only, so their identities are stable
+ *   for the lifetime of the component.
  * - Requires a `QueryClientProvider` above the calling component.
  *
  * @example
@@ -62,7 +78,7 @@
  * // F5 empties the list:          clear();
  * ```
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { skipToken, useQuery } from '@tanstack/react-query';
 import { statesApi } from '../../api/states';
 import type { StateResponse, StateSort } from '../../api/states';
@@ -86,8 +102,11 @@ export interface UseStatesOptions {
    */
   initial?: StateQuery | null;
   /**
-   * Called once for each failed request, with the rejection unchanged
-   * (normally an `ApiError`). Not called for a request that succeeds.
+   * Called once for each failed request that is still the current one, with
+   * the rejection unchanged (normally an `ApiError`). The callback of the
+   * latest render is used. Not called for a request that succeeds, nor for
+   * one that `clear`, a newer `search` or unmounting made obsolete before it
+   * failed.
    */
   onError?: (error: unknown) => void;
 }
@@ -120,8 +139,10 @@ export interface UseStatesResult {
  * The hook's only state.
  *
  * - `query`: the current query, or `null` when there is none.
- * - `seq`: bumped by every `search` and never decreased, so a query key is
- *   never reused within a hook instance and an unchanged filter still fetches.
+ * - `seq`: the sequence number of the last `search` (0 for the query issued
+ *   on mount). Numbers come from a counter that only increases, so a query
+ *   key is never reused within a hook instance and an unchanged filter still
+ *   fetches.
  */
 type HookState = { query: StateQuery | null; seq: number };
 
@@ -136,6 +157,28 @@ const EMPTY = Object.freeze<StateResponse[]>([]) as StateResponse[];
 /** The first element of every state-list query key. */
 const QUERY_SCOPE = 'states';
 
+/**
+ * The last identity {@link nextInstanceId} issued. Module state, written only
+ * by that function, which runs once per mounted hook instance.
+ */
+let lastInstanceId = 0;
+
+/**
+ * A new hook instance identity, unique for the life of the page: each
+ * opening of the picker takes its own. `useId` is not used: React promises
+ * its value unique only among the components mounted together (and derives
+ * it from the position in the tree when it hydrates markup), not a new value
+ * for every mount, which a reopened picker needs. It is a number, so the
+ * query key stays JSON-hashable.
+ *
+ * Called only as the lazy initialiser of the hook's identity state, once per
+ * mount; StrictMode's second call merely skips a number.
+ */
+function nextInstanceId(): number {
+  lastInstanceId += 1;
+  return lastInstanceId;
+}
+
 // ---------------------------------------------------------------------------
 // The hook
 // ---------------------------------------------------------------------------
@@ -147,19 +190,47 @@ const QUERY_SCOPE = 'states';
  * @returns the current rows and status, plus `search` and `clear`
  */
 export function useStates(options?: UseStatesOptions): UseStatesResult {
-  const [{ query, seq }, setState] = useState<HookState>(() => ({
-    query: options?.initial ?? null,
-    seq: 0,
-  }));
+  const initial = options?.initial ?? null;
+  const [{ query, seq }, setState] = useState<HookState>(() => ({ query: initial, seq: 0 }));
   const onError = options?.onError;
+  // This mount's own part of every query key ({@link nextInstanceId}), so a
+  // reopened picker never shares a cache entry, or an in-flight request whose
+  // failure only its closed predecessor could report, with an earlier opening.
+  const [instance] = useState(nextInstanceId);
+
+  // Read only in handlers and in the query function, never during render.
+  // `seqRef`: the last sequence number handed out; only `search` advances it.
+  const seqRef = useRef(0);
+  // `currentRef`: the sequence number of the request whose failure may still
+  // be reported, or `null` when there is none (after `clear`, or before the
+  // first `search` without an initial query). Written only by `search` and
+  // `clear`; the argument is used on mount only, as `initial` is.
+  const currentRef = useRef<number | null>(initial === null ? null : 0);
+  const mountedRef = useRef(true);
+  const onErrorRef = useRef(onError);
+
+  // Keep the latest callback for failures that arrive later; this effect only assigns the ref.
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
+  // Failures arriving after unmount reach no callback. Setting true again on
+  // mount keeps StrictMode's simulated unmount and remount working.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const { data, error, isFetching } = useQuery({
-    queryKey: [QUERY_SCOPE, query?.nameContains ?? null, query?.sort ?? null, seq],
+    queryKey: [QUERY_SCOPE, instance, query?.nameContains ?? null, query?.sort ?? null, seq],
     enabled: query !== null,
-    // `query` is a const of this render, so the function below sees it
-    // narrowed to non-null; react-query runs the function of the render that
-    // changed the key, so it always fetches the query that key describes.
-    // `skipToken` keeps the type honest for the cleared state, which
+    // `query` and `seq` are consts of this render, so the function below sees
+    // `query` narrowed to non-null; react-query runs the function of the
+    // render that changed the key, and `seq` is part of that key, so it
+    // always fetches the query that key describes and knows which request it
+    // is. `skipToken` keeps the type honest for the cleared state, which
     // `enabled: false` already never fetches.
     queryFn:
       query === null
@@ -168,7 +239,12 @@ export function useStates(options?: UseStatesOptions): UseStatesResult {
             try {
               return await statesApi.list(query.nameContains, query.sort);
             } catch (failure) {
-              onError?.(failure);
+              // Reported only while this is still the current request of a
+              // mounted hook; rethrown either way, so react-query records the
+              // failure in this request's own cache entry.
+              if (mountedRef.current && currentRef.current === seq) {
+                onErrorRef.current?.(failure);
+              }
               throw failure;
             }
           },
@@ -179,10 +255,14 @@ export function useStates(options?: UseStatesOptions): UseStatesResult {
   });
 
   const search = useCallback((nameContains: string, sort: StateSort): void => {
-    setState((prev) => ({ query: { nameContains, sort }, seq: prev.seq + 1 }));
+    seqRef.current += 1;
+    const next = seqRef.current;
+    currentRef.current = next;
+    setState({ query: { nameContains, sort }, seq: next });
   }, []);
 
   const clear = useCallback((): void => {
+    currentRef.current = null;
     setState((prev) => ({ query: null, seq: prev.seq }));
   }, []);
 

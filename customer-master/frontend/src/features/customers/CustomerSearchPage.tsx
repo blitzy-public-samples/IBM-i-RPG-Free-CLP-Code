@@ -40,7 +40,8 @@
  *   (Maintenance) opens the change window and `5` (any mode) the display
  *   window, one at a time, each option cleared once its window closes and a
  *   saved row updated in place; any other entry is DEM0004 with the option
- *   typed, its input marked reverse image; a blank clears an earlier error.
+ *   typed, its input marked reverse image and described by that alert's
+ *   text, which outlasts the alert; a blank clears an earlier error.
  *   With options processed the page of the first invalid option is shown and
  *   its input focused, else the page of the last processed option. With
  *   nothing to process the last page loaded so far is shown (the preserved
@@ -70,8 +71,11 @@
  * scopes on top when they open, so only the topmost window receives keys.
  * Rows are keyed by customer id, so a page change unmounts the field that
  * had focus: when focus was lost that way, it follows to the first row of the
- * new page (the 5250 cursor on the first record of the page, SFLRCDNBR
- * CURSOR), and a new search or F5 moves it to the Name filter. The Name
+ * page the key asked for (the 5250 cursor on the first record of the page,
+ * SFLRCDNBR CURSOR). Each such request names its destination page and waits
+ * until that page is the one shown, so it is never spent on the rows of a
+ * page about to be replaced, and a later key's request replaces it. A new
+ * search or F5 moves focus to the Name filter. The Name
  * filter receives focus on open: Inquiry positions the cursor there
  * explicitly (SC_NAME_PC, :745-748) and in the other modes it is the first
  * input field, where the 5250 cursor lands by default.
@@ -81,6 +85,28 @@
  * highlights and focuses the filter it names (DEM0007 on State). The client
  * raised DEM0003, DEM0004 and DEM0005 come from the message catalog. The
  * strings below are screen labels and key legends only.
+ *
+ * List status. One polite live region under the table (`aria-live="polite"`,
+ * `aria-atomic="true"`; not `role="status"`, which is the toast host's)
+ * announces the list's state as screen labels, never as toasts: "Searching..."
+ * while a first page loads; with a list, a visually hidden summary of the page
+ * shown ("Page 2, rows 13 to 23.") before the visible SFLEND indicator
+ * "More..." or "Bottom"; and "Loading next page..." while PageDown fetches.
+ * A pending request shows its label and marks the table `aria-busy` only
+ * while it can change the page shown: a first page always; a next page only
+ * while the deepest loaded page is shown, the page that load continues (a
+ * PageDown there joins it). After a PageUp the load runs on unannounced,
+ * since the page shown already has its next page, and paging back to the
+ * deepest page before it arrives shows the label and `aria-busy` again.
+ * With no list the region shows nothing (ERASE(SFL)); DEM0002 and DEM0006
+ * stay status toasts.
+ *
+ * Pending requests. No key or button is disabled while a request is pending,
+ * and each key and its legend button run the same handler. A newer command
+ * supersedes a pending one: a search, F9 or F5 starts a new list generation,
+ * so only that list's responses are shown, and a later page change supersedes
+ * a page load still pending (the hook's navigation token), so the late page
+ * never replaces the page the user moved to.
  *
  * Layer rule: imports come only from `api/` (types), `errors/`,
  * `components/`, `keyboard/`, `messages/`, `auth/`, `features/states/` and
@@ -250,9 +276,19 @@ interface DetailRequest {
 }
 
 /**
- * A request to focus a row's option field once its page is rendered: the
- * given customer's row, or (`custId` null) the first row of the page shown.
- * `seq` makes every request distinct, so each is honoured exactly once.
+ * Where a focus request lands: one customer's row, on whichever page holds
+ * it, or the first row of the page with a 0-based index, the page a key asked
+ * to show.
+ */
+type FocusTarget = { readonly custId: string } | { readonly page: number };
+
+/**
+ * A request to focus a row's option field once its page is rendered. A
+ * customer's row is focused once its input exists. A page's first row is
+ * focused only once that page is the one shown: until then (its rows not yet
+ * rendered) the request waits, and it never lands on the rows of a page shown
+ * meanwhile. `seq` makes every request distinct, so each is honoured exactly
+ * once and a newer request replaces one still waiting.
  *
  * `onlyIfLost` makes the move conditional: it happens only when focus was
  * lost, because the field that had it was on the page just replaced (rows are
@@ -262,7 +298,7 @@ interface DetailRequest {
  */
 interface FocusRequest {
   seq: number;
-  custId: string | null;
+  target: FocusTarget;
   onlyIfLost: boolean;
 }
 
@@ -329,6 +365,18 @@ function toSummary(saved: CustomerResponse): CustomerSummaryResponse {
   };
 }
 
+/**
+ * The visually hidden summary of the page shown, read with the SFLEND
+ * indicator: its 1-based number and its rows' range over the loaded list,
+ * such as "Page 2, rows 13 to 23.".
+ */
+function describePage(pages: readonly CustomerSummaryResponse[][], position: number): string {
+  const before = pages.slice(0, position).reduce((count, items) => count + items.length, 0);
+  const shown = pages[position]?.length ?? 0;
+  const number = position + 1;
+  return shown === 0 ? `Page ${number}.` : `Page ${number}, rows ${before + 1} to ${before + shown}.`;
+}
+
 // ---------------------------------------------------------------------------
 // The panel
 // ---------------------------------------------------------------------------
@@ -336,7 +384,8 @@ function toSummary(saved: CustomerResponse): CustomerSummaryResponse {
 /**
  * The customer search screen body, shared by the `/customers` page and the
  * Customer picker: header, criteria, options line, one page of results, the
- * paging indicator, the footer and the key legend, plus the detail window
+ * list status (paging indicator and pending labels), the footer and the key
+ * legend, plus the detail window
  * and the State picker it opens. Owns the search state and the one key scope
  * of the screen.
  */
@@ -360,8 +409,10 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   // The text in each row's Opt field (SF_OPT), kept across paging as the
   // subfile kept it, and dropped whenever the list is cleared (SflClear).
   const [options, setOptions] = useState<Record<string, string>>({});
-  // Rows whose option the last Enter rejected: DSPATR(RI), indicator 81.
-  const [invalid, setInvalid] = useState<Record<string, boolean>>({});
+  // Rows whose option the last Enter rejected (DSPATR(RI), indicator 81),
+  // each with the DEM0004 text it was rejected with, which stays its input's
+  // description after the alert clears.
+  const [invalid, setInvalid] = useState<Record<string, string>>({});
   // The detail window shown, if any (CustDsp).
   const [detail, setDetail] = useState<DetailRequest | null>(null);
   // Whether the State prompt (PmtState) is open.
@@ -439,13 +490,13 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   }
 
   /**
-   * Asks for a row's option field (or, with null, the first row's on the page
-   * shown) to be focused once rendered; with `onlyIfLost`, only when focus has
-   * fallen to the page body by then.
+   * Asks for a row's option field to be focused once rendered: the row of
+   * `{ custId }`, or the first row of `{ page }` once that page is shown; with
+   * `onlyIfLost`, only when focus has fallen to the page body by then.
    */
-  function requestRowFocus(custId: string | null, onlyIfLost: boolean): void {
+  function requestRowFocus(target: FocusTarget, onlyIfLost: boolean): void {
     focusSeqRef.current += 1;
-    setFocusRequest({ seq: focusSeqRef.current, custId, onlyIfLost });
+    setFocusRequest({ seq: focusSeqRef.current, target, onlyIfLost });
   }
 
   // --- The list --------------------------------------------------------------
@@ -458,6 +509,11 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     onError: (error) => present(error, { setFieldErrors: showFilterErrors, focusField: focusFilter }),
   });
 
+  /** The index of the last page loaded so far, the page `list.toLastLoaded()` shows. */
+  function lastLoadedPage(): number {
+    return Math.max(list.pages.length - 1, 0);
+  }
+
   // The cursor on open: the Name filter (SC_NAME_PC in Inquiry, :745-748;
   // the first input field otherwise). This effect only moves focus; inside a
   // picker the Dialog's own initial focus lands on the same field.
@@ -467,15 +523,23 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
 
   // Honours a focus request once the row it names is rendered: rows are keyed
   // by customer id, so a page change replaces the inputs and the target only
-  // exists after the render that shows its page. Each request is honoured
-  // once; one whose page has no rows is dropped. This effect only moves focus.
+  // exists after the render that shows its page. A page's first row is looked
+  // up only while that very page is shown, so a render that still shows the
+  // page being left (the page asked for still loading, or its rows not yet
+  // rendered) leaves the request waiting. Each request is honoured once; one
+  // whose page has no rows is dropped. This effect only moves focus.
   useEffect(() => {
     if (focusRequest === null || focusRequest.seq === handledFocusRef.current) {
       return;
     }
-    const target = focusRequest.custId ?? list.page[0]?.custId;
-    const input = target === undefined ? undefined : optionInputs.current.get(target);
-    if (target !== undefined && input === undefined) {
+    const { target } = focusRequest;
+    if ('page' in target && list.position !== target.page) {
+      // The page asked for is not shown yet; the render that shows it runs this again.
+      return;
+    }
+    const custId = 'custId' in target ? target.custId : list.page[0]?.custId;
+    const input = custId === undefined ? undefined : optionInputs.current.get(custId);
+    if (custId !== undefined && input === undefined) {
       // Its page is not on screen yet; the render that shows it runs this again.
       return;
     }
@@ -483,7 +547,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     if (input !== undefined && (!focusRequest.onlyIfLost || isFocusLost())) {
       input.focus();
     }
-  }, [focusRequest, list.page]);
+  }, [focusRequest, list.page, list.position]);
 
   /** Forgets the typed options and their errors (the SflClear half of the source). */
   function clearOptions(): void {
@@ -514,29 +578,33 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   /**
    * Ends an option walk: one DEM0004 per rejected option in list order,
    * published now so no interaction inside an earlier window cleared them;
-   * the rejected inputs marked; and the cursor positioned, on the first
-   * rejected option when there is one (its field always takes focus,
-   * DSPATR(PC)), else on the last option run (its field takes focus only when
-   * the element a closed window returned focus to has left with its page).
+   * the rejected inputs marked and described by the same texts; and the
+   * cursor positioned, on the first rejected option when there is one (its
+   * field always takes focus, DSPATR(PC)), else on the last option run (its
+   * field takes focus only when the element a closed window returned focus to
+   * has left with its page).
    */
   function finishWalk(walk: OptionWalk): void {
-    for (const entry of walk.rejected) {
-      publish({ kind: 'alert', text: format('DEM0004', [entry.option]) });
+    // One catalog text per rejected option: alerted now, and kept as the
+    // description of its input while that input stays marked.
+    const errors = walk.rejected.map((entry) => [entry.custId, format('DEM0004', [entry.option])] as const);
+    for (const [, text] of errors) {
+      publish({ kind: 'alert', text });
     }
-    setInvalid(Object.fromEntries(walk.rejected.map((entry) => [entry.custId, true])));
+    setInvalid(Object.fromEntries(errors));
     const first = walk.rejected[0];
     if (first !== undefined) {
       list.showPageOf(first.custId);
-      requestRowFocus(first.custId, false);
+      requestRowFocus({ custId: first.custId }, false);
       return;
     }
     if (walk.lastProcessed !== null) {
       list.showPageOf(walk.lastProcessed);
-      requestRowFocus(walk.lastProcessed, true);
+      requestRowFocus({ custId: walk.lastProcessed }, true);
       return;
     }
     list.toLastLoaded();
-    requestRowFocus(null, true);
+    requestRowFocus({ page: lastLoadedPage() }, true);
   }
 
   /**
@@ -601,7 +669,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
       // source defect, :506-513).
       setInvalid({});
       list.toLastLoaded();
-      requestRowFocus(null, true);
+      requestRowFocus({ page: lastLoadedPage() }, true);
       return;
     }
 
@@ -734,20 +802,23 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   /**
    * PageDown (:287-299): the next page, loaded when needed. With no list,
    * DEM0003; at the 9,999-row cap the hook re-sends DEM0006 and the page
-   * stays; at the bottom the page stays. Focus that was on the page left
-   * behind follows to the first row of the new page.
+   * stays; at the bottom the page stays, as it does when a newer key took
+   * over while the page loaded. Focus that was on the page left behind
+   * follows to the first row of the new page, once that page is shown.
    */
   function pageDown(): void {
     if (!list.hasList) {
       keyNotActive();
       return;
     }
+    // The page after the one shown now: where 'moved' and 'loaded' both land.
+    const destination = list.position + 1;
     list.next().then(
       (outcome) => {
         if (outcome === 'none') {
           keyNotActive();
         } else if (outcome === 'moved' || outcome === 'loaded') {
-          requestRowFocus(null, true);
+          requestRowFocus({ page: destination }, true);
         }
       },
       (error: unknown) => present(error),
@@ -763,8 +834,9 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
       keyNotActive();
       return;
     }
+    const destination = list.position - 1;
     if (list.previous()) {
-      requestRowFocus(null, true);
+      requestRowFocus({ page: destination }, true);
     }
   }
 
@@ -813,6 +885,12 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     };
   }
 
+  // The pending states the page shown waits on (see "List status" above): a
+  // first page, or the next page of the deepest loaded page while that page
+  // is the one shown.
+  const searching = list.loading && !list.loadingNext;
+  const loadingNextInView = list.loadingNext && list.position === lastLoadedPage();
+
   return (
     // tabIndex -1: the section is the key scope's container, so a click on
     // its plain text gives it focus and Enter stays a command there; it is
@@ -838,9 +916,27 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
         onOptionChange={changeOption}
         onAction={runAction}
         optionRef={optionRef}
+        busy={searching || loadingNextInView}
       />
-      {/* SFLEND(*MORE); nothing while the subfile holds no records (ERASE(SFL), PMTCUSTD :84-88). */}
-      {list.hasList ? <p className="paging-indicator">{list.more ? 'More...' : 'Bottom'}</p> : null}
+      {/*
+        The list's one polite live region, always present so every change of
+        its whole text is announced. SFLEND(*MORE) after the hidden page
+        summary; nothing while the subfile holds no records (ERASE(SFL),
+        PMTCUSTD :84-88). A pending label shows only while its request can
+        change the page shown: "Searching..." for a first page, and "Loading
+        next page..." only while the deepest loaded page, whose next page is
+        loading, is shown.
+      */}
+      <div aria-live="polite" aria-atomic="true">
+        {list.hasList ? (
+          <p className="paging-indicator">
+            <span className="visually-hidden">{describePage(list.pages, list.position)}</span>{' '}
+            {list.more ? 'More...' : 'Bottom'}
+          </p>
+        ) : null}
+        {searching ? <p className="paging-indicator">Searching...</p> : null}
+        {loadingNextInView ? <p className="paging-indicator">Loading next page...</p> : null}
+      </div>
       <p className="footer-brand">Demo Corp of America</p>
       <FunctionKeyBar keys={keys} />
       <CustomerDetailDialog

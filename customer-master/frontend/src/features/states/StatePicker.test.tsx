@@ -30,6 +30,17 @@
  *   no request (PMTSTATER:334-341).
  * - **F3, F12 and Escape** cancel without a code (PMTSTATER:252-255); a key
  *   PMTSTATED does not enable shows DEM0003 (:281-282).
+ * - **List status.** One polite, atomic live region (not the toast host's
+ *   `status` role) shows "Loading..." while a request is pending, with the
+ *   table `aria-busy`; a hidden summary of the page in view beside
+ *   More.../Bottom once rows are shown, changed by a filter, PageUp,
+ *   PageDown, Enter and F7; "No states match." for a filter that matched
+ *   nothing; "States not loaded." after a failure, whose problem is the one
+ *   alert; and nothing after F5.
+ * - **Obsolete requests.** A request failing after the window closed, after
+ *   F5, or after a newer Enter replaced it shows no alert, marks nothing and
+ *   moves no focus; a reopened window sends its own request; a current
+ *   failure is still presented exactly once.
  *
  * Fixtures. The rows are the 58 STATES rows of 5250_Subfile/States.sql as
  * served by the default `GET /api/states` handler of `src/test/handlers.ts`.
@@ -50,7 +61,7 @@
  * the catalog has loaded (until then `format` returns the bare code).
  */
 import type { ReactNode } from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -59,15 +70,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { http, HttpResponse } from 'msw/http';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Mock } from 'vitest';
+import type { Mock, MockInstance } from 'vitest';
 import { setCredentials } from '../../api/client';
+import { ApiError } from '../../api/problem';
 import { statesApi } from '../../api/states';
 import type { StateResponse, StateSort } from '../../api/states';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider, useToasts } from '../../components/ToastRegion';
 import { KeyScopeProvider } from '../../keyboard/KeyScopeProvider';
 import { MessageCatalogProvider, useMessages } from '../../messages/MessageCatalogProvider';
-import { messageText, states, users } from '../../test/handlers';
+import { messageText, problem, requestNotValid, states, users } from '../../test/handlers';
 import { server } from '../../test/server';
 import { StatePicker } from './StatePicker';
 import type { StatePickerProps } from './StatePicker';
@@ -93,6 +105,15 @@ const TABLE_NAME = 'USA states';
 
 /** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
+
+/** The list status line while a request is pending. */
+const LOADING_LABEL = 'Loading...';
+
+/** The list status line when the applied filter matched no state. */
+const NO_MATCH_LABEL = 'No states match.';
+
+/** The list status line after a failed request. */
+const FAILED_LABEL = 'States not loaded.';
 
 /**
  * The demo user with the MAINTENANCE role, as a State field of the detail
@@ -171,8 +192,12 @@ type PickerCallbacks = {
   onCancel: Mock<StatePickerProps['onCancel']>;
 };
 
-/** What {@link renderPicker} returns. */
-type PickerView = PickerCallbacks & { user: UserEvent };
+/**
+ * What {@link renderPicker} returns. `setOpen` re-renders the same providers
+ * with another `open` value, as a host closes the window after `onCancel` or
+ * opens it again with F4.
+ */
+type PickerView = PickerCallbacks & { user: UserEvent; setOpen(open: boolean): void };
 
 /**
  * Renders the picker inside the application's providers: a fresh query client
@@ -186,7 +211,7 @@ function renderPicker({ open = true }: { open?: boolean } = {}): PickerView {
   const onSelect = vi.fn<StatePickerProps['onSelect']>();
   const onCancel = vi.fn<StatePickerProps['onCancel']>();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const tree = (isOpen: boolean) => (
     <QueryClientProvider client={queryClient}>
       <MessageCatalogProvider>
         <ToastProvider>
@@ -194,15 +219,16 @@ function renderPicker({ open = true }: { open?: boolean } = {}): PickerView {
             <MemoryRouter>
               <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
                 <CatalogProbe />
-                <StatePicker open={open} onSelect={onSelect} onCancel={onCancel} />
+                <StatePicker open={isOpen} onSelect={onSelect} onCancel={onCancel} />
               </AuthProvider>
             </MemoryRouter>
           </KeyedScreens>
         </ToastProvider>
       </MessageCatalogProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { user, onSelect, onCancel };
+  const { rerender } = render(tree(open));
+  return { user, onSelect, onCancel, setOpen: (isOpen) => rerender(tree(isOpen)) };
 }
 
 /** Waits until the message catalog has loaded, so `format` yields texts rather than codes. */
@@ -258,6 +284,69 @@ function rowAt(rows: readonly StateResponse[], index: number): StateResponse {
 /** The shared alert region of the toast host, where DEM0003 and DEM0004 are published. */
 function alertRegion(): HTMLElement {
   return screen.getByRole('alert');
+}
+
+/** The shared status region of the toast host, where no picker label is ever published. */
+function statusToasts(): HTMLElement {
+  return screen.getByRole('status');
+}
+
+/**
+ * The window's list status line: its only live region, polite and atomic,
+ * and without the `status` role of the toast host. Fails the test unless the
+ * window holds exactly one such region.
+ */
+function statusLine(dialog: HTMLElement): HTMLElement {
+  const regions = Array.from(dialog.querySelectorAll<HTMLElement>('[aria-live]'));
+  expect(regions).toHaveLength(1);
+  const region = regions[0];
+  if (region === undefined) {
+    throw new Error('The picker renders no list status region');
+  }
+  expect(region).toHaveAttribute('aria-live', 'polite');
+  expect(region).toHaveAttribute('aria-atomic', 'true');
+  expect(region).not.toHaveAttribute('role');
+  return region;
+}
+
+/** A response the test holds back until it calls `release`. */
+type Gate = { promise: Promise<void>; release(): void };
+
+/** A closed {@link Gate}. */
+function gate(): Gate {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release: () => release() };
+}
+
+/**
+ * The 400 APP0400 the API answers for a rejected "Name Contains" entry. It
+ * names the filter, so presenting it alerts, marks the filter and focuses it.
+ */
+function filterProblem(): Response {
+  return requestNotValid(STATES_PATH, [{ field: 'nameContains', reason: 'nameContains is too long' }]);
+}
+
+/**
+ * Releases a held-back failing response and waits, inside `act`, until call
+ * `call` of the `statesApi.list` spy has rejected and React has rendered
+ * whatever that rejection caused. The hook attached its own handler to the
+ * call's promise when the request started, before this wait did, so that
+ * handler has run by the time the wait ends.
+ */
+async function failLate(held: Gate, list: MockInstance<typeof statesApi.list>, call: number): Promise<void> {
+  const result = list.mock.results[call];
+  if (result === undefined || result.type !== 'return') {
+    throw new Error(`statesApi.list call ${call + 1} returned no promise`);
+  }
+  await act(async () => {
+    held.release();
+    await expect(result.value).rejects.toBeInstanceOf(ApiError);
+    // One more macrotask, so nothing queued behind the rejection is left over.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +661,332 @@ describe('StatePicker', () => {
       expect(stateRequests).toHaveLength(1);
       expect(onSelect).not.toHaveBeenCalled();
       expect(onCancel).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('list status', () => {
+    it('shows "Loading..." with the table busy while the list loads, then the page summary beside More...', async () => {
+      const byName = await serverRows('', 'name');
+      expect(byName).toHaveLength(58);
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return HttpResponse.json(byName);
+          },
+          { once: true },
+        ),
+      );
+
+      renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      const status = statusLine(dialog);
+
+      expect(within(status).getByText(LOADING_LABEL)).toHaveClass('paging-indicator');
+      expect(table).toHaveAttribute('aria-busy', 'true');
+      expect(dataRows(table)).toEqual([]);
+      expect(within(dialog).queryByText(NO_MATCH_LABEL)).not.toBeInTheDocument();
+      expect(within(dialog).queryByText('More...')).not.toBeInTheDocument();
+
+      await act(async () => {
+        held.release();
+        await held.promise;
+      });
+
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
+      expect(table).toHaveAttribute('aria-busy', 'false');
+      // The same region, always rendered, now holds the summary and SFLEND.
+      expect(statusLine(dialog)).toBe(status);
+      expect(within(status).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toHaveClass('visually-hidden');
+      expect(within(status).getByText('More...')).toHaveClass('paging-indicator');
+      expect(within(status).queryByText(LOADING_LABEL)).not.toBeInTheDocument();
+      expect(requestedQueries()).toEqual([{ nameContains: '', sort: 'name' }]);
+      expect(statusToasts()).toBeEmptyDOMElement();
+    });
+
+    it('a filter matching no state shows "No states match."; F5 then shows nothing and sends no request', async () => {
+      expect(await serverRows('ZZZ', 'name')).toEqual([]);
+
+      const { user, dialog, table, filter } = await openPicker();
+      const status = statusLine(dialog);
+
+      await user.type(filter, 'zzz');
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(within(status).getByText(NO_MATCH_LABEL)).toHaveClass('paging-indicator'));
+      expect(table).toHaveAttribute('aria-busy', 'false');
+      expect(dataRows(table)).toEqual([]);
+      for (const label of [LOADING_LABEL, FAILED_LABEL, 'More...', 'Bottom']) {
+        expect(within(status).queryByText(label)).not.toBeInTheDocument();
+      }
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: 'ZZZ', sort: 'name' },
+      ]);
+      // A screen label, never a message: both toast regions stay empty.
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(statusToasts()).toBeEmptyDOMElement();
+
+      await user.keyboard('{F5}');
+
+      // F5's blank list is intentional (PMTSTATER:257-260), so no label says otherwise.
+      expect(statusLine(dialog)).toBe(status);
+      expect(status).toBeEmptyDOMElement();
+      expect(dataRows(table)).toEqual([]);
+      expect(filter).toHaveValue('');
+      expect(stateRequests).toHaveLength(2);
+    });
+
+    it('a failed load shows one alert with the problem and "States not loaded.", never "No states match."', async () => {
+      const text = messageText('DEM9999');
+      expect(text).toBe('Program Error! Please contact IT now.');
+      server.use(http.get(STATES_PATH, () => problem(500, 'DEM9999', { instance: STATES_PATH })));
+
+      renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      const status = statusLine(dialog);
+
+      await waitFor(() => expect(within(status).getByText(FAILED_LABEL)).toHaveClass('paging-indicator'));
+      expect(within(alertRegion()).getAllByText(text)).toHaveLength(1);
+      expect(alertRegion().children).toHaveLength(1);
+      expect(within(status).queryByText(NO_MATCH_LABEL)).not.toBeInTheDocument();
+      expect(within(status).queryByText(LOADING_LABEL)).not.toBeInTheDocument();
+      // The label is neither the problem text nor a toast.
+      expect(within(status).queryByText(text)).not.toBeInTheDocument();
+      expect(statusToasts()).toBeEmptyDOMElement();
+      expect(table).toHaveAttribute('aria-busy', 'false');
+      expect(dataRows(table)).toEqual([]);
+      expect(stateRequests).toHaveLength(1);
+    });
+
+    it('the page summary follows PageDown, PageUp, Enter on the last page, F7 and each applied filter', async () => {
+      const byName = await serverRows('', 'name');
+      expect(byName).toHaveLength(58);
+
+      const { user, dialog, filter } = await openPicker();
+      const status = statusLine(dialog);
+      const summary = (text: string) => within(status).getByText(text);
+
+      expect(summary('Showing 1 to 6 of 58 states, sorted by Name.')).toHaveClass('visually-hidden');
+
+      await user.keyboard('{PageDown}');
+      expect(summary('Showing 7 to 12 of 58 states, sorted by Name.')).toBeInTheDocument();
+      expect(within(status).getByText('More...')).toBeInTheDocument();
+
+      await user.keyboard('{PageUp}');
+      expect(summary('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument();
+
+      // Enter with nothing to do: the last page starts at row ((58 - 1) div 6) × 6 + 1 = 55.
+      await user.keyboard('{Enter}');
+      expect(summary('Showing 55 to 58 of 58 states, sorted by Name.')).toBeInTheDocument();
+      expect(within(status).getByText('Bottom')).toBeInTheDocument();
+
+      await user.keyboard('{F7}');
+      await waitFor(() => expect(summary('Showing 1 to 6 of 58 states, sorted by Code.')).toBeInTheDocument());
+      expect(within(status).getByText('More...')).toBeInTheDocument();
+
+      await user.type(filter, 'car');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(summary('Showing 1 to 2 of 2 states, sorted by Code.')).toBeInTheDocument());
+      expect(within(status).getByText('Bottom')).toBeInTheDocument();
+
+      await user.clear(filter);
+      await user.type(filter, 'york');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(summary('Showing 1 of 1 state, sorted by Code.')).toBeInTheDocument());
+      expect(statusLine(dialog)).toBe(status);
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: '', sort: 'code' },
+        { nameContains: 'CAR', sort: 'code' },
+        { nameContains: 'YORK', sort: 'code' },
+      ]);
+    });
+  });
+
+  describe('obsolete requests', () => {
+    it('a request failing after the window closed shows no alert and moves no focus', async () => {
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return filterProblem();
+          },
+          { once: true },
+        ),
+      );
+      const list = vi.spyOn(statesApi, 'list');
+
+      const { user, setOpen, onCancel } = renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      await waitForCatalog();
+      expect(within(statusLine(dialog)).getByText(LOADING_LABEL)).toBeInTheDocument();
+      expect(list).toHaveBeenCalledTimes(1);
+
+      // F12, and the host closes the window, while the request is still pending.
+      await user.keyboard('{F12}');
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      setOpen(false);
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+      const focused = document.activeElement;
+
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(document.activeElement).toBe(focused);
+      expect(stateRequests).toHaveLength(1);
+    });
+
+    it('F5 during a pending request that then fails shows no alert, no label and no filter error', async () => {
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return filterProblem();
+          },
+          { once: true },
+        ),
+      );
+      const list = vi.spyOn(statesApi, 'list');
+
+      const { user } = renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      const filter = within(dialog).getByRole('textbox', { name: FILTER_NAME });
+      await waitForCatalog();
+      await waitFor(() => expect(filter).toHaveFocus());
+      const status = statusLine(dialog);
+      expect(within(status).getByText(LOADING_LABEL)).toBeInTheDocument();
+
+      await user.keyboard('{F5}');
+      expect(status).toBeEmptyDOMElement();
+      expect(table).toHaveAttribute('aria-busy', 'false');
+
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(status).toBeEmptyDOMElement();
+      expect(filter).not.toHaveAttribute('aria-invalid');
+      expect(filter).toHaveFocus();
+      expect(dataRows(table)).toEqual([]);
+      expect(stateRequests).toHaveLength(1);
+    });
+
+    it('a newer Enter replaces a pending request: its late failure shows no alert, marks nothing and moves no focus', async () => {
+      const news = await serverRows('NEW', 'name');
+      expect(news.map((row) => row.name)).toEqual(['New Hampshire', 'New Jersey', 'New Mexico', 'New York']);
+
+      const { user, dialog, table, filter } = await openPicker();
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return filterProblem();
+          },
+          { once: true },
+        ),
+      );
+      const list = vi.spyOn(statesApi, 'list');
+
+      await user.type(filter, 'car');
+      await user.keyboard('{Enter}');
+      expect(within(statusLine(dialog)).getByText(LOADING_LABEL)).toBeInTheDocument();
+      await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+
+      await user.clear(filter);
+      await user.type(filter, 'new');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(dataRows(table)).toEqual(news));
+
+      // Focus in the newer list, where presenting the old failure would take it away.
+      const option = within(dialog).getByRole('textbox', { name: `Option for ${rowAt(news, 3).name}` });
+      await user.click(option);
+      expect(option).toHaveFocus();
+
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(option).toHaveFocus();
+      expect(filter).not.toHaveAttribute('aria-invalid');
+      expect(dataRows(table)).toEqual(news);
+      expect(within(statusLine(dialog)).getByText('Showing 1 to 4 of 4 states, sorted by Name.')).toBeInTheDocument();
+      expect(within(dialog).queryByText(FAILED_LABEL)).not.toBeInTheDocument();
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: 'CAR', sort: 'name' },
+        { nameContains: 'NEW', sort: 'name' },
+      ]);
+    });
+
+    it('a reopened window sends its own request, and the closed one failing late shows nothing', async () => {
+      const byName = await serverRows('', 'name');
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return problem(500, 'DEM9999', { instance: STATES_PATH });
+          },
+          { once: true },
+        ),
+      );
+      const list = vi.spyOn(statesApi, 'list');
+
+      const { user, setOpen } = renderPicker();
+      const first = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      await waitForCatalog();
+      await user.keyboard('{F12}');
+      setOpen(false);
+      await waitFor(() => expect(first).not.toBeInTheDocument());
+
+      // Opened again while the first window's request is still pending.
+      setOpen(true);
+      const again = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(again).getByRole('table', { name: TABLE_NAME });
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: '', sort: 'name' },
+      ]);
+
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE));
+      expect(within(statusLine(again)).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument();
+    });
+
+    it('a current failure is still presented exactly once: one alert, the filter marked and focused', async () => {
+      const text = messageText('APP0400', ['nameContains is too long']);
+
+      const { user, dialog, table, filter } = await openPicker();
+      server.use(http.get(STATES_PATH, () => filterProblem(), { once: true }));
+
+      await user.type(filter, 'car');
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(within(statusLine(dialog)).getByText(FAILED_LABEL)).toBeInTheDocument());
+      expect(within(alertRegion()).getAllByText(text)).toHaveLength(1);
+      expect(alertRegion().children).toHaveLength(1);
+      expect(filter).toHaveAttribute('aria-invalid', 'true');
+      expect(filter).toHaveAccessibleDescription(text);
+      expect(filter).toHaveFocus();
+      expect(dataRows(table)).toEqual([]);
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: 'CAR', sort: 'name' },
+      ]);
     });
   });
 });

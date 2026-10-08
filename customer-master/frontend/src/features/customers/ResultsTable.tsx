@@ -12,7 +12,11 @@
  *                                               is a `useId()` prefix plus the
  *                                               row's `custId`, and a visually
  *                                               hidden `<label for>` in the same
- *                                               cell names it "Option for <name>"
+ *                                               cell names it "Option for <name>".
+ *                                               While invalid, `aria-describedby`
+ *                                               names a visually hidden element in
+ *                                               the cell, id `<input id>-error`,
+ *                                               holding the panel's DEM0004 text
  *   'Customer Name' + SF_NAME 40A             "Customer Name" column
  *   'City'          + SF_CITY 20A             "City" column
  *   'St'            + SF_STATE 2A             "St" column
@@ -40,17 +44,21 @@
  * Enter.
  *
  * Responsibilities stop at rendering and collecting input. The component
- * holds no state, fetches nothing, shows no message text and validates no
- * option: which options are valid in which mode, DEM0004 for an invalid one,
- * focusing the first invalid option (the source's indicator 82,
- * `DSPATR(PC)`), and uppercasing what is typed all belong to the panel that
- * owns `options` and `invalid`. Each typed value is reported unchanged
- * through `onOptionChange`. Names, cities and codes are rendered as plain
- * React text, so `NIBH L'LOR COMPANY` and `URNA \NUNC\ COMPANY` show exactly
- * as stored.
+ * holds no state, fetches nothing, has no message text of its own and
+ * validates no option: which options are valid in which mode, DEM0004 for an
+ * invalid one (its catalog text, which the panel also alerts, arrives in
+ * `invalid` and is only rendered here, so the rejection is still explained
+ * after the alert clears), focusing the first invalid option (the source's
+ * indicator 82, `DSPATR(PC)`), and uppercasing what is typed all belong to
+ * the panel that owns `options` and `invalid`. Each typed value is reported
+ * unchanged through `onOptionChange`. Names, cities, codes and the DEM0004
+ * texts are rendered as plain React text, so `NIBH L'LOR COMPANY` and
+ * `URNA \NUNC\ COMPANY` show exactly as stored.
  *
  * An empty `rows` renders the caption and the headings over an empty body;
- * whether to show the table at all is the panel's decision.
+ * whether to show the table at all is the panel's decision. While the panel
+ * loads rows, `busy` marks the table `aria-busy="true"`; the pending and page
+ * status text is the panel's own.
  *
  * @example
  * <ResultsTable
@@ -79,10 +87,13 @@ export interface ResultsTableProps {
   /** The text typed into each row's Opt input, keyed by `custId`; a missing key shows an empty field. */
   options: Record<string, string>;
   /**
-   * Rows whose option the panel rejected (DEM0004), keyed by `custId`. A
-   * `true` entry marks that row's Opt input `aria-invalid="true"`.
+   * Rows whose option the panel rejected, keyed by `custId`, each with the
+   * DEM0004 text the panel alerted for it. A non-empty entry marks that row's
+   * Opt input `aria-invalid="true"` and renders the text as the input's
+   * visually hidden description (`aria-describedby`), which stays while the
+   * entry does.
    */
-  invalid: Record<string, boolean>;
+  invalid: Record<string, string>;
   /**
    * The options the current mode offers, one action button each. Buttons are
    * always rendered in the order 1, 2, 5, whatever the order here.
@@ -99,6 +110,11 @@ export interface ResultsTableProps {
   optionRef?: (custId: string) => (el: HTMLInputElement | null) => void;
   /** Accessible table caption; visually hidden, as the 5250 screen shows none. Defaults to "Customers". */
   caption?: string;
+  /**
+   * The panel is loading rows for the table (a first page or the next one):
+   * `aria-busy="true"` on the table until they arrive. Defaults to false.
+   */
+  busy?: boolean;
 }
 
 /** The order the action buttons appear in, which is the option-code order of the source legends. */
@@ -131,6 +147,7 @@ export function ResultsTable({
   onAction,
   optionRef,
   caption = DEFAULT_CAPTION,
+  busy = false,
 }: ResultsTableProps) {
   // Opt input ids are `${idPrefix}-opt-${custId}`: unique per row, and per
   // table, so a Customer picker's table over the search page shares no id.
@@ -139,7 +156,7 @@ export function ResultsTable({
   const actions = OPTION_ORDER.filter((option) => allowedOptions.includes(option));
 
   return (
-    <table className="results-table">
+    <table className="results-table" aria-busy={busy ? 'true' : undefined}>
       <caption className="visually-hidden">{caption}</caption>
       <thead>
         <tr>
@@ -167,6 +184,9 @@ export function ResultsTable({
           const name = row.name ?? '';
           const inactive = row.active === INACTIVE;
           const optionId = `${idPrefix}-opt-${custId}`;
+          // The rejection text while the panel keeps the row marked; empty or absent is valid.
+          const error = invalid[custId] ?? '';
+          const errorId = `${optionId}-error`;
           return (
             <tr key={custId} className={inactive ? 'row--inactive' : undefined}>
               <td>
@@ -183,10 +203,17 @@ export function ResultsTable({
                   autoComplete="off"
                   value={options[custId] ?? ''}
                   onChange={(event) => onOptionChange(custId, event.target.value)}
-                  aria-invalid={invalid[custId] ? 'true' : undefined}
+                  aria-invalid={error !== '' ? 'true' : undefined}
+                  aria-describedby={error !== '' ? errorId : undefined}
                   ref={optionRef?.(custId)}
                   data-option-input=""
                 />
+                {/* The rejection, kept after its alert clears, so returning to the field explains it. */}
+                {error !== '' ? (
+                  <span id={errorId} className="visually-hidden">
+                    {error}
+                  </span>
+                ) : null}
               </td>
               {/*
                 The separating space of each hidden suffix is its own text node

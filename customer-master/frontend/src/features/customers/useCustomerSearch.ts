@@ -50,6 +50,20 @@
  *   `next`) or, for Inquiry's load on open (PMTCUSTR :252-256), from the
  *   lazily initialised request that `initial` seeds; the query fetches it on
  *   mount.
+ * - Paging while a page loads. No action is refused while a request is
+ *   pending, and the latest explicit navigation decides the page shown:
+ *   `search`, `reset`, `previous`, `toLastLoaded`, `showPageOf` and a
+ *   `next` that moves each take a new navigation token. A `next` load that
+ *   completes after any of them keeps its page with the loaded pages (the
+ *   cursor stack, so a later `next` reaches it with no request) but leaves
+ *   the page shown alone. A `next` at the deepest loaded page while that page
+ *   loads joins the load, with no second request, and asks for its page
+ *   again.
+ * - One list per instance. Every mounted instance (the search page, each
+ *   opening of a picker) keys its queries with an identity of its own, so
+ *   two panels showing the same criteria under one `QueryClient` never share
+ *   loaded pages, page loads or notices, and a reopened picker starts its
+ *   first search from page 1.
  * - Must run under a `QueryClientProvider`.
  * - Layer rule: imports only `api/customers`, React and TanStack Query.
  *
@@ -111,9 +125,14 @@ export interface UseCustomerSearchOptions {
  * What one PageDown ({@link UseCustomerSearchResult.next}) did:
  *
  * - `'moved'`: showed the next page, already loaded (no request);
- * - `'loaded'`: fetched the next page and showed it;
- * - `'bottom'`: no further rows, so the page stays; also when the fetch
- *   failed (the error went to `onError`) or the list was replaced meanwhile;
+ * - `'loaded'`: fetched the next page and showed it; a call made while that
+ *   page was loading joined the load and resolves the same way;
+ * - `'bottom'`: the page stays: no further rows; also when the fetch failed
+ *   (the error went to `onError`), the list was replaced meanwhile, or a
+ *   newer navigation (`previous`, `toLastLoaded`, `showPageOf`, a `next`
+ *   that moved) took over while the page loaded, in which case the fetched
+ *   page is kept with the loaded pages and a later `next` shows it with no
+ *   request;
  * - `'limit'`: the list stops at 9,999 rows; DEM0006 was sent to `onNotice`
  *   again (PMTCUSTR :290-292) and the page stays;
  * - `'none'`: there is no list (no rows loaded); the caller sends DEM0003
@@ -147,9 +166,17 @@ export interface UseCustomerSearchResult {
   pendingNewSearch: boolean;
   /** A request (first or next page) is in flight. */
   loading: boolean;
+  /**
+   * The request in flight is PageDown's next page ({@link next}); while
+   * {@link loading} is true and this is false, a first page is loading.
+   */
+  loadingNext: boolean;
   /** Starts a new list from its first page, even for criteria identical to {@link applied}. */
   search: (criteria: SearchCriteria) => void;
-  /** PageDown: shows the next page, loading it when needed. */
+  /**
+   * PageDown: shows the next page, loading it when needed. With `'moved'` or
+   * `'loaded'` the page shown is the one after the page shown at the call.
+   */
   next: () => Promise<NextOutcome>;
   /** PageUp: shows the previous loaded page; false at the first page or with no list. */
   previous: () => boolean;
@@ -180,15 +207,44 @@ interface SearchRequest {
 /** The pages of one list and the cursor each was requested with (`null` for the first page). */
 type SearchData = InfiniteData<SearchResponse, string | null>;
 
-/** Query key of one list; `undefined` members while no list is requested (the query is then disabled). */
-type SearchQueryKey = readonly ['customers', 'search', SearchCriteria | undefined, number | undefined];
+/**
+ * Query key of one list: the identity of the hook instance that owns it
+ * ({@link nextInstanceId}), then its criteria and generation. `undefined`
+ * members while no list is requested (the query is then disabled).
+ */
+type SearchQueryKey = readonly ['customers', 'search', number, SearchCriteria | undefined, number | undefined];
 
 /** Shared empty values, so an empty list keeps a stable identity across renders. */
 const EMPTY_PAGE: CustomerSummaryResponse[] = [];
 const EMPTY_OVERRIDES: ReadonlyMap<string, CustomerSummaryResponse> = new Map();
 
-function searchQueryKey(request: SearchRequest | null): SearchQueryKey {
-  return ['customers', 'search', request?.criteria, request?.generation];
+/**
+ * The last identity {@link nextInstanceId} issued. Module state, written only
+ * by that function, which runs once per mounted hook instance.
+ */
+let lastInstanceId = 0;
+
+/**
+ * A new hook instance identity, unique for the life of the page. Each
+ * mounted instance (a search page, one opening of a picker) takes its own.
+ * Generations count from zero in every instance, so without it two lists
+ * with the same criteria and generation would share one query, its loaded
+ * pages and its page loads. `useId` is not used: React promises its value
+ * unique only among the components mounted together (and derives it from the
+ * position in the tree when it hydrates markup), not a new value for every
+ * mount, which a reopened picker needs. It is a number, so the query key
+ * stays JSON-hashable.
+ *
+ * Called only as the lazy initialiser of the hook's identity state, once per
+ * mount; StrictMode's second call merely skips a number.
+ */
+function nextInstanceId(): number {
+  lastInstanceId += 1;
+  return lastInstanceId;
+}
+
+function searchQueryKey(instanceId: number, request: SearchRequest | null): SearchQueryKey {
+  return ['customers', 'search', instanceId, request?.criteria, request?.generation];
 }
 
 /**
@@ -216,6 +272,9 @@ function browsablePages(data: SearchData | undefined): SearchResponse[] {
 export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustomerSearchResult {
   const { initial = null, onNotice, onError } = options;
 
+  // This instance's identity, fixed for its lifetime and part of every query
+  // key it uses, so two panels, or two openings of a picker, never share a list.
+  const [instanceId] = useState(nextInstanceId);
   // The list requested; seeded from `initial` so Inquiry loads on open without an effect.
   const [request, setRequest] = useState<SearchRequest | null>(() =>
     initial === null ? null : { criteria: { ...initial }, generation: 0 },
@@ -229,7 +288,12 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
   const callbacksRef = useRef({ onNotice, onError });
+  // The navigation token: every action that sets the page shown takes the next one.
+  const navigationRef = useRef(0);
   const nextInFlightRef = useRef<Promise<NextOutcome> | null>(null);
+  // The token of the latest PageDown waiting for the load in flight; the
+  // loaded page is shown only while no other navigation has taken a newer one.
+  const nextNavigationRef = useRef(0);
 
   // Keep the latest callbacks for responses that arrive later; this effect only assigns the ref.
   useEffect(() => {
@@ -246,9 +310,9 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   }, []);
 
   const query = useInfiniteQuery<SearchResponse, DefaultError, SearchData, SearchQueryKey, string | null>({
-    queryKey: searchQueryKey(request),
+    queryKey: searchQueryKey(instanceId, request),
     queryFn: async ({ queryKey, pageParam }): Promise<SearchResponse> => {
-      const [, , criteria, generation] = queryKey;
+      const [, , , criteria, generation] = queryKey;
       if (criteria === undefined || generation === undefined) {
         // The query is disabled without a request, so this cannot be reached.
         throw new Error('useCustomerSearch: no search is requested');
@@ -286,7 +350,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     gcTime: 0,
   });
 
-  const { data, isError, isFetching, fetchNextPage } = query;
+  const { data, isError, isFetching, isFetchingNextPage, fetchNextPage } = query;
 
   const browsable = useMemo(() => browsablePages(data), [data]);
   const pages = useMemo(
@@ -312,6 +376,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
 
   const search = useCallback((criteria: SearchCriteria) => {
     generationRef.current += 1;
+    navigationRef.current += 1;
     nextInFlightRef.current = null;
     setRequest({ criteria: { ...criteria }, generation: generationRef.current });
     setPositionIndex(0);
@@ -320,6 +385,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
 
   const reset = useCallback(() => {
     generationRef.current += 1;
+    navigationRef.current += 1;
     nextInFlightRef.current = null;
     setRequest(null);
     setPositionIndex(0);
@@ -327,18 +393,23 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   }, []);
 
   const next = useCallback((): Promise<NextOutcome> => {
-    // A PageDown while the next page loads waits for that load, as the
-    // workstation inhibits input while the program runs; it loads nothing more.
-    const inFlight = nextInFlightRef.current;
-    if (inFlight !== null) {
-      return inFlight;
-    }
     if (!hasList || deepest === undefined) {
       return Promise.resolve('none');
     }
     if (position < pageCount - 1) {
+      // Also while a load is in flight: a PageUp may have left loaded pages
+      // after the one shown, and this newer navigation takes over from it.
+      navigationRef.current += 1;
       setPositionIndex(position + 1);
       return Promise.resolve('moved');
+    }
+    // At the deepest loaded page while its successor loads: this PageDown
+    // joins that load and requests nothing more, and as the latest navigation
+    // it has the page shown when it arrives.
+    const inFlight = nextInFlightRef.current;
+    if (inFlight !== null) {
+      nextNavigationRef.current = navigationRef.current;
+      return inFlight;
     }
     if (deepest.limitReached) {
       if (deepest.notice !== null) {
@@ -351,6 +422,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     }
 
     const generation = generationRef.current;
+    nextNavigationRef.current = navigationRef.current;
     const loading = (async (): Promise<NextOutcome> => {
       const result = await fetchNextPage();
       if (!mountedRef.current || generationRef.current !== generation) {
@@ -360,6 +432,11 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
       const loaded = browsablePages(result.data).length;
       if (result.isFetchNextPageError || loaded <= pageCount) {
         // Failed (already sent to onError) or no further rows: stay.
+        return 'bottom';
+      }
+      if (navigationRef.current !== nextNavigationRef.current) {
+        // A newer navigation took over while the page loaded. The page stays
+        // with the loaded pages, and the page that navigation showed stands.
         return 'bottom';
       }
       setPositionIndex(loaded - 1);
@@ -377,6 +454,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
 
   const previous = useCallback((): boolean => {
     if (position > 0) {
+      navigationRef.current += 1;
       setPositionIndex(position - 1);
       return true;
     }
@@ -384,6 +462,9 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   }, [position]);
 
   const toLastLoaded = useCallback(() => {
+    // A navigation even when that page is already shown: a load still in
+    // flight then leaves it shown.
+    navigationRef.current += 1;
     setPositionIndex(Math.max(pageCount - 1, 0));
   }, [pageCount]);
 
@@ -391,6 +472,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     (custId: string) => {
       const index = pages.findIndex((items) => items.some((row) => row.custId === custId));
       if (index >= 0) {
+        navigationRef.current += 1;
         setPositionIndex(index);
       }
     },
@@ -416,6 +498,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     limitReached,
     pendingNewSearch,
     loading: isFetching,
+    loadingNext: isFetchingNextPage,
     search,
     next,
     previous,

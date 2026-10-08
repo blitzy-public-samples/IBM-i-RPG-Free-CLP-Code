@@ -32,7 +32,11 @@
  *   window over the picker;
  * - F3, F12 and Escape call `onCancel` and return no id; F6 is DEM0003;
  * - closed, the picker renders nothing and sends no request; a host that
- *   closes it in its callbacks gets focus back and a fresh search on reopen.
+ *   closes it in its callbacks gets focus back and a fresh search on reopen;
+ * - every panel and every opening owns its list: two Selection panels with
+ *   the same criteria under one query client each request their own first
+ *   page and page independently, and a picker reopened after paging requests
+ *   and shows page 1 again.
  *
  * Fixtures. The default `GET /api/customers` handler of `src/test/handlers.ts`
  * serves the 30 seed rows of its `customers` fixture (23 active, 12 per page)
@@ -71,6 +75,7 @@ import { customers, messageText, users } from '../../test/handlers';
 import { server } from '../../test/server';
 import { CustomerPicker } from './CustomerPicker';
 import type { CustomerPickerProps } from './CustomerPicker';
+import { CustomerSearchPanel } from './CustomerSearchPage';
 
 // ---------------------------------------------------------------------------
 // Fixtures and constants
@@ -96,6 +101,11 @@ const PAGE_SIZE = 12;
 const FIRST_PAGE_ROWS: readonly CustomerSummaryResponse[] = customers
   .filter((row) => row.active === 'Y')
   .slice(0, PAGE_SIZE);
+
+/** The second and last page of the active-only list (11 rows), reached with PageDown. */
+const SECOND_PAGE_ROWS: readonly CustomerSummaryResponse[] = customers
+  .filter((row) => row.active === 'Y')
+  .slice(PAGE_SIZE, 2 * PAGE_SIZE);
 
 /** The seed row of `name`; throws when the fixture holds none. */
 function seedRow(name: string): CustomerSummaryResponse {
@@ -307,6 +317,35 @@ function HostForm({ onSelectSeen, onCancelSeen }: HostFormProps) {
   );
 }
 
+/** Accessible names of the two regions {@link TwoSelectionPanels} renders, in order. */
+const PANEL_REGIONS = ['First selection', 'Second selection'] as const;
+
+/**
+ * Two Selection-mode search panels mounted at the same time under the one
+ * query client of {@link renderWithProviders}, as two Customer pickers on one
+ * screen would hold them: each in its own named region, with its own header
+ * ids. They are not wrapped in `Dialog`, because an open window makes the
+ * screen beneath it inert and so only one picker window can be driven at a
+ * time. Only the second panel's key scope is topmost, so each panel is driven
+ * through its own legend buttons, which run the very handlers its keys run.
+ */
+function TwoSelectionPanels() {
+  return (
+    <>
+      {PANEL_REGIONS.map((name, index) => (
+        <div key={name} role="region" aria-label={name}>
+          <CustomerSearchPanel
+            mode="selection"
+            headerId={`selection-panel-${index}`}
+            onSelect={() => undefined}
+            onExit={() => undefined}
+          />
+        </div>
+      ))}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
@@ -365,6 +404,17 @@ function pickerKeys(dialog: HTMLElement): HTMLElement {
     throw new Error('The picker shows no function-key legend');
   }
   return bar;
+}
+
+/** One region of {@link TwoSelectionPanels}, by its accessible name. */
+function panelRegion(name: (typeof PANEL_REGIONS)[number]): HTMLElement {
+  return screen.getByRole('region', { name });
+}
+
+/** Presses the legend button `label` of the one search panel inside `region`. */
+async function pressLegendKey(user: UserEvent, region: HTMLElement, label: string): Promise<void> {
+  const bar = within(region).getByRole('toolbar', { name: 'Function keys' });
+  await user.click(within(bar).getByRole('button', { name: label }));
 }
 
 /** The shared alert region of the toast host, where DEM0003 and DEM0004 are published. */
@@ -655,6 +705,91 @@ describe('CustomerPicker', () => {
       expect(onSelectSeen).toHaveBeenCalledTimes(1);
       expect(field).toHaveValue(URNA.custId);
       expect(prompt).toHaveFocus();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // List isolation: every panel and every opening owns its list
+  // -------------------------------------------------------------------------
+
+  describe('list isolation', () => {
+    it('two panels open at once with the same criteria each request, page and keep their own list', async () => {
+      const user = await renderWithProviders(<TwoSelectionPanels />);
+      const first = panelRegion('First selection');
+      const second = panelRegion('Second selection');
+      const pageOne = FIRST_PAGE_ROWS.map((row) => row.name);
+      const pageTwo = SECOND_PAGE_ROWS.map((row) => row.name);
+
+      await pressLegendKey(user, first, 'Enter');
+      await waitFor(() => expect(shownNames(first)).toEqual(pageOne));
+      await pressLegendKey(user, second, 'Enter');
+      await waitFor(() => expect(shownNames(second)).toEqual(pageOne));
+
+      // Identical criteria, yet each panel's first page is its own request.
+      expect(searches()).toEqual([firstPageQuery(), firstPageQuery()]);
+
+      await pressLegendKey(user, first, 'Page Down');
+      await waitFor(() => expect(shownNames(first)).toEqual(pageTwo));
+
+      expect(within(first).getByText('Bottom')).toBeInTheDocument();
+      // The second panel keeps its page 1 and its "More..." indicator.
+      expect(shownNames(second)).toEqual(pageOne);
+      expect(within(second).getByText('More...')).toBeInTheDocument();
+      expect(within(second).queryByText('Bottom')).not.toBeInTheDocument();
+      const afterFirstPageDown = searches();
+      expect(afterFirstPageDown).toHaveLength(3);
+      expect(afterFirstPageDown[2]?.cursor).toEqual(expect.any(String));
+
+      // The first panel's continuation does not serve the second panel: the
+      // second panel's PageDown requests its own page 2, with the same cursor.
+      await pressLegendKey(user, second, 'Page Down');
+      await waitFor(() => expect(shownNames(second)).toEqual(pageTwo));
+
+      const afterSecondPageDown = searches();
+      expect(afterSecondPageDown).toHaveLength(4);
+      expect(afterSecondPageDown[3]).toEqual(afterFirstPageDown[2]);
+      expect(afterSecondPageDown.filter((query) => query.cursor === null)).toHaveLength(2);
+      expect(shownNames(first)).toEqual(pageTwo);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('a picker reopened after paging starts anew: the same criteria request page 1 again and show it', async () => {
+      const onSelectSeen = vi.fn<(custId: string) => void>();
+      const onCancelSeen = vi.fn<() => void>();
+      const user = await renderWithProviders(<HostForm onSelectSeen={onSelectSeen} onCancelSeen={onCancelSeen} />);
+      const prompt = screen.getByRole('button', { name: 'Prompt customer' });
+      const pageOne = FIRST_PAGE_ROWS.map((row) => row.name);
+
+      await user.click(prompt);
+      const first = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(first)).toHaveFocus());
+      await searchWithEnter(user, first, pageOne);
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(shownNames(first)).toEqual(SECOND_PAGE_ROWS.map((row) => row.name)));
+      await user.keyboard('{F12}');
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+      expect(onCancelSeen).toHaveBeenCalledTimes(1);
+      expect(searches()).toHaveLength(2);
+
+      // Reopened with the same (blank) criteria: nothing is shown before Enter,
+      // and Enter requests the first page again rather than reusing the pages
+      // the closed opening loaded.
+      await user.click(prompt);
+      const second = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(second)).toHaveFocus());
+      expect(shownNames(second)).toEqual([]);
+      expect(searches()).toHaveLength(2);
+
+      await searchWithEnter(user, second, pageOne);
+
+      const recorded = searches();
+      expect(recorded).toHaveLength(3);
+      expect(recorded[0]).toEqual(firstPageQuery());
+      expect(recorded[1]?.cursor).toEqual(expect.any(String));
+      expect(recorded[2]).toEqual(firstPageQuery());
+      expect(within(second).getByText('More...')).toBeInTheDocument();
+      expect(onSelectSeen).not.toHaveBeenCalled();
     });
   });
 });
