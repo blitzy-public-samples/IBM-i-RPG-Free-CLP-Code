@@ -16,11 +16,13 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -84,7 +86,11 @@ import org.springframework.lang.Nullable;
  * and each must answer {@code application/problem+json}. The server block and {@code location /api/}
  * must each route every rejection status to its page exactly once. Each page must be internal, discard
  * its error log, answer {@code application/problem+json}, return the status without a body for a
- * non-API request, and end with the problem body.
+ * non-API request, and end with the problem body. The server block must add each browser security
+ * header once, with {@code always}, as a literal, so every location, page and gateway body inherits it
+ * whatever a failed upstream sent; {@code location /api/} must add each once, with {@code always}, from
+ * a map over the API's own header that yields the server's value only when the API sent none; and no
+ * other level may set {@code add_header} or {@code add_header_inherit}.
  *
  * <p><b>Configuration file.</b> System property {@value #NGINX_CONF_PATH_PROPERTY} names it. When
  * absent, the path {@value #DEFAULT_NGINX_CONF_PATH} is resolved against the working directory, which
@@ -127,6 +133,13 @@ final class NginxGatewayProblemTest {
 
     /** The access-log format of the server. */
     private static final String ACCESS_LOG_FORMAT = "redacted";
+
+    /** The browser security headers the server block adds, each with a part its value must hold. */
+    private static final Map<String, String> SECURITY_HEADERS = Map.of(
+            "Content-Security-Policy", "frame-ancestors 'none'",
+            "X-Content-Type-Options", "nosniff",
+            "X-Frame-Options", "DENY",
+            "Referrer-Policy", "no-referrer");
 
     /** A request path under {@code /api/}, expected back as {@code instance}. */
     private static final String SAMPLE_PATH = "/api/customers/AAAD";
@@ -474,6 +487,65 @@ final class NginxGatewayProblemTest {
     }
 
     /**
+     * Holds the browser security headers to the two levels that set them. The server block adds each
+     * once, with {@code always}, as a literal, so the locations, rejection pages, their {@code if}
+     * branches and the gateway locations, which inherit it, send it whatever a failed upstream sent
+     * first. {@code location /api/}, which inherits none because it sets its own, adds each once, with
+     * {@code always}, from a map over the API's own header that yields the server's literal when the API
+     * sent none and nothing otherwise, so a header the API sent is neither replaced nor duplicated. No
+     * other directive below the server block, in a location, an {@code if} or a block inside
+     * {@code location /api/}, may be {@code add_header} or {@code add_header_inherit}.
+     */
+    @Test
+    @DisplayName("the server block adds every security header as a literal, location /api/ each the API did not"
+            + " send, and no other level sets any")
+    void serverAddsLiteralSecurityHeadersApiAddsThoseTheApiDidNotSend() {
+        Directive server = server();
+        Directive api = apiLocation();
+        List<Directive> apiHeaders = new ArrayList<>();
+        for (Map.Entry<String, String> header : SECURITY_HEADERS.entrySet()) {
+            String literal = securityHeader(server, "server", header.getKey()).args().get(1);
+            assertThat(literal).as("the server's %s", header.getKey())
+                    .doesNotContain("$")
+                    .contains(header.getValue());
+
+            Directive added = securityHeader(api, "location /api/", header.getKey());
+            Matcher reference = VARIABLE.matcher(added.args().get(1));
+            assertThat(reference.matches()).as("the value of add_header %s in location /api/ is one variable",
+                    header.getKey()).isTrue();
+            String apiHeader = "upstream_http_" + header.getKey().toLowerCase(Locale.ROOT).replace('-', '_');
+            NginxMap value = NginxMap.of(map(apiHeader,
+                    reference.group(1) != null ? reference.group(1) : reference.group(2)));
+            assertThat(value.exact()).as("keys of the %s map", header.getKey()).containsOnlyKeys("");
+            assertThat(value.patterns()).as("expressions of the %s map", header.getKey()).isEmpty();
+            assertThat(value.defaultValue()).as("%s when the API sent its own", header.getKey()).isEmpty();
+            assertThat(value.valueFor("")).as("%s when the API sent none", header.getKey()).isEqualTo(literal);
+            apiHeaders.add(added);
+        }
+
+        assertThat(nested(server)
+                .filter(d -> d.name().equals("add_header") || d.name().equals("add_header_inherit")))
+                .as("add_header and add_header_inherit below the server block")
+                .containsExactlyInAnyOrderElementsOf(apiHeaders);
+    }
+
+    /**
+     * Returns the one {@code add_header} of a level for a header, which must carry a value and
+     * {@code always}.
+     *
+     * @param level the block
+     * @param where the block, for the failure message
+     * @param header the header name
+     * @return the {@code add_header} directive
+     */
+    private static Directive securityHeader(Directive level, String where, String header) {
+        Directive added = only(level.children(), d -> d.name().equals("add_header") && !d.args().isEmpty()
+                && d.args().get(0).equalsIgnoreCase(header), "add_header " + header + " in " + where);
+        assertThat(added.args()).as("add_header %s in %s", header, where).hasSize(3).endsWith("always");
+        return added;
+    }
+
+    /**
      * Asserts that two problem bodies are the same JSON object with the same top-level member order.
      *
      * @param actual the body nginx writes
@@ -620,6 +692,18 @@ final class NginxGatewayProblemTest {
     private static Directive map(String source, String target) {
         return only(config, d -> d.isBlock("map") && d.args().equals(List.of("$" + source, "$" + target)),
                 "map $" + source + " $" + target);
+    }
+
+    /**
+     * Returns every directive nested inside the blocks of a block, at any depth.
+     *
+     * @param block the block
+     * @return the directives of its child blocks and of theirs
+     */
+    private static Stream<Directive> nested(Directive block) {
+        return block.children().stream()
+                .filter(d -> d.block() != null)
+                .flatMap(d -> Stream.concat(d.children().stream(), nested(d)));
     }
 
     /**

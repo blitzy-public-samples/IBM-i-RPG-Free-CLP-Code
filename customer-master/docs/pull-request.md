@@ -27,7 +27,7 @@ Paths are relative to `customer-master/` unless marked as the repository root. `
 9. `test(e2e): Playwright flows`
    - `e2e/package.json`, `e2e/package-lock.json`, `e2e/tsconfig.json`, `e2e/playwright.config.ts`, `e2e/fixtures/auth.ts`, `e2e/tests/*.spec.ts`
 10. `build: Docker Compose, nginx, environment template and k6 script`
-    - `docker-compose.yml`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `.env.example`, `perf/k6/search-1m.js`, `perf/results/.gitkeep`, and `backend/customer-api/src/test/java/com/democorp/customermaster/controller/NginxGatewayProblemTest.java`, which reads `frontend/nginx.conf` and holds its 502 and 504 gateway bodies and its `/api/` rejection bodies to `ProblemFactory`
+    - `docker-compose.yml`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `.env.example`, `perf/k6/search-1m.js`, `perf/results/.gitkeep`, and `backend/customer-api/src/test/java/com/democorp/customermaster/controller/NginxGatewayProblemTest.java`, which reads `frontend/nginx.conf` and holds its 502 and 504 gateway bodies and its `/api/` rejection bodies to `ProblemFactory`, and its browser security headers to the server block, which sets them unconditionally on every response nginx writes itself, and to `location /api/`, which adds them to the API's answers only where the API did not send them
 11. `docs: README, developer guide, deviations, traceability, benchmark; root README entry`
     - `README.md`, `docs/**`, `data/README.md`, and `README.md` at the repository root
 
