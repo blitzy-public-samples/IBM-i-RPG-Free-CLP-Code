@@ -45,16 +45,19 @@ spring:
         # without this bound a request waited without end on a database that
         # stopped answering. With it the read fails with an I/O error, Hikari
         # evicts the connection and the request answers 500 DEM9999 with an
-        # errorId. No legitimate answer takes longer than the lock timeout
-        # (DB_LOCK_TIMEOUT, 5s) plus statement time: an add or update gives up
-        # its lock wait with 409 DEM1001, and a search or get waiting behind a
-        # table lock (a generator load's ACCESS EXCLUSIVE) is answered at each
-        # lock timeout, re-checks and keeps waiting until the load commits
-        # (repository.LockWaitingReads, which fails startup unless the lock
-        # timeout is below this bound). So 45 only bounds a database that stops
-        # answering. It stays below nginx's default 60 s proxy_read_timeout, so
-        # the UI still receives the problem+json. A fixed value: no environment
-        # variable sets it.
+        # errorId. The bound applies to each wait for PostgreSQL's answer, not
+        # to the request. No legitimate answer takes longer than the lock
+        # timeout (DB_LOCK_TIMEOUT, 5s) plus statement time: an add or update
+        # gives up its lock wait with 409 DEM1001, and a search or get waiting
+        # behind a table lock (a generator load's ACCESS EXCLUSIVE) is answered
+        # at each lock timeout, re-checks and keeps waiting until the load
+        # commits (repository.LockWaitingReads, which fails startup unless the
+        # lock timeout is below this bound). Each re-check starts a new wait,
+        # so a read behind a load lasts as long as the load holds its lock, and
+        # 45 only bounds a database that stops answering. The frontend's nginx
+        # waits up to 300 s for an API answer (proxy_read_timeout in
+        # frontend/nginx.conf), sized above the longest load, so the UI receives
+        # the API's own answer. A fixed value: no environment variable sets it.
         socketTimeout: 45
         # Server-side TCP keepalives of each session. PostgreSQL ends a session
         # whose client vanished without closing its socket (a generator container

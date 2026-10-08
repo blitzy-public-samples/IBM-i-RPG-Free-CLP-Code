@@ -146,7 +146,7 @@ These are demo-only defaults supplied by `docker-compose.yml` so the stack start
 cp .env.example .env
 ```
 
-Every variable is documented in [`.env.example`](.env.example), and an unedited copy changes nothing. `.env` is git-ignored. No credentials are kept in source: the USPS user id and password have no default anywhere, and the database variables take effect only on an empty `pgdata` volume.
+Every variable is documented in [`.env.example`](.env.example), and an unedited copy changes nothing. `.env` is git-ignored. No credentials are kept in source: the USPS user id and password have no default anywhere, and `DB_NAME`, `DB_USER` and `DB_PASSWORD`, which initialise the PostgreSQL cluster, take effect only on an empty `pgdata` volume, while `DB_HOST`, `DB_PORT`, `DB_SCHEMA` and `DB_LOCK_TIMEOUT` are read on every start.
 
 ### Quick API check
 

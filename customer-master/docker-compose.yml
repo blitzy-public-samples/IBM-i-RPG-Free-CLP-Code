@@ -27,9 +27,13 @@
 #
 # Configuration: every value is a ${VAR:-default} interpolation. .env.example documents each
 # variable; a .env next to this file overrides them. The defaults are demo-only, and the USPS
-# credentials (the USPS_ID / USPS_PWD data areas of USADRVAL) have none. The database
-# variables take effect on an empty pgdata volume only, because PostgreSQL initialises its
-# cluster once; `docker compose down -v` resets all data.
+# credentials (the USPS_ID / USPS_PWD data areas of USADRVAL) have none. DB_NAME, DB_USER and
+# DB_PASSWORD also set the db service's POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD, which
+# PostgreSQL reads only when it initialises its cluster on an empty pgdata volume; the cluster
+# keeps that database, role and password, so a change to these three takes effect only after
+# `docker compose down -v`, which resets all data. DB_HOST, DB_PORT, DB_SCHEMA and
+# DB_LOCK_TIMEOUT are read by app and the generator on every start: a new DB_SCHEMA makes
+# Flyway create and migrate that schema, the seed included, when app next starts.
 
 # Datasource settings, shared by app and generator so both connect as the same role: the
 # role Flyway runs as owns custmast_id_seq, and the generator's ALTER SEQUENCE needs it.
@@ -61,6 +65,13 @@ x-app-build: &app-build
 # never overwrite each other's build.
 x-app-image: &app-image ${COMPOSE_PROJECT_NAME:-customer-master}-app:local
 
+# Memory budgets: every service has a mem_limit set by MEM_LIMIT_<SERVICE>, so PostgreSQL,
+# the JVMs and the test runners each stay inside a bounded share of a shared host. Each
+# default is at least 1.75 times the peak measured on the 1,000,000-row load, the k6 run
+# and the e2e run; .env.example lists each peak, and a .env overrides any default. The
+# backend image starts its JVM with no heap flags, so app and generator size their heap at
+# a quarter of their limit. CPU stays unlimited for db, app, generator and k6, whose load
+# time and latencies are the recorded performance evidence.
 services:
   db:
     image: postgres:18.6
@@ -76,6 +87,7 @@ services:
     # default can run out on the 1,000,000-row data set; the postgres image documents this
     # setting for Compose.
     shm_size: 128mb
+    mem_limit: ${MEM_LIMIT_DB:-3g}
     # No host port: the gates query it with `docker compose exec db psql ...`.
     healthcheck:
       # $$ defers expansion to the container shell. TCP to 127.0.0.1 skips the socket-only
@@ -108,6 +120,7 @@ services:
       USPS_PASSWORD: ${USPS_PASSWORD:-}
     ports:
       - "${API_PORT:-8081}:8080"
+    mem_limit: ${MEM_LIMIT_APP:-1g}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
       interval: 5s
@@ -122,7 +135,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    # nginx resolves app (proxy_pass http://app:8080) once at startup, so it starts after app.
+    # Health order: nginx starts once app is healthy, so the first API call finds it ready.
+    # nginx looks app up again as requests arrive (frontend/nginx.conf), so an app that
+    # Compose recreates on a new address is reached with no restart here. No `restart: true`:
+    # it would only restart nginx on every app recreate and cut off API requests in flight.
     depends_on:
       app:
         condition: service_healthy
@@ -133,6 +149,7 @@ services:
     # hundred on a large host). 1 is valid on every host, where a larger limit is refused on
     # hosts with fewer CPUs.
     cpus: 1
+    mem_limit: ${MEM_LIMIT_FRONTEND:-32m}
     healthcheck:
       # Healthy means nginx answers (/healthz) and the built index.html is served (/).
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz && wget -q -O /dev/null http://127.0.0.1/"]
@@ -165,6 +182,7 @@ services:
     # (data/README.md); the files must be world-readable for the non-root image user.
     volumes:
       - ./data:/data:ro
+    mem_limit: ${MEM_LIMIT_GENERATOR:-2g}
     restart: "no"
 
   k6:
@@ -184,6 +202,7 @@ services:
       K6_PASSWORD: ${K6_PASSWORD:-${CM_INQUIRY_PASSWORD:-inquiry-demo}}
     volumes:
       - ./perf:/perf
+    mem_limit: ${MEM_LIMIT_K6:-128m}
     # The image's entrypoint is k6. The summary file is git-ignored.
     command: ["run", "--summary-export=/perf/results/search-1m-summary.json", "/perf/k6/search-1m.js"]
 
@@ -210,6 +229,11 @@ services:
     # Playwright's documented Docker settings for a stable Chromium.
     ipc: host
     init: true
+    # One CPU for the browser runner, which runs one Playwright worker
+    # (e2e/playwright.config.ts), so a test run never competes with the stack for every host
+    # CPU. 1 is valid on every host, where a larger limit is refused on hosts with fewer CPUs.
+    cpus: 1
+    mem_limit: ${MEM_LIMIT_E2E:-1536m}
     command: ["sh", "-c", "npm ci && npx playwright test"]
 
 volumes:
