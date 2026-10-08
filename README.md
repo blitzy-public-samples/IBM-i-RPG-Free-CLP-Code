@@ -126,3 +126,7 @@ Developer Utilities.
 ## SNGCHCFLD
 
 A demo program to show how to protect SNGCHCFLD/MLTCHCFLD fields.
+
+## customer-master
+
+The 5250 Customer Master application (search, maintenance, state prompt and USPS address standardization) re-implemented as a containerized web application on Java 21 / Spring Boot 3, PostgreSQL and React + TypeScript, started with one `docker compose up --build`. The IBM i folders are unchanged and remain the behavioural specification; see [customer-master/README.md](customer-master/README.md) for how to run, test and load data.
