@@ -51,7 +51,6 @@ final class TextNormalizerTest {
      */
     static Stream<Arguments> parityTable() {
         return Stream.of(
-                // Plain ASCII lowercase.
                 Arguments.of("abc", "ABC"),
                 // U+00DF LATIN SMALL LETTER SHARP S: full mapping "SS" is two code points, so it is kept.
                 Arguments.of("\u00df", "\u00df"),
@@ -64,10 +63,6 @@ final class TextNormalizerTest {
                 // points U+1F08 U+0399, so it is kept (the simple mapping U+1F88 must not be used).
                 Arguments.of("\u1f80", "\u1f80"));
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Parity table
-    // ---------------------------------------------------------------------------------------------
 
     @ParameterizedTest(name = "[{index}] field(\"{0}\") = \"{1}\"")
     @MethodSource("parityTable")
@@ -122,10 +117,6 @@ final class TextNormalizerTest {
         assertThat(TextNormalizer.field("\u01c6")).isEqualTo("\u01c4").isNotEqualTo("\u01c5");
         assertThat(TextNormalizer.filter("\u01c6")).isEqualTo("\u01c4").isNotEqualTo("\u01c5");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Length preservation
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("a 40-character mixed-case field keeps its 40 characters")
@@ -191,10 +182,6 @@ final class TextNormalizerTest {
         assertThat(TextNormalizer.filter("\ud800cd")).isEqualTo("\ud800CD");
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Whitespace: field strips the trailing end only, filter strips both ends
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("field removes trailing blanks and keeps leading blanks")
     void fieldRemovesTrailingBlanksAndKeepsLeadingBlanks() {
@@ -249,10 +236,6 @@ final class TextNormalizerTest {
         assertThat(TextNormalizer.upper("  abc  ")).isEqualTo("  ABC  ");
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Null handling
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("null normalizes to the empty string without throwing")
     void nullBecomesEmptyString() {
@@ -264,10 +247,6 @@ final class TextNormalizerTest {
         assertThat(TextNormalizer.upper(null)).isNotNull().isEmpty();
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Stability of already-normalized input
-    // ---------------------------------------------------------------------------------------------
-
     @ParameterizedTest(name = "[{index}] normalizing \"{0}\" twice changes nothing more")
     @MethodSource("parityTable")
     @DisplayName("normalization is idempotent and leaves normalized values unchanged")
@@ -278,7 +257,6 @@ final class TextNormalizerTest {
         final String filtered = TextNormalizer.filter(input);
         assertThat(TextNormalizer.filter(filtered)).isEqualTo(filtered);
 
-        // The expected value is itself normalized, so it passes through both operations unchanged.
         assertThat(TextNormalizer.field(expected)).isEqualTo(expected);
         assertThat(TextNormalizer.filter(expected)).isEqualTo(expected);
     }

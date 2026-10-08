@@ -69,7 +69,6 @@ public final class DatabaseCleaner {
     /** SQLSTATE {@code lock_not_available}, raised when {@code lock_timeout} expires. */
     private static final String LOCK_NOT_AVAILABLE = "55P03";
 
-    /** Runs the reset statements on the test context's datasource. */
     private final JdbcTemplate jdbcTemplate;
 
     /**

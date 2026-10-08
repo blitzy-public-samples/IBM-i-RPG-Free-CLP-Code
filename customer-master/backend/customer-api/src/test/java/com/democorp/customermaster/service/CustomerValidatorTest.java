@@ -59,7 +59,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 @DisplayName("CustomerValidator: the nine EditUpdData field rules, first error stops")
 final class CustomerValidatorTest {
 
-    /** The only state code the mocked STATES lookup knows. */
     private static final String KNOWN_STATE = "CA";
 
     /** A two-letter code absent from STATES. */
@@ -179,10 +178,6 @@ final class CustomerValidatorTest {
                         DEM0502, List.of("ZIP")));
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // One case per rule
-    // ---------------------------------------------------------------------------------------------
-
     @ParameterizedTest(name = "[{index}] rule {0}: {2} -> {4} {5} on {1}")
     @MethodSource("singleFieldFailures")
     @DisplayName("each rule reports its rule number, code, verbatim source label and one field error")
@@ -218,10 +213,6 @@ final class CustomerValidatorTest {
                 .isInstanceOf(CustomerValidationException.class);
         verify(stateService).exists(UNKNOWN_STATE);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Order and first-error stop
-    // ---------------------------------------------------------------------------------------------
 
     @ParameterizedTest(name = "[{index}] {2} -> rule {0} on {1}")
     @MethodSource("twoFieldFailures")
@@ -288,10 +279,6 @@ final class CustomerValidatorTest {
         assertThatCode(() -> validator.validate(corrected)).doesNotThrowAnyException();
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Valid input
-    // ---------------------------------------------------------------------------------------------
-
     @ParameterizedTest(name = "[{index}] active = {0}")
     @ValueSource(strings = {"Y", "N"})
     @DisplayName("a customer valid in every field passes, active or inactive")
@@ -313,10 +300,6 @@ final class CustomerValidatorTest {
 
         assertThatCode(() -> validator.validate(customer)).doesNotThrowAnyException();
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Absent values and arguments
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("an absent address reaches the rules as blank fields and fails at the Address rule")

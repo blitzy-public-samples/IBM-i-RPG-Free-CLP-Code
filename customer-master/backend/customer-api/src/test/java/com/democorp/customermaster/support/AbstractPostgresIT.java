@@ -163,7 +163,6 @@ public abstract class AbstractPostgresIT {
 
     /** For subclasses only: Spring injects the fields and JUnit runs {@link #cleanDatabase()}. */
     protected AbstractPostgresIT() {
-        // Fields are injected by the Spring test context; nothing to initialize here.
     }
 
     /**

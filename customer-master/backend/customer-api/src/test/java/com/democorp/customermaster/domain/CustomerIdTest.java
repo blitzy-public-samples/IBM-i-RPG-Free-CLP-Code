@@ -55,7 +55,6 @@ final class CustomerIdTest {
     /** The id format, identical to the {@code custmast_custid_ck} CHECK constraint of migration V3. */
     private static final Pattern ID_FORMAT = Pattern.compile("^[A-Z0-9]{4}$");
 
-    /** How many mismatches an exhaustive walk reports before it stops collecting them. */
     private static final int MAX_REPORTED = 10;
 
     /**
