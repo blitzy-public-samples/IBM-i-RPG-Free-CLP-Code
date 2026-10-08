@@ -17,8 +17,8 @@
  * - only the topmost (most recently pushed) scope receives keys; every scope
  *   beneath it is suspended, and each keydown runs at most one handler;
  * - the command keys are F1–F24, Enter, PageUp and PageDown ({@link CommandKey}).
- *   Escape runs the F12 binding and Shift+F1–F12 arrive as F13–F24, as on the
- *   5250 keyboard;
+ *   Escape runs the F12 binding. A key held with Shift, Ctrl, Alt or Meta is a
+ *   modifier chord and passes through untouched;
  * - Enter is a command only when focus is in a text input, an option field or
  *   the scope's own container ({@link FunctionKeyOptions.containerRef}); on a
  *   button, link, checkbox or textarea it keeps its native action;
@@ -212,36 +212,16 @@ export function useFunctionKeys(bindings: KeyBindings, options: FunctionKeyOptio
 }
 
 /**
- * The function key each of F13–F24 is typed as with Shift, the 5250
- * convention the provider applies (Shift+F1 is F13, … Shift+F12 is F24).
- */
-const SHIFTED_ALTERNATIVE: Partial<Record<CommandKey, FunctionKey>> = {
-  F13: 'F1',
-  F14: 'F2',
-  F15: 'F3',
-  F16: 'F4',
-  F17: 'F5',
-  F18: 'F6',
-  F19: 'F7',
-  F20: 'F8',
-  F21: 'F9',
-  F22: 'F10',
-  F23: 'F11',
-  F24: 'F12',
-};
-
-/**
  * The `aria-keyshortcuts` value for a command key: UI Events `key` names,
- * with space-separated alternatives for the keys the provider also accepts.
+ * with a space-separated alternative where the provider also accepts one.
  *
  * - `'F12'` → `'F12 Escape'`, because Escape runs the F12 binding.
- * - `'F13'`…`'F24'` → `'F13 Shift+F1'`…`'F24 Shift+F12'`.
- * - Any other key → its own name, for example `'F3'`, `'Enter'`, `'PageDown'`.
+ * - Any other key → its own name, for example `'F3'`, `'F13'`, `'F24'`,
+ *   `'Enter'`, `'PageDown'`.
  */
 export function ariaKeyShortcuts(key: CommandKey): string {
   if (key === 'F12') {
     return 'F12 Escape';
   }
-  const shifted = SHIFTED_ALTERNATIVE[key];
-  return shifted === undefined ? key : `${key} Shift+${shifted}`;
+  return key;
 }

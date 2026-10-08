@@ -6,9 +6,9 @@
  * Each `describe` is one clause of the keyboard scope contract and each `it`
  * names the rule it checks, so a failure points straight at the clause:
  *
- * - **Command keys.** F1–F24, Enter, PageUp and PageDown are dispatched and
- *   prevented; Escape runs the F12 binding; Shift+F1–F12 arrive as F13–F24
- *   (the 5250 AID set of Copy_Mbrs/AIDBYTES.RPGLE:3-35).
+ * - **Command keys.** F1–F24 (the 5250 AID set of
+ *   Copy_Mbrs/AIDBYTES.RPGLE:3-35), Enter, PageUp and PageDown are dispatched
+ *   and prevented; Escape runs the F12 binding.
  * - **Topmost only.** With the search page, the detail dialog and the State
  *   picker stacked, only the picker receives keys, and an unbound function key
  *   goes to the picker's `onUnbound` alone.
@@ -233,6 +233,15 @@ const MAPPED_KEYS: readonly CommandKey[] = [
   'Enter',
 ];
 
+/** Every function key, F1–F24: a scope binding them all shows any dispatch a chord would cause. */
+const ALL_FUNCTION_KEYS: readonly CommandKey[] = [
+  'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+  'F13', 'F14', 'F15', 'F16', 'F17', 'F18', 'F19', 'F20', 'F21', 'F22', 'F23', 'F24',
+];
+
+/** F1–F12, each pressed with Shift by the modifier-chord spec. */
+const SHIFT_CHORD_KEYS: readonly CommandKey[] = ALL_FUNCTION_KEYS.slice(0, 12);
+
 /**
  * Keys that are not commands and must reach the page untouched: focus
  * navigation, editing and printable characters.
@@ -370,24 +379,33 @@ describe('keyboard scope contract (AAP 0.4.4): command keys are dispatched and p
     expect(calls).toEqual([]);
   });
 
-  it('Shift+F1 dispatches F13, the 5250 convention for F13–F24', () => {
-    const fixture = scopeFixture('screen', ['F13'], calls);
+  it.each(SHIFT_CHORD_KEYS)(
+    'Shift+%s is a modifier chord: not prevented, no binding, no onUnbound, no onBeforeCommand',
+    (key) => {
+      const fixture = scopeFixture('screen', ALL_FUNCTION_KEYS, calls);
+      const onBeforeCommand = vi.fn();
+      mountStack([fixture.props], onBeforeCommand);
+
+      expect(isPrevented(inputOf('screen'), { key, shiftKey: true })).toBe(false);
+      expect(isPrevented(document.body, { key, shiftKey: true })).toBe(false);
+
+      expectUntouched(fixture);
+      expect(onBeforeCommand).not.toHaveBeenCalled();
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('unmodified F13 and F24 keys reach their own bindings once each and are prevented', () => {
+    const fixture = scopeFixture('screen', ['F13', 'F24'], calls);
     mountStack([fixture.props]);
 
-    expect(isPrevented(inputOf('screen'), { key: 'F1', shiftKey: true })).toBe(true);
+    expect(isPrevented(inputOf('screen'), { key: 'F13' })).toBe(true);
+    expect(isPrevented(inputOf('screen'), { key: 'F24' })).toBe(true);
 
     expect(mockFor(fixture, 'F13')).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual(['screen:F13']);
-  });
-
-  it('Shift+F1 to Shift+F12 reach onUnbound as F13 to F24 when unbound', () => {
-    const fixture = scopeFixture('screen', [], calls);
-    mountStack([fixture.props]);
-
-    expect(isPrevented(inputOf('screen'), { key: 'F1', shiftKey: true })).toBe(true);
-    expect(isPrevented(inputOf('screen'), { key: 'F12', shiftKey: true })).toBe(true);
-
-    expect(fixture.onUnbound.mock.calls).toEqual([['F13'], ['F24']]);
+    expect(mockFor(fixture, 'F24')).toHaveBeenCalledTimes(1);
+    expect(fixture.onUnbound).not.toHaveBeenCalled();
+    expect(calls).toEqual(['screen:F13', 'screen:F24']);
   });
 
   it('a dispatched key runs at most one handler: the element under focus never sees it', () => {
@@ -663,6 +681,8 @@ describe('keyboard scope contract (AAP 0.4.4): navigation, text and chords pass 
     { label: 'Alt+F4', init: { key: 'F4', altKey: true } },
     { label: 'Meta+F12', init: { key: 'F12', metaKey: true } },
     { label: 'Ctrl+Enter', init: { key: 'Enter', ctrlKey: true } },
+    { label: 'Shift+F1', init: { key: 'F1', shiftKey: true } },
+    { label: 'Shift+F12', init: { key: 'F12', shiftKey: true } },
     { label: 'Shift+Enter', init: { key: 'Enter', shiftKey: true } },
     { label: 'Shift+PageDown', init: { key: 'PageDown', shiftKey: true } },
     { label: 'Shift+Escape', init: { key: 'Escape', shiftKey: true } },
@@ -783,14 +803,40 @@ describe('keyboard scope contract (AAP 0.4.4): Enter is a command only in a text
     expect(mockFor(fixture, 'Enter')).not.toHaveBeenCalled();
   });
 
-  it('a held (repeating) Enter in a text input is prevented but never submits again', () => {
+  it('a held Enter in a text input dispatches every repeated keydown like the first: each prevented, each run', () => {
     const fixture = scopeFixture('screen', MAPPED_KEYS, calls);
-    const onBeforeCommand = vi.fn();
+    const onBeforeCommand = vi.fn((key: CommandKey) => {
+      calls.push(`before:${key}`);
+    });
     mountStack([fixture.props], onBeforeCommand);
 
+    expect(isPrevented(inputOf('screen'), { key: 'Enter' })).toBe(true);
+    expect(isPrevented(inputOf('screen'), { key: 'Enter', repeat: true })).toBe(true);
     expect(isPrevented(inputOf('screen'), { key: 'Enter', repeat: true })).toBe(true);
 
-    expect(mockFor(fixture, 'Enter')).not.toHaveBeenCalled();
+    expect(mockFor(fixture, 'Enter')).toHaveBeenCalledTimes(3);
+    expect(onBeforeCommand.mock.calls).toEqual([['Enter'], ['Enter'], ['Enter']]);
+    expect(calls).toEqual([
+      'before:Enter',
+      'screen:Enter',
+      'before:Enter',
+      'screen:Enter',
+      'before:Enter',
+      'screen:Enter',
+    ]);
+  });
+
+  it('a held Enter on a button keeps its native action: no repeated keydown is prevented or dispatched', () => {
+    const fixture = scopeFixture('detail', DETAIL_KEYS, calls);
+    const onBeforeCommand = vi.fn();
+    mountStack([fixture.props], onBeforeCommand);
+    const button = screen.getByRole('button', { name: 'detail button' });
+
+    expect(isPrevented(button, { key: 'Enter' })).toBe(false);
+    expect(isPrevented(button, { key: 'Enter', repeat: true })).toBe(false);
+    expect(isPrevented(button, { key: 'Enter', repeat: true })).toBe(false);
+
+    expectUntouched(fixture);
     expect(onBeforeCommand).not.toHaveBeenCalled();
     expect(calls).toEqual([]);
   });
@@ -875,8 +921,8 @@ describe('ariaKeyShortcuts: the aria-keyshortcuts value of each command key', ()
   it.each<[CommandKey, string]>([
     ['F3', 'F3'],
     ['F12', 'F12 Escape'],
-    ['F13', 'F13 Shift+F1'],
-    ['F24', 'F24 Shift+F12'],
+    ['F13', 'F13'],
+    ['F24', 'F24'],
     ['Enter', 'Enter'],
     ['PageUp', 'PageUp'],
     ['PageDown', 'PageDown'],

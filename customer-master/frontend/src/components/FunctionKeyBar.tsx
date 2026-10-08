@@ -38,8 +38,8 @@
  * - **One entry per key.** A bar lists each command key at most once; the key
  *   is the React key of its button.
  * - **Shortcut hint.** Each button carries `aria-keyshortcuts` from
- *   `ariaKeyShortcuts`, so F12 advertises `F12 Escape` and F13–F24 their
- *   Shift+F1–F12 forms, matching what the provider accepts.
+ *   `ariaKeyShortcuts`, so F12 advertises `F12 Escape`, matching what the
+ *   provider accepts.
  * - **Focus stays where it is.** Pressing a key button, a disabled key or the
  *   gap between keys with the mouse does not move focus away from the field
  *   that has it, as the 5250 cursor stayed in its field when a

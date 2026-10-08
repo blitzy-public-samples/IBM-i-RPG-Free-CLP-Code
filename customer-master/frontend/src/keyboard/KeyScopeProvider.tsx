@@ -32,19 +32,19 @@
  * 1. **IME composition passes through.** While `isComposing` is set, or the key
  *    reports the composition key code 229, nothing happens: input methods use
  *    Enter and, for Japanese, F6–F10 to build text.
- * 2. **Chords pass through.** With Ctrl, Alt or Meta held nothing happens, so
- *    Ctrl+F5, Alt+F4 and every browser or system shortcut keep working. Shift
- *    makes a chord too, except with F1–F12 (step 3): Shift+Enter,
- *    Shift+PageUp, Shift+PageDown, Shift+Escape and Shift with a physical
- *    F13–F24 key are never prevented and never dispatched.
- * 3. **Command keys.** F1–F24 by their `key` names; with Shift, F1–F12 arrive
- *    as F13–F24, the 5250 keyboard convention; Escape arrives as F12, so one
- *    F12 binding cancels for both keys; Enter, PageUp and PageDown arrive as
- *    themselves. Every other key (Tab, Shift+Tab, the arrow keys, Home, End,
- *    Backspace, Delete, printable characters) is never prevented and never
- *    dispatched, so focus navigation and text entry work as in any web form.
- *    Home (AID x'F8') is a navigation key here, and the 5250 mouse AIDs
- *    ME00–ME14 have no counterpart.
+ * 2. **Chords pass through.** With Shift, Ctrl, Alt or Meta held nothing
+ *    happens, so Ctrl+F5, Alt+F4 and every browser or system shortcut keep
+ *    working: Shift+F1–F24, Shift+Enter, Shift+PageUp, Shift+PageDown and
+ *    Shift+Escape are never prevented and never dispatched, and Shift+Tab
+ *    moves focus back as usual.
+ * 3. **Command keys.** F1–F24 by their `key` names, physical F13–F24 keys
+ *    included; Escape arrives as F12, so one F12 binding cancels for both
+ *    keys; Enter, PageUp and PageDown arrive as themselves. Every other key
+ *    (Tab, the arrow keys, Home, End, Backspace, Delete, printable
+ *    characters) is never prevented and never dispatched, so focus
+ *    navigation and text entry work as in any web form. Home (AID x'F8') is
+ *    a navigation key here, and the 5250 mouse AIDs ME00–ME14 have no
+ *    counterpart.
  * 4. **No scope, no action.** With an empty stack nothing happens.
  * 5. **Topmost only.** Only the most recently pushed scope receives keys; every
  *    scope beneath it is suspended until the scopes above it are removed. A
@@ -57,9 +57,10 @@
  *    `<select>`, `<textarea>` or anything else Enter keeps its native action,
  *    such as a button's click.
  * 7. **Bound key.** The default action is prevented and propagation stopped;
- *    then `onBeforeCommand(key)` runs, then the scope's handler. A held Enter
- *    (`repeat`) is prevented and stopped but dispatches nothing, so it never
- *    submits twice, implicit form submission included.
+ *    then `onBeforeCommand(key)` runs, then the scope's handler. Each
+ *    repeated keydown of a held key (`repeat`) dispatches like any other, so
+ *    a screen guards against a second request while one is in flight, as
+ *    `CustomerDetailDialog` does with its in-flight gate.
  * 8. **Unbound function key** (F12 reached by Escape included). Prevented and
  *    stopped, then `onBeforeCommand(key)`, then the scope's `onUnbound(key)`,
  *    where every screen shows DEM0003 "Key is not active now" and changes
@@ -95,11 +96,12 @@ export interface KeyScopeProviderProps {
   children: ReactNode;
   /**
    * Called with every key the provider dispatches, bound or unbound, just
-   * before the scope's handler or `onUnbound` runs. Not called for keys that
-   * pass through, nor for a repeated (held) Enter. The application wires it
-   * to the toast `clear`, so each command starts a new message cycle as the
-   * 5250 cleared its message subfile per screen I/O. Its identity may change
-   * on every render without re-adding the document listener.
+   * before the scope's handler or `onUnbound` runs, each repeated keydown of
+   * a held key included. Not called for keys that pass through. The
+   * application wires it to the toast `clear`, so each command starts a new
+   * message cycle as the 5250 cleared its message subfile per screen I/O. Its
+   * identity may change on every render without re-adding the document
+   * listener.
    */
   onBeforeCommand?: (key: CommandKey) => void;
 }
@@ -137,9 +139,6 @@ const FUNCTION_KEY_INDEX: ReadonlyMap<string, number> = new Map<string, number>(
   FUNCTION_KEYS.map((name, index) => [name, index]),
 );
 
-/** Shift adds this many positions to F1–F12 (Shift+F1 is F13). */
-const SHIFT_OFFSET = 12;
-
 /**
  * Input types on which Enter is a command. These are the text-entry types a
  * form field or option field can have; `HTMLInputElement.type` reads a missing
@@ -158,21 +157,15 @@ const TEXT_ENTRY_INPUT_TYPES: ReadonlySet<string> = new Set([
 const IME_PROCESS_KEY_CODE = 229;
 
 /**
- * Maps a keydown's `key` and Shift state to the command key it stands for, or
+ * Maps an unmodified keydown's `key` to the command key it stands for, or
  * `null` when the key is not a command key and must pass through.
  *
- * Shift takes part only in the 5250 alias Shift+F1–F12 as F13–F24. Held with
- * any other key it makes a modifier chord, which passes through: Shift+Enter,
- * Shift+PageUp, Shift+PageDown, Shift+Escape and Shift with a physical
- * F13–F24 key all map to `null`.
+ * `'F1'`…`'F24'` map to themselves, physical F13–F24 keys included, and
+ * `'Escape'` maps to `'F12'`; `'Enter'`, `'PageUp'` and `'PageDown'` map to
+ * themselves. Modifier chords never reach this function: the dispatcher lets
+ * them pass through first (step 2).
  */
-function toCommandKey(key: string, shiftKey: boolean): CommandKey | null {
-  const index = FUNCTION_KEY_INDEX.get(key);
-  if (shiftKey) {
-    return index !== undefined && index < SHIFT_OFFSET
-      ? (FUNCTION_KEYS[index + SHIFT_OFFSET] ?? null)
-      : null;
-  }
+function toCommandKey(key: string): CommandKey | null {
   switch (key) {
     case 'Escape':
       return 'F12';
@@ -183,6 +176,7 @@ function toCommandKey(key: string, shiftKey: boolean): CommandKey | null {
     default:
       break;
   }
+  const index = FUNCTION_KEY_INDEX.get(key);
   if (index === undefined) {
     return null;
   }
@@ -222,15 +216,14 @@ function dispatchKeyDown(
     return;
   }
 
-  // 2. Browser and system shortcuts keep working. Shift chords other than
-  //    Shift+F1–F12 are left untouched by `toCommandKey` below.
-  if (event.ctrlKey || event.altKey || event.metaKey) {
+  // 2. Modifier chords keep their browser and system behaviour: with Shift,
+  //    Ctrl, Alt or Meta held, the key is neither prevented nor dispatched.
+  if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
     return;
   }
 
-  // 3. Only command keys go further; everything else, Shift chords included,
-  //    is untouched.
-  const key = toCommandKey(event.key, event.shiftKey);
+  // 3. Only command keys go further; everything else is untouched.
+  const key = toCommandKey(event.key);
   if (key === null) {
     return;
   }
@@ -246,14 +239,11 @@ function dispatchKeyDown(
     return;
   }
 
-  // 7. A bound key runs its handler, except a held Enter, which is swallowed.
+  // 7. A bound key runs its handler, a repeated (held) keydown included.
   const handler = scope.getBinding(key);
   if (handler !== undefined) {
     event.preventDefault();
     event.stopPropagation();
-    if (key === 'Enter' && event.repeat) {
-      return;
-    }
     onBeforeCommand?.(key);
     handler();
     return;

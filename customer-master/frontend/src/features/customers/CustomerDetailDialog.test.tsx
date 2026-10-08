@@ -36,6 +36,8 @@
  * - Edit → review → DEM0000 → PUT with `version`; add opens with Active `Y`
  *   → DEM0009 → POST → closes; a 422 highlights and focuses the first field
  *   and shows its message as an alert.
+ * - A held Enter repeating while the review is in flight sends no second
+ *   request.
  * - The confirmation keys of edit and add, Tab and Shift+Tab at a
  *   confirmation, 409 DEM1001 and 409 DEM1002 (the comparison window).
  * - F5 reloads in edit (fields and version) and clears in add; DEM0599.
@@ -63,7 +65,7 @@
  * returns the bare code).
  */
 import type { ReactNode } from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -619,6 +621,43 @@ describe('CustomerDetailDialog', () => {
       expect(onClose).toHaveBeenCalledWith({ added: true });
       expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+    });
+
+    it('a held Enter repeating while the review is in flight sends no second review, PUT or POST', async () => {
+      // The review answer is held back until the test releases it.
+      let releaseReview: () => void = () => undefined;
+      const reviewHeld = new Promise<void>((resolve) => {
+        releaseReview = resolve;
+      });
+      server.use(
+        http.post(REVIEW_PATH, async () => {
+          await reviewHeld;
+          return reviewPassed('EDIT', fieldsOf(STORED));
+        }),
+      );
+      const { user, dialog, onClose } = await openDialog('edit');
+      const name = inputOf(dialog, 'name');
+
+      try {
+        await user.keyboard('{Enter}');
+        await waitFor(() => expect(sent('POST', REVIEW_PATH)).toHaveLength(1));
+
+        // Each repeat is dispatched (and so prevented) like the first Enter;
+        // the window's in-flight gate, not the key dispatch, stops a second request.
+        for (let repeat = 0; repeat < 3; repeat += 1) {
+          expect(fireEvent.keyDown(name, { key: 'Enter', repeat: true })).toBe(false);
+        }
+        expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      } finally {
+        releaseReview();
+      }
+
+      await within(statusRegion()).findByText(messageText('DEM0000'));
+      await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([{ purpose: 'EDIT', ...fieldsOf(STORED) }]);
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(sent('POST', ADD_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
     });
 
     it.each(['edit', 'add'] as const)('puts the initial focus on Name in %s mode', async (mode) => {
