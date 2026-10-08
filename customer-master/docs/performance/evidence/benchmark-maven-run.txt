@@ -1,0 +1,20 @@
+# SearchBenchmarkIT evidence run: metadata and an excerpt of the Maven output
+#
+# This is an excerpt. The metadata lines were captured by the shell around the command; the
+# Maven lines below are verbatim from its output, and every other output line is dropped.
+
+command: cd customer-master/backend && ./mvnw -B -ntp verify -Pbenchmark
+commit 4125b2f
+git status --short (backend): 0 files
+started 2026-10-08T14:59:33Z (date -u, before the command)
+loadavg before: 10.00 8.51 5.15 6/4787 1220888 (/proc/loadavg)
+finished 2026-10-08T15:00:41Z (date -u, after the command)
+exit=0
+
+## Verbatim Maven lines (log line numbers in brackets)
+[2532] [INFO] --- failsafe:3.5.6:integration-test (default) @ customer-api ---
+[2717] [INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 41.90 s -- in Search at 1,000,000 customers meets its latency thresholds and uses no sequential scan
+[2721] [INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[2732] [INFO] BUILD SUCCESS
+[2734] [INFO] Total time:  01:07 min
+[2735] [INFO] Finished at: 2026-10-08T15:00:41Z

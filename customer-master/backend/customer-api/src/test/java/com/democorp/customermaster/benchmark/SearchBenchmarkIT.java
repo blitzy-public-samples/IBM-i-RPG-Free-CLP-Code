@@ -25,6 +25,7 @@ import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -69,7 +70,14 @@ import org.testcontainers.DockerClientFactory;
  *       whose name (city) starts with three letters gives the three-letter prefix, and its first letter
  *       the one-letter prefix. The seed fixes the data, so the same values are chosen on every run on
  *       the same Java runtime.</li>
- *   <li>Walk the cursor chain from page 1 to page {@value #DEEP_PAGE} through the API.</li>
+ *   <li>Read the first {@value #CHAIN_ROWS} active rows in list order with one plain
+ *       {@code ORDER BY name, city, state, custid LIMIT}, which uses no keyset and no cursor, then
+ *       walk the cursor chain from page 1 to page {@value #DEEP_PAGE} through the API. Before any
+ *       measurement, page <i>k</i> must hold exactly rows 12(<i>k</i> - 1) + 1 to 12<i>k</i> of that
+ *       order, in order, and its {@code nextCursor} must decode to the keys of its last row with
+ *       {@code served} = 12<i>k</i>, so a repeated, skipped or reordered page fails the setup. Page
+ *       {@value #DEEP_PAGE} - 1's cursor is the deep-page request, and its decoded position is the
+ *       keyset of the deep-page plan.</li>
  *   <li>For each of eight operations, run {@value #WARMUP} warm-up calls (discarded; the first one is
  *       checked for correct content), then {@value #MEASURED} measured calls, sequentially on one
  *       thread, as user {@code inq} (role {@code INQUIRY}) over HTTP Basic against the random-port
@@ -121,6 +129,23 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
 
     /** The deep page reached through the cursor chain. */
     private static final int DEEP_PAGE = 50;
+
+    /** Rows of the list from the first row through the end of page {@value #DEEP_PAGE}. */
+    private static final int CHAIN_ROWS = DEEP_PAGE * PAGE_SIZE;
+
+    /**
+     * The independent list order the cursor chain is checked against: the active rows in the
+     * search's sort order, read by one plain {@code ORDER BY ... LIMIT} with no keyset and no cursor.
+     * The four columns are {@code COLLATE customer_sort}, so this is the order the search serves.
+     */
+    private static final String CHAIN_ORDER_SQL = "SELECT custid, name, city, state FROM custmast"
+            + " WHERE active = 'Y' ORDER BY name, city, state, custid LIMIT :rows";
+
+    /** The properties of the search cursor's JSON object, exactly. */
+    private static final List<String> CURSOR_PROPERTIES = List.of("name", "city", "state", "custid", "served");
+
+    /** The base64url alphabet without padding, the only characters a search cursor may hold. */
+    private static final String BASE64URL_NO_PADDING = "[A-Za-z0-9_-]+";
 
     /** Warm-up calls per operation, discarded. */
     private static final int WARMUP = 50;
@@ -192,7 +217,7 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
                 explain("name-prefix-3", new SearchCriteria(filters.name3(), "", "", false, PAGE_SIZE, null)));
 
         // Report first, so a run that misses a threshold still prints and keeps every measured number.
-        String report = report(runAt, loadStats, filters, results, plans);
+        String report = report(runAt, loadStats, filters, deepPage, results, plans);
         System.out.println(report);
         Path reportPath = Path.of("target", REPORT_FILE);
         Files.createDirectories(reportPath.getParent());
@@ -315,42 +340,81 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
 
     /**
      * Pages from the first page to page {@value #DEEP_PAGE} through the API, following
-     * {@code nextCursor} {@value #DEEP_PAGE} - 1 times, and asserts that every page is full and has a
-     * successor.
+     * {@code nextCursor} {@value #DEEP_PAGE} - 1 times, and checks every page against an independent
+     * list order before anything is measured.
      *
-     * <p>The keyset of the deep page's statement is taken from the last row of page
-     * {@value #DEEP_PAGE} - 1, the stored sort keys the cursor carries, so the plan check never
-     * depends on the cursor's encoding.
+     * <p>The expected order is the first {@value #CHAIN_ROWS} active rows read by
+     * {@link #CHAIN_ORDER_SQL}, a plain {@code ORDER BY ... LIMIT} that uses no keyset and no cursor.
+     * Page <i>k</i> must hold exactly rows 12(<i>k</i> - 1) + 1 to 12<i>k</i> of it, in order (see
+     * {@link #searchPage(RestClient, String, int, List)}), and its {@code nextCursor} must decode to
+     * the keys of the page's last row with {@code served} = 12<i>k</i> (see
+     * {@link #decodeCursor(String, int, List)}). A page that repeats, overlaps, skips or reorders rows,
+     * or a cursor that does not advance, therefore fails the setup.
      *
-     * @return the cursor that requests page {@value #DEEP_PAGE} and its keyset position
+     * <p>The cursor of page {@value #DEEP_PAGE} - 1 requests the deep page. Its decoded position,
+     * which is what the service passes to {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}
+     * for that request, is the keyset of the deep-page plan check; it must be the last row of page
+     * {@value #DEEP_PAGE} - 1 with {@code served} = 12 &middot; ({@value #DEEP_PAGE} - 1).
+     *
+     * @return the cursor that requests page {@value #DEEP_PAGE}, its decoded keyset position, the
+     *         boundary row it names and the ids page {@value #DEEP_PAGE} must hold
      */
     private DeepPage buildCursorChain() {
+        List<KeyRow> expected = expectedChainRows();
         RestClient client = inquiry();
-        JsonNode page = searchPage(client, null, 1);
+        String cursor = null;
         String cursorToDeepPage = null;
         SearchCriteria.Cursor keyset = null;
-        for (int number = 2; number <= DEEP_PAGE; number++) {
-            String cursor = page.path("nextCursor").asText();
+        for (int number = 1; number <= DEEP_PAGE; number++) {
             if (number == DEEP_PAGE) {
-                JsonNode last = page.path("items").get(PAGE_SIZE - 1);
                 cursorToDeepPage = cursor;
-                keyset = new SearchCriteria.Cursor(last.path("name").asText(), last.path("city").asText(),
-                        last.path("state").asText(), last.path("custId").asText(), (DEEP_PAGE - 1) * PAGE_SIZE);
             }
-            page = searchPage(client, cursor, number);
+            JsonNode page = searchPage(client, cursor, number, expected);
+            cursor = page.path("nextCursor").textValue();
+            SearchCriteria.Cursor position = decodeCursor(cursor, number, expected);
+            if (number == DEEP_PAGE - 1) {
+                keyset = position;
+            }
         }
-        return new DeepPage(cursorToDeepPage, keyset);
+
+        int servedBefore = (DEEP_PAGE - 1) * PAGE_SIZE;
+        KeyRow boundary = expected.get(servedBefore - 1);
+        assertThat(keyset)
+                .as("keyset of the page-%d cursor against row %d of the independent order", DEEP_PAGE, servedBefore)
+                .isEqualTo(new SearchCriteria.Cursor(boundary.name(), boundary.city(), boundary.state(),
+                        boundary.custId(), servedBefore));
+        return new DeepPage(cursorToDeepPage, keyset, boundary, custIds(expected.subList(servedBefore, CHAIN_ROWS)));
     }
 
     /**
-     * Requests one unfiltered page of the cursor chain and asserts that it is full and has a successor.
+     * Reads the first {@value #CHAIN_ROWS} active rows in list order with {@link #CHAIN_ORDER_SQL},
+     * independently of the search's statement, keyset and cursor.
      *
-     * @param client the signed-in client
-     * @param cursor the cursor of the page, or {@code null} for the first page
-     * @param number the 1-based page number, for messages
+     * <p>{@code custid} and {@code state} are {@code char} columns, so they are trimmed, as the
+     * search's JSON carries them.
+     *
+     * @return the rows of pages 1 to {@value #DEEP_PAGE}, in list order
+     */
+    private List<KeyRow> expectedChainRows() {
+        List<KeyRow> rows = namedJdbc.query(CHAIN_ORDER_SQL, Map.of("rows", CHAIN_ROWS),
+                (rs, rowNum) -> new KeyRow(rs.getString("custid").trim(), rs.getString("name"),
+                        rs.getString("city"), rs.getString("state").trim()));
+        assertThat(rows).as("active rows in list order for pages 1 to %d", DEEP_PAGE).hasSize(CHAIN_ROWS);
+        return rows;
+    }
+
+    /**
+     * Requests one unfiltered page of the cursor chain and asserts that it is page {@code number} of
+     * the independent order: status 200, exactly its {@value #PAGE_SIZE} ids in order, a textual
+     * {@code nextCursor} and {@code limitReached} false.
+     *
+     * @param client   the signed-in client
+     * @param cursor   the cursor of the page, or {@code null} for the first page
+     * @param number   the 1-based page number
+     * @param expected the independent order of pages 1 to {@value #DEEP_PAGE}
      * @return the parsed page
      */
-    private JsonNode searchPage(RestClient client, String cursor, int number) {
+    private JsonNode searchPage(RestClient client, String cursor, int number, List<KeyRow> expected) {
         ResponseEntity<String> response = cursor == null
                 ? client.get().uri(SEARCH + "?size={size}", PAGE_SIZE).retrieve().toEntity(String.class)
                 : client.get().uri(SEARCH + "?size={size}&cursor={cursor}", PAGE_SIZE, cursor)
@@ -358,9 +422,90 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         assertThat(response.getStatusCode()).as("status of page %d: %s", number, response.getBody())
                 .isEqualTo(HttpStatus.OK);
         JsonNode page = json(response);
-        assertThat(page.path("items").size()).as("items on page %d", number).isEqualTo(PAGE_SIZE);
+        int from = (number - 1) * PAGE_SIZE;
+        assertThat(custIds(page))
+                .as("ids on page %d against rows %d to %d of the independent order", number, from + 1,
+                        from + PAGE_SIZE)
+                .containsExactlyElementsOf(custIds(expected.subList(from, from + PAGE_SIZE)));
         assertThat(page.path("nextCursor").isTextual()).as("nextCursor of page %d", number).isTrue();
+        assertThat(page.path("limitReached").asBoolean(true)).as("limitReached on page %d", number).isFalse();
         return page;
+    }
+
+    /**
+     * Decodes the {@code nextCursor} of page {@code number} and asserts that it names the end of that
+     * page: base64url without padding over a JSON object with exactly the properties
+     * {@link #CURSOR_PROPERTIES}, whose keys are those of row 12 &middot; {@code number} of the
+     * independent order and whose {@code served} is 12 &middot; {@code number}.
+     *
+     * @param cursor   the cursor
+     * @param number   the 1-based number of the page that issued it
+     * @param expected the independent order of pages 1 to {@value #DEEP_PAGE}
+     * @return the decoded position, as the service passes it to the repository
+     */
+    private SearchCriteria.Cursor decodeCursor(String cursor, int number, List<KeyRow> expected) {
+        assertThat(cursor).as("nextCursor of page %d is base64url without padding", number)
+                .matches(BASE64URL_NO_PADDING);
+        JsonNode payload;
+        try {
+            payload = objectMapper.readTree(Base64.getUrlDecoder().decode(cursor));
+        } catch (IllegalArgumentException | IOException e) {
+            throw new AssertionError("nextCursor of page " + number + " is not base64url JSON: " + cursor, e);
+        }
+        assertThat(payload.isObject()).as("nextCursor of page %d decodes to a JSON object: %s", number, payload)
+                .isTrue();
+        List<String> properties = new ArrayList<>();
+        for (Map.Entry<String, JsonNode> property : payload.properties()) {
+            properties.add(property.getKey());
+        }
+        assertThat(properties).as("properties of the nextCursor of page %d: %s", number, payload)
+                .containsExactlyInAnyOrderElementsOf(CURSOR_PROPERTIES);
+        for (String key : List.of("name", "city", "state", "custid")) {
+            assertThat(payload.path(key).isTextual()).as("%s of the nextCursor of page %d: %s", key, number, payload)
+                    .isTrue();
+        }
+        JsonNode servedNode = payload.path("served");
+        assertThat(servedNode.isIntegralNumber() && servedNode.canConvertToInt())
+                .as("served of the nextCursor of page %d is an int: %s", number, payload).isTrue();
+        int served = number * PAGE_SIZE;
+        assertThat(servedNode.intValue()).as("served of the nextCursor of page %d", number).isEqualTo(served);
+
+        SearchCriteria.Cursor position = new SearchCriteria.Cursor(payload.path("name").textValue(),
+                payload.path("city").textValue(), payload.path("state").textValue(),
+                payload.path("custid").textValue(), servedNode.intValue());
+        KeyRow last = expected.get(served - 1);
+        assertThat(position)
+                .as("nextCursor of page %d against row %d of the independent order", number, served)
+                .isEqualTo(new SearchCriteria.Cursor(last.name(), last.city(), last.state(), last.custId(), served));
+        return position;
+    }
+
+    /**
+     * Returns the {@code custId} of every item of a search page, in order.
+     *
+     * @param page the parsed page
+     * @return the ids
+     */
+    private static List<String> custIds(JsonNode page) {
+        List<String> ids = new ArrayList<>();
+        for (JsonNode item : page.path("items")) {
+            ids.add(item.path("custId").asText());
+        }
+        return ids;
+    }
+
+    /**
+     * Returns the ids of rows of the independent order, in order.
+     *
+     * @param rows the rows
+     * @return their ids
+     */
+    private static List<String> custIds(List<KeyRow> rows) {
+        List<String> ids = new ArrayList<>(rows.size());
+        for (KeyRow row : rows) {
+            ids.add(row.custId());
+        }
+        return ids;
     }
 
     /**
@@ -368,7 +513,7 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
      * the content check applied to its first warm-up response.
      *
      * @param filters  the chosen filter values
-     * @param deepPage the cursor to page {@value #DEEP_PAGE}
+     * @param deepPage the cursor to page {@value #DEEP_PAGE} and the ids that page must hold
      * @param first    the first loaded id, the base of the get-by-id draws
      * @return the operations in report order
      */
@@ -388,8 +533,8 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
                         false, true, "state", STATE_FILTER),
                 search("include-inactive", page + "&includeInactive={inactive}", with(size, "inactive", "true"),
                         false, false, null, null),
-                search("page-" + DEEP_PAGE, page + "&cursor={cursor}", with(size, "cursor", deepPage.cursor()),
-                        true, true, null, null),
+                expectingIds(search("page-" + DEEP_PAGE, page + "&cursor={cursor}",
+                        with(size, "cursor", deepPage.cursor()), true, true, null, null), deepPage.custIds()),
                 new Operation("get-by-id", "GET " + SEARCH + "/{custId}, a seeded random id per call",
                         GET_P95_MS,
                         () -> new Call(SEARCH + "/{custId}", Map.of("custId",
@@ -436,6 +581,21 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
                 }
             }
         });
+    }
+
+    /**
+     * Extends an operation's content check: after its own checks, the items of the first warm-up
+     * response must be exactly {@code custIds}, in order.
+     *
+     * @param operation the operation
+     * @param custIds   the ids the response must hold, from the independent list order
+     * @return the same operation with the extended check
+     */
+    private static Operation expectingIds(Operation operation, List<String> custIds) {
+        return new Operation(operation.label(), operation.request(), operation.thresholdMs(), operation.calls(),
+                operation.check().andThen((call, body) -> assertThat(custIds(body))
+                        .as("%s ids against the independent list order", operation.label())
+                        .containsExactlyElementsOf(custIds)));
     }
 
     /**
@@ -635,16 +795,18 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * Builds the Markdown report of the run: environment, data, filters, latency table and plans.
+     * Builds the Markdown report of the run: environment, data, filters, cursor chain, latency table
+     * and plans.
      *
-     * @param runAt   when the run started
-     * @param load    the load figures
-     * @param filters the chosen filters
-     * @param results the latency results
-     * @param plans   the plan checks
+     * @param runAt    when the run started
+     * @param load     the load figures
+     * @param filters  the chosen filters
+     * @param deepPage the checked cursor chain to page {@value #DEEP_PAGE}
+     * @param results  the latency results
+     * @param plans    the plan checks
      * @return the report text
      */
-    private String report(Instant runAt, LoadStats load, Filters filters, List<Result> results,
+    private String report(Instant runAt, LoadStats load, Filters filters, DeepPage deepPage, List<Result> results,
             List<PlanCheck> plans) {
         StringBuilder md = new StringBuilder();
         String nl = System.lineSeparator();
@@ -689,6 +851,28 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         filterRow(md, "state", STATE_FILTER, filters.stateRows());
         md.append("| include inactive | true | ").append(String.format(Locale.ROOT, "%,d", filters.allRows()))
                 .append(" (all rows) |").append(nl).append(nl);
+
+        md.append("## Cursor chain").append(nl).append(nl);
+        md.append(String.format(Locale.ROOT, "Pages 1 to %d (%d rows each) matched, in order, rows 1 to %d of the"
+                + " independent list `%s` with rows = %d. Each page's nextCursor carried the keys of its last row"
+                + " and served = %d x page.", DEEP_PAGE, PAGE_SIZE, CHAIN_ROWS, CHAIN_ORDER_SQL, CHAIN_ROWS,
+                PAGE_SIZE)).append(nl).append(nl);
+        md.append("| Item | Value |").append(nl).append("|---|---|").append(nl);
+        KeyRow boundary = deepPage.boundary();
+        String boundaryRow = String.format(Locale.ROOT, "Page %d boundary row (row %d)", DEEP_PAGE - 1,
+                deepPage.keyset().served());
+        row(md, boundaryRow + ": custid", boundary.custId());
+        row(md, boundaryRow + ": name", boundary.name());
+        row(md, boundaryRow + ": city", boundary.city());
+        row(md, boundaryRow + ": state", boundary.state());
+        row(md, String.format(Locale.ROOT, "served carried by the page-%d cursor", DEEP_PAGE),
+                Integer.toString(deepPage.keyset().served()));
+        List<String> deepIds = deepPage.custIds();
+        row(md, String.format(Locale.ROOT, "Page %d first custid (row %d)", DEEP_PAGE, CHAIN_ROWS - PAGE_SIZE + 1),
+                deepIds.get(0));
+        row(md, String.format(Locale.ROOT, "Page %d last custid (row %d)", DEEP_PAGE, CHAIN_ROWS),
+                deepIds.get(deepIds.size() - 1));
+        md.append(nl);
 
         md.append("## Latency").append(nl).append(nl);
         md.append(String.format(Locale.ROOT, "%d warm-up calls (discarded) and %d measured calls per operation,"
@@ -850,13 +1034,29 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * The deep page of the cursor chain.
+     * The deep page of the checked cursor chain.
      *
-     * @param cursor the {@code nextCursor} of page {@value #DEEP_PAGE} - 1, which requests page
-     *               {@value #DEEP_PAGE}
-     * @param keyset the same position as stored sort keys, for the plan check
+     * @param cursor   the {@code nextCursor} of page {@value #DEEP_PAGE} - 1, which requests page
+     *                 {@value #DEEP_PAGE}
+     * @param keyset   that cursor decoded, the position the service passes to the repository and the
+     *                 keyset of the deep-page plan check; it names {@code boundary} with
+     *                 {@code served} = 12 &middot; ({@value #DEEP_PAGE} - 1)
+     * @param boundary the last row of page {@value #DEEP_PAGE} - 1 in the independent list order
+     * @param custIds  the ids page {@value #DEEP_PAGE} must hold, in order: rows
+     *                 12 &middot; ({@value #DEEP_PAGE} - 1) + 1 to {@value #CHAIN_ROWS} of that order
      */
-    private record DeepPage(String cursor, SearchCriteria.Cursor keyset) {
+    private record DeepPage(String cursor, SearchCriteria.Cursor keyset, KeyRow boundary, List<String> custIds) {
+    }
+
+    /**
+     * The sort keys of one row of the independent list order, as the search's JSON carries them.
+     *
+     * @param custId the id, trimmed
+     * @param name   the stored name
+     * @param city   the stored city
+     * @param state  the state code, trimmed
+     */
+    private record KeyRow(String custId, String name, String city, String state) {
     }
 
     /**

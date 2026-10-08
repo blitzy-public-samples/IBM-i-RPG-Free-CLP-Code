@@ -1,0 +1,61 @@
+# Compose k6 run (profile perf, script /perf/k6/search-1m.js): metadata, header and end-of-test summary
+#
+# Combined from k6-run.meta (command, shell timestamps, load average and exit status) and k6's console
+# output. The k6 header block (lines 10-22 of the console log) and the end-of-test summary with
+# k6's final status lines (lines 390-420) are verbatim. The Compose container lines before the
+# header and the live progress lines between the header and the summary are dropped.
+
+## k6-run.meta
+command: cd customer-master && docker compose --profile perf run --rm k6
+loadavg before: 3.89 2.54 1.69 2/4271 1126545
+started 2026-10-08T14:48:10Z
+exit=0
+finished 2026-10-08T14:50:14Z
+
+## k6 header (verbatim)
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /perf/k6/search-1m.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 100 max VUs, 2m30s max duration (incl. graceful stop):
+              * search_mix: 20.00 iterations/s for 2m0s (maxVUs: 20-100, gracefulStop: 30s)
+
+## k6 end-of-test summary and final status (verbatim)
+     ✓ status is 200
+     ✓ items is an array
+     ✓ custId matches
+
+     checks.........................: 100.00% ✓ 4802      ✗ 0   
+     data_received..................: 4.1 MB  33 kB/s
+     data_sent......................: 547 kB  4.5 kB/s
+     http_req_blocked...............: min=1.23µs  med=4.84µs  avg=15.35µs  p(90)=5.64µs   p(95)=6.18µs  p(99)=158.4µs  max=18.53ms  count=2478
+     http_req_connecting............: min=0s      med=0s      avg=2.14µs   p(90)=0s       p(95)=0s      p(99)=108.69µs max=448.69µs count=2478
+   ✓ http_req_duration..............: min=1.92ms  med=2.99ms  avg=13.67ms  p(90)=63.65ms  p(95)=68.35ms p(99)=86.55ms  max=135.15ms count=2478
+       { expected_response:true }...: min=1.92ms  med=2.99ms  avg=13.67ms  p(90)=63.65ms  p(95)=68.35ms p(99)=86.55ms  max=135.15ms count=2478
+   ✓ http_req_failed................: 0.00%   ✓ 0         ✗ 2478
+     http_req_receiving.............: min=34.36µs med=89.38µs avg=110.59µs p(90)=175.24µs p(95)=260.7µs p(99)=395.5µs  max=4.46ms   count=2478
+     http_req_sending...............: min=5.17µs  med=12.62µs avg=13.89µs  p(90)=16.47µs  p(95)=19.98µs p(99)=33.19µs  max=215.9µs  count=2478
+     http_req_tls_handshaking.......: min=0s      med=0s      avg=0s       p(90)=0s       p(95)=0s      p(99)=0s       max=0s       count=2478
+     http_req_waiting...............: min=1.83ms  med=2.87ms  avg=13.54ms  p(90)=63.56ms  p(95)=68.29ms p(99)=86.48ms  max=134.7ms  count=2478
+     http_reqs......................: 2478    20.292472/s
+     iteration_duration.............: min=2.15ms  med=3.21ms  avg=13.49ms  p(90)=63.63ms  p(95)=67.88ms p(99)=86.07ms  max=117.22ms count=2401
+     iterations.....................: 2401    19.661915/s
+     op_city_prefix_3...............: min=11.38ms med=14.97ms avg=18.96ms  p(90)=29.61ms  p(95)=42.16ms p(99)=67.36ms  max=70.39ms  count=300 
+     op_deep_page...................: min=2.22ms  med=2.77ms  avg=2.91ms   p(90)=3.5ms    p(95)=3.88ms  p(99)=4.5ms    max=5.96ms   count=300 
+     op_first_page..................: min=2.15ms  med=2.56ms  avg=2.7ms    p(90)=3.17ms   p(95)=3.58ms  p(99)=5.12ms   max=9.38ms   count=301 
+     op_get_by_id...................: min=2.47ms  med=3ms     avg=3.41ms   p(90)=4.02ms   p(95)=4.37ms  p(99)=4.69ms   max=62.61ms  count=300 
+     op_include_inactive............: min=1.92ms  med=2.57ms  avg=2.67ms   p(90)=3.21ms   p(95)=3.54ms  p(99)=3.99ms   max=4.86ms   count=300 
+     op_name_prefix_1...............: min=54.36ms med=66.05ms avg=69.28ms  p(90)=80.56ms  p(95)=91.02ms p(99)=103.56ms max=116.95ms count=300 
+     op_name_prefix_3...............: min=2.38ms  med=3.03ms  avg=3.22ms   p(90)=3.8ms    p(95)=4.18ms  p(99)=6.16ms   max=8.63ms   count=300 
+     op_state_ca....................: min=2.16ms  med=2.67ms  avg=2.81ms   p(90)=3.35ms   p(95)=3.69ms  p(99)=5.48ms   max=6.53ms   count=300 
+     vus............................: 0       min=0       max=1 
+     vus_max........................: 20      min=20      max=20
+running (2m02.1s), 000/020 VUs, 2401 complete and 0 interrupted iterations
+search_mix ✓ [ 100% ] 000/020 VUs  2m0s  20.00 iters/s
