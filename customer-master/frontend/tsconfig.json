@@ -1,9 +1,4 @@
 {
-  // App project for `tsc -b`, the type check that `npm run build` runs before
-  // `vite build`. It covers everything under src/: the browser app, the
-  // colocated *.test.ts(x) suites, src/test/* and the generated
-  // src/api/schema.d.ts. Node tooling (vite.config.ts) is type-checked by the
-  // referenced tsconfig.node.json.
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
@@ -12,20 +7,12 @@
     "jsx": "react-jsx",
     "useDefineForClassFields": true,
 
-    // Strictness. `strict` and `noUncheckedIndexedAccess` are mandatory for
-    // this project: an indexed read such as `items[0]` is typed `T | undefined`
-    // and has to be narrowed before use.
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    // Bundler mode. Vite transpiles each file on its own, so type-only imports
-    // must be written `import type` (verbatimModuleSyntax, which also turns on
-    // the isolatedModules checks) and every file is a module. Imports stay
-    // extensionless, as Vite resolves them, so allowImportingTsExtensions is
-    // left off.
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "skipLibCheck": true,

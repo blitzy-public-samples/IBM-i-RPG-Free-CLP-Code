@@ -55,7 +55,6 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
     private static final List<String> CUSTOMER_SORT_ORDER =
             List.of("AAAA", "AAAZ", "AAA0", "ZZZZ", "0000", "101A", "1010");
 
-    /** The ordinals of {@link #CUSTOMER_SORT_ORDER}, element for element. */
     private static final List<Integer> CUSTOMER_SORT_ORDINALS =
             List.of(0, 25, 26, 1_199_725, 1_247_714, 1_294_380, 1_294_406);
 
@@ -66,10 +65,8 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
     /** BASE36ADD's digit alphabet in ascending digit value [BASE36/SRV_BASE36.RPGLE:38]. */
     private static final String BASE36_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-    /** Orders text character by character by base-36 digit value; a shorter prefix sorts first. */
     private static final Comparator<String> BASE36_TEXT_ORDER = CustomerIdCollationIT::compareBase36;
 
-    /** The phone number every fixture row carries. */
     private static final String PHONE = "(415) 555-0100";
 
     /** Rows per page of the keyset walk: small, so the walk crosses every tie group. */
@@ -89,14 +86,11 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
             "SELECT custid FROM custmast WHERE (name, city, state, custid) > (?, ?, ?, ?)"
                     + " ORDER BY name, city, state, custid LIMIT 13";
 
-    /** Reads the four sort-key columns of one search row. */
     private static final RowMapper<KeysetRow> KEYSET_ROW = CustomerIdCollationIT::keysetRow;
 
-    /** Runs PMTSTATER's "By Code" list, as {@code StateService} calls it. */
     @Autowired
     private StateRepository stateRepository;
 
-    /** Inserts the seven sample ids, shuffled, after the base class has emptied {@code custmast}. */
     @BeforeEach
     void insertSampleIds() {
         SAMPLE_IDS.forEach(this::insert);
@@ -306,13 +300,6 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
         return jdbcTemplate.queryForList(sql, String.class, args).stream().map(String::trim).toList();
     }
 
-    /**
-     * Returns the text plan of a query, one line per plan line.
-     *
-     * @param sql  the query
-     * @param args its bound parameters
-     * @return the plan lines joined with line breaks
-     */
     private String explain(String sql, Object... args) {
         return String.join("\n", jdbcTemplate.queryForList("EXPLAIN " + sql, String.class, args));
     }
@@ -365,13 +352,6 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
         return Integer.compare(left.length(), right.length());
     }
 
-    /**
-     * Returns a character's digit value in {@link #BASE36_ALPHABET}.
-     *
-     * @param character an uppercase letter or an ASCII digit
-     * @return 0..35
-     * @throws IllegalArgumentException if the character is not in the alphabet
-     */
     private static int base36Digit(char character) {
         int digit = BASE36_ALPHABET.indexOf(character);
         if (digit < 0) {
@@ -380,14 +360,6 @@ class CustomerIdCollationIT extends AbstractPostgresIT {
         return digit;
     }
 
-    /**
-     * Reads the sort-key columns of one search row.
-     *
-     * @param rs     the result set, positioned on a row
-     * @param rowNum the row number, unused
-     * @return the row's name, city, state and custid
-     * @throws SQLException if a column cannot be read
-     */
     private static KeysetRow keysetRow(ResultSet rs, int rowNum) throws SQLException {
         return new KeysetRow(rs.getString("name"), rs.getString("city"), rs.getString("state"),
                 rs.getString("custid"));

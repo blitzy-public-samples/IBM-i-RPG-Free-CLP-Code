@@ -8,64 +8,17 @@ import java.util.Objects;
  * follows, whether the row cap was reached, and the notice to show the user.
  *
  * <p>Replaces one load of the PMTCUSTD subfile together with its end indicator and
- * the informational messages PMTCUSTR sends to the message subfile:
- * <ul>
- *   <li>{@code SflFirstPage} sends DEM0002 "No records match the selection criteria"
- *       when the first fetch finds no row [5250_Subfile/PMTCUSTR.SQLRPGLE:532-545],
- *       [5250_Subfile/CRTMSGF.CLLE:14];</li>
- *   <li>{@code SflFillPage} writes up to one page of rows, reads one extra row ahead
- *       to decide whether more follow, and stops with DEM0006 "Too many records. Change
- *       the selection criteria." when it writes row 9,999 (MAXSFLRECDS)
- *       [5250_Subfile/PMTCUSTR.SQLRPGLE:562-600], [5250_Subfile/CRTMSGF.CLLE:22];</li>
- *   <li>the PageDown branch repeats DEM0006 once the cap is reached
- *       [5250_Subfile/PMTCUSTR.SQLRPGLE:287-297].</li>
- * </ul>
+ * the informational messages PMTCUSTR sends to the message subfile: DEM0002 when the
+ * first fetch finds no row [5250_Subfile/PMTCUSTR.SQLRPGLE:532-545], and DEM0006 when
+ * row 9,999 is written, repeated on PageDown once that cap is reached
+ * [5250_Subfile/PMTCUSTR.SQLRPGLE:562-600,287-297], [5250_Subfile/CRTMSGF.CLLE:14,22].
  * The server keeps no open cursor between requests, so the "More..."/"Bottom"
  * indicator becomes {@link #nextCursor()}: present while another page follows,
- * {@code null} at the bottom of the list.
+ * {@code null} at the bottom of the list or on the capped page.
  *
- * <table>
- *   <caption>Component, source counterpart and meaning</caption>
- *   <tr><th>Component</th><th>Source</th><th>Meaning here</th></tr>
- *   <tr><td>{@code items}</td><td>The subfile records written by one
- *       {@code SflFillPage}</td>
- *       <td>The rows of this page in {@code name, city, state, custid} order; never
- *       {@code null}, empty when nothing matched</td></tr>
- *   <tr><td>{@code nextCursor}</td><td>{@code SFLEND(*MORE)} off, with the SQL cursor
- *       still open</td>
- *       <td>Opaque position of the next page, or {@code null} when no page follows or
- *       the cap was reached</td></tr>
- *   <tr><td>{@code limitReached}</td><td>{@code SflRRN = MAXSFLRECDS}</td>
- *       <td>{@code true} on the page that brings the rows served to 9,999</td></tr>
- *   <tr><td>{@code notice}</td><td>{@code SndSflMsg('DEM0002')} or
- *       {@code SndSflMsg('DEM0006')}</td>
- *       <td>{@code null}, DEM0002 on an empty first page, or DEM0006 with
- *       {@code limitReached}</td></tr>
- * </table>
- *
- * <p><b>Division of work.</b> This type carries values only. Each responsibility
- * below stays with the class named:
- * <ul>
- *   <li>{@code service/CustomerSearchService} decides every component: it cuts the
- *       page at the 9,999-row cap, encodes the base64url JSON cursor
- *       {@code {name, city, state, custid, served}} from the last row it serves,
- *       leaves {@code nextCursor} {@code null} on the capped page, and resolves the
- *       notice text through {@code messages/MessageCatalog}.</li>
- *   <li>{@code controller/dto/SearchResponse} maps this record to the wire shape
- *       {@code {items, nextCursor, limitReached, notice}}, and
- *       {@code controller/dto/Notice} maps the {@link Notice}.</li>
- * </ul>
- * No SQL, catalog lookup or serialization lives here, so the domain package depends
- * on the JDK and its sibling types only.
- *
- * <p>Example, the response to a search that matches nothing:
- * <pre>{@code
- * var page = SearchPage.empty(new SearchPage.Notice("DEM0002",
- *         "No records match the selection criteria"));
- * page.items();        // []
- * page.nextCursor();   // null
- * page.limitReached(); // false
- * }</pre>
+ * <p>A page with {@code limitReached} has no {@code nextCursor} and carries notice
+ * DEM0006. This record states that invariant; {@code service/CustomerSearchService},
+ * which decides every component, enforces it.
  *
  * <p>Instances are immutable and therefore thread-safe: {@link #items()} is an
  * unmodifiable copy, so adding to or removing from it throws

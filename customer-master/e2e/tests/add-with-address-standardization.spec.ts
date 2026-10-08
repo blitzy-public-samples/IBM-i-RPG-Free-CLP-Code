@@ -1,51 +1,28 @@
 /**
- * End-to-end flow: add a customer through the State prompt and the address standardization.
- *
- * What it exercises (UC-04 add, UC-06 State prompt, UC-07 address standardization), as the
- * source members behave:
- * - MTNCUSTR function `A` [5250_Subfile/MTNCUSTR.SQLRPGLE:251-297]: the window opens cleared
- *   with ACTIVE = 'Y'; Enter edits the fields and, when they pass, protects them and shows the
- *   confirmation with DEM0009; Enter there adds the row (AddRecd takes the next id) and closes
- *   the window, and PMTCUSTR returns to the list with no message
+ * End-to-end flow: add a customer through the State prompt and the address standardization
+ * (UC-04 add, UC-06 State prompt, UC-07 address standardization).
+ * - MTNCUSTR function `A` [5250_Subfile/MTNCUSTR.SQLRPGLE:251-297] opens cleared with ACTIVE = 'Y',
+ *   confirms with DEM0009, adds with AddRecd and returns to the list with no message
  *   [5250_Subfile/PMTCUSTR.SQLRPGLE:397-400].
- * - F04Prompt [5250_Subfile/MTNCUSTR.SQLRPGLE:364-382] calls PMTSTATER from the State field
- *   only. PMTSTATER [5250_Subfile/PMTSTATER.SQLRPGLE] loads all states by name, filters on
- *   "Name Contains", toggles the order with F7 ("Sorted by:" Name / Code, legend F7=By Code /
- *   F7=By Name) and returns the code of the row given option 1; F4 runs no edit, so every other
- *   typed field survives the prompt.
- * - Edit_Address [USPS_Address/MTNCUSTR.SQLRPGLE:471-499]: on success the street, city and
- *   state are replaced by the service's values and the ZIP becomes `Zip5-Zip4`; on failure
- *   DEM9898 "USPS: <description>" is sent, the cursor goes to the address and Address, City,
- *   State and ZIP are shown in reverse image.
+ * - F04Prompt calls PMTSTATER from the State field only [5250_Subfile/MTNCUSTR.SQLRPGLE:364-382],
+ *   [5250_Subfile/PMTSTATER.SQLRPGLE].
+ * - Edit_Address [USPS_Address/MTNCUSTR.SQLRPGLE:471-499]: success replaces street, city and state
+ *   and builds `Zip5-Zip4`; failure sends DEM9898 "USPS: <description>" with Address, City, State
+ *   and ZIP highlighted and the cursor on Address.
  *
- * How it runs. Against the Compose stack with the default stub address client
- * (`ADDRESS_VALIDATION_CLIENT=stub`), signed in as the Sales user (role MAINTENANCE). The stub
- * answers fixture F1 of `backend/address-validation/src/main/resources/stub/usps-stub-fixtures.json`
- * with a standardized street and a ZIP+4, and answers any address line containing `BADADDR`
- * with "Address Not Found.". The e2e container mounts only `./e2e`, so the fixture and the
- * catalog texts are copied here verbatim rather than read at run time.
+ * The run needs the default stub client (`ADDRESS_VALIDATION_CLIENT=stub`), which answers fixture
+ * F1 of `backend/address-validation/src/main/resources/stub/usps-stub-fixtures.json` with a
+ * standardized street and ZIP+4, and any address line containing `BADADDR` with "Address Not
+ * Found.". The e2e container mounts only `./e2e`, so the fixture and catalog texts are copied
+ * verbatim. Each run names its customers with `uniqueName` and searches with its 11-character
+ * `filter`, changing no seed row.
  *
- * State prompt checks. Each read the picker sends, on F4, Enter and F7, is checked as well as
- * the screen: its `GET /api/states` must carry the filter and the order the prompt shows, and
- * answer the rows in that order. NEW, the filter the selection uses, lists the same states in
- * the same order by name and by code, so the prompt is also filtered on VIRGIN before and after
- * F7: VI, VA, WV by name but VA, VI, WV by code. NEW is then applied again and NH selected.
- *
- * Independence. Each run names its customers with `uniqueName`, and every search uses the
- * returned 11-character `filter`, which matches only that run's customer; rows added by earlier
- * runs therefore never change what a search here finds. The spec changes no seed row.
- *
- * Keyboard contract the steps rely on: only the topmost window receives keys (State picker over
- * the detail window over the search page); Enter is a command only with focus in a text input,
- * an option field or the window's own container, so every Enter is pressed on such an element;
- * toasts clear on each click and each command key, so each message is asserted right after the
- * action that raised it.
+ * Each picker read on F4, Enter and F7 is checked against its `GET /api/states` query and answer.
+ * NEW lists the same states in the same order by name and by code, so the prompt is also filtered
+ * on VIRGIN before and after F7 (VI, VA, WV by name; VA, VI, WV by code), then NEW is applied
+ * again and NH selected.
  */
 import { expect, test, toasts, uniqueName, type Locator, type Page } from '../fixtures/auth';
-
-// ---------------------------------------------------------------------------
-// Test data (copied verbatim from the stub fixtures, the catalog and the STATES rows)
-// ---------------------------------------------------------------------------
 
 /**
  * Stub fixture F1: the address keyed (street, city, state, ZIP) and what the stub returns for it
@@ -61,7 +38,6 @@ const F1 = Object.freeze({
   zip4: '2210',
 });
 
-/** The ZIP Edit_Address builds when a ZIP+4 is returned: `Zip5-Zip4`. */
 const STANDARDIZED_ZIP = `${F1.zip}-${F1.zip4}`;
 
 /** A street the stub rejects: any address line containing `BADADDR` is "Address Not Found.". */
@@ -83,7 +59,6 @@ const DEM9898_NOT_FOUND = 'USPS: Address Not Found.';
 /** DEM0002, the notice of a search that matches nothing. */
 const DEM0002 = 'No records match the selection criteria';
 
-/** One row of the State picker: a STATES code and its name as stored. */
 type StateRow = { code: string; name: string };
 
 /** The number of STATES rows (V2); the picker opens on all of them, by name. */
@@ -119,11 +94,6 @@ const VIRGIN_STATES: Readonly<{ byName: ReadonlyArray<StateRow>; byCode: Readonl
   ]),
 });
 
-// ---------------------------------------------------------------------------
-// Locators
-// ---------------------------------------------------------------------------
-
-/** The labels of the detail window's fields (CustomerForm and ConfirmationPanel share them). */
 type DetailFieldLabel =
   | 'Customer Id'
   | 'Active (Y/N)'
@@ -168,7 +138,6 @@ function detailDialog(page: Page, functionText: RegExp = /Displaying Customer|Ch
   return page.getByRole('dialog', { name: functionText });
 }
 
-/** The USA States prompt window. */
 function statePicker(page: Page): Locator {
   return page.getByRole('dialog', { name: /USA States/ });
 }
@@ -186,15 +155,12 @@ function dataRows(page: Page, scope: Locator): Locator {
   return scope.getByRole('row').filter({ has: page.getByRole('cell') });
 }
 
-/** The cell at 0-based column `column` of `row`. */
 function cell(row: Locator, column: number): Locator {
   return row.getByRole('cell').nth(column);
 }
 
-/** Columns of the State picker table: Opt, Code, Name, actions. */
 const STATE_COLUMN = Object.freeze({ code: 1, name: 2 });
 
-/** Columns of the customer results table: Opt, Customer Name, City, St, ZIP, actions. */
 const RESULT_COLUMN = Object.freeze({ name: 1, city: 2, state: 3, zip: 4 });
 
 /**
@@ -211,13 +177,11 @@ async function expectStates(page: Page, picker: Locator, states: ReadonlyArray<S
   }
 }
 
-/** The State picker's orders, as `GET /api/states` names them in its `sort` parameter. */
 type StateSort = 'name' | 'code';
 
 /** One `GET /api/states` the picker sent: its query parameters and the codes it answered, in order. */
 type StatesRead = { nameContains: string | null; sort: string | null; codes: string[] };
 
-/** Whether `row` has the `{ state, name }` shape of a `GET /api/states` row. */
 function isStateResponse(row: unknown): row is { state: string; name: string } {
   return (
     typeof row === 'object' &&
@@ -268,16 +232,11 @@ async function expectStatesRead(
   });
 }
 
-/** Types the three account fields of an open add or change form. */
 async function fillAccountFields(dialog: Locator): Promise<void> {
   await field(dialog, 'Account Manager Phone').fill(ACCOUNT.acctPhone);
   await field(dialog, 'Account Manager Name').fill(ACCOUNT.acctMgr);
   await field(dialog, 'Corporate Phone').fill(ACCOUNT.corpPhone);
 }
-
-// ---------------------------------------------------------------------------
-// The flow
-// ---------------------------------------------------------------------------
 
 test.use({ startPath: '/customers' });
 
@@ -327,7 +286,6 @@ test('adds a customer through the State prompt with a standardized address, and 
     await expect(picker.getByRole('columnheader', { name: 'Name', exact: true })).toHaveAttribute('aria-sort', 'ascending');
     await expect(picker.getByRole('button', { name: 'F7=By Code', exact: true })).toBeVisible();
 
-    // By name, "Virgin Islands" (VI) comes before "Virginia" (VA).
     const filter = picker.getByLabel('Name Contains', { exact: true });
     await filter.fill('VIRGIN');
     await expectStatesRead(page, () => filter.press('Enter'), 'VIRGIN', 'name', VIRGIN_STATES.byName);
@@ -337,7 +295,6 @@ test('adds a customer through the State prompt with a standardized address, and 
     await expectStatesRead(page, () => filter.press('Enter'), 'NEW', 'name', NEW_STATES);
     await expectStates(page, picker, NEW_STATES);
 
-    // F7 reloads the filter last applied, NEW, in code order.
     await expectStatesRead(page, () => page.keyboard.press('F7'), 'NEW', 'code', NEW_STATES);
     await expect(picker.getByText('Sorted by: Code', { exact: true })).toBeVisible();
     await expect(picker.getByRole('button', { name: 'F7=By Name', exact: true })).toBeVisible();
@@ -352,7 +309,6 @@ test('adds a customer through the State prompt with a standardized address, and 
     await expectStatesRead(page, () => filter.press('Enter'), 'VIRGIN', 'code', VIRGIN_STATES.byCode);
     await expectStates(page, picker, VIRGIN_STATES.byCode);
 
-    // Back to NEW, still by code, for the selection.
     await filter.fill('NEW');
     await expectStatesRead(page, () => filter.press('Enter'), 'NEW', 'code', NEW_STATES);
     await expect(picker.getByText('Sorted by: Code', { exact: true })).toBeVisible();
@@ -393,7 +349,6 @@ test('adds a customer through the State prompt with a standardized address, and 
     await expect(field(confirmation, 'Name')).toHaveValue(first.name);
     await expect(field(confirmation, 'Active (Y/N)')).toHaveValue('Y');
     await expect(field(confirmation, 'Customer Id')).toHaveValue('');
-    // ProtectAll: every confirmed value is read-only.
     await expect(field(confirmation, 'Address')).not.toBeEditable();
     await expect(field(confirmation, 'ZIP')).not.toBeEditable();
     await expect(field(confirmation, 'Name')).not.toBeEditable();
@@ -462,7 +417,6 @@ test('adds a customer through the State prompt with a standardized address, and 
       await expect(field(add, label), `${label} is not highlighted by DEM9898`).not.toHaveAttribute('aria-invalid');
     }
     await expect(field(add, 'Address')).toBeFocused();
-    // The review failed, so the window stays on the editable form with the entries kept.
     await expect(add.getByRole('group', { name: 'Confirm customer' })).toHaveCount(0);
     await expect(field(add, 'Address')).toHaveValue(NOT_FOUND_ADDR);
 

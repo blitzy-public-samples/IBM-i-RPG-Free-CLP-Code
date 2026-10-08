@@ -20,58 +20,31 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * The server's one source of message texts, keyed by message id.
+ * The server's one source of message texts, keyed by message id. The classpath resource
+ * {@value #LOCATION} replaces the {@code CUSTMSGF} message file built by {@code CRTMSGF}, and
+ * {@link #text(String, Object...)} resolves an id to its text in place of the {@code SndMsgPgmQ}
+ * procedure of {@code SRV_MSG}. The file holds the {@code CUSTMSGF} ids ({@code &1} written as
+ * {@code {0}}, message-text typo corrections applied) plus the {@code APPnnnn} keys. Texts are corrected
+ * in the file, never in code, and this class checks no key set.
  *
- * <p><b>What it replaces.</b> On the IBM i, the CL program {@code CRTMSGF} built the message file
- * {@code CUSTMSGF} from 17 {@code ADDMSGD} descriptions, and the {@code SndMsgPgmQ} procedure of the
- * {@code SRV_MSG} service program sent a message id plus its substitution data through the
- * {@code QMHSNDPM} API, which resolved the id against the message file and placed the resulting text in
- * the screen's message subfile. Here the message file becomes the classpath resource
- * {@value #LOCATION}, and the id-to-text resolution becomes {@link #text(String, Object...)}. The catalog
- * is data, not a queue: nothing is sent or cleared, so the {@code ClrMsgPgmQ} procedure has no
- * counterpart.
+ * <p><b>Substitution rule.</b> Each {@code {n}}, where {@code n} is a run of ASCII digits, is replaced
+ * literally by the {@code n}-th argument (0-based, rendered with {@link String#valueOf(Object)}) in one
+ * left-to-right pass, with no escaping syntax; {@link #text(String, Object...)} states the details.
+ * {@link java.text.MessageFormat} is deliberately not used: it treats an apostrophe as a quote and
+ * would corrupt data such as {@code NIBH L'LOR COMPANY}. The browser applies the identical rule to the
+ * texts served by {@code GET /api/messages}. Arguments are not trimmed: {@code SndMsgPgmQ} trims
+ * trailing blanks from its fixed-length message data, but callers of this class pass normalized values
+ * and the browser does not trim, so trimming would make the two sides disagree.
  *
- * <p><b>Contents.</b> The file holds the 17 CUSTMSGF ids with their texts ({@code &1} written as
- * {@code {0}}, and the message-text typo corrections already applied) plus the {@code APPnnnn} keys for
- * conditions the IBM i programs never reach. Texts are corrected in the file, never in code. This class
- * checks no key set: it loads whatever the file holds, so a corrected or added text needs no Java change.
+ * <p><b>Loading and order.</b> The file is read once, in the constructor, as strict UTF-8 (malformed or
+ * unmappable bytes fail rather than becoming replacement characters) with the JDK properties syntax. A
+ * missing or unreadable file, a malformed {@code \}{@code uXXXX} escape or a duplicate key aborts
+ * start-up with {@link IllegalStateException} naming the file, because plain {@link Properties} would
+ * silently keep the last duplicate and lose the file order. {@link #all()} keeps the file order, which
+ * {@code GET /api/messages} reproduces.
  *
- * <p><b>Substitution rule.</b> {@code {n}}, where {@code n} is a run of ASCII digits, is replaced
- * literally by the {@code n}-th argument (0-based) rendered with {@link String#valueOf(Object)}. The
- * template is scanned once, left to right: a placeholder with no matching argument stays exactly as
- * written, and text inserted from an argument is never scanned again. Apostrophes, dollar signs,
- * backslashes and braces that do not form {@code {digits}} are ordinary characters, and there is no
- * escaping syntax. {@link java.text.MessageFormat} is deliberately not used: it treats an apostrophe as
- * a quote and would corrupt data such as {@code NIBH L'LOR COMPANY}. The browser's message catalog
- * provider applies this identical rule to the texts served by {@code GET /api/messages}, so a message
- * reads the same whichever side formats it.
- *
- * <p><b>Arguments are not trimmed.</b> {@code SndMsgPgmQ} trimmed trailing blanks from the message
- * data because RPG passed it in fixed-length fields. Callers here pass already-normalized values and
- * field labels, and the browser rule does not trim either, so trimming here would make the two sides
- * disagree.
- *
- * <p><b>Loading.</b> The file is read once, in the constructor, as strict UTF-8 (malformed or
- * unmappable bytes fail rather than turning into replacement characters), with the JDK properties
- * syntax: {@code #} and {@code !} comments, blank lines, {@code =}, {@code :} or whitespace separators,
- * backslash line continuations and {@code \}{@code uXXXX} escapes. A missing file, an unreadable file,
- * a malformed {@code \}{@code uXXXX} escape or a key that appears twice aborts application start-up
- * with {@link IllegalStateException}, whose message names the file; plain
- * {@link Properties} would silently keep the last of two duplicate keys and lose the file order.
- *
- * <p><b>Order.</b> {@link #all()} keeps the file order, so {@code GET /api/messages} lists the
- * messages as the file does.
- *
- * <p><b>Thread safety.</b> All state is built in the constructor and never changes afterwards; the
- * map is unmodifiable, so the bean is safe to share across request threads without locking.
- *
- * <p>Example, with the packaged catalog:
- * <pre>{@code
- * catalog.text("DEM0502", "Name");                // "Name: Must not be blank"
- * catalog.text("DEM9898", "Address Not Found.");  // "USPS: Address Not Found."
- * catalog.text("DEM0004");                        // "{0} is not a valid option at this time."
- * catalog.all().get("DEM1002");                   // "Someone else changed record. Review data."
- * }</pre>
+ * <p><b>Thread safety.</b> All state is built in the constructor and the map is unmodifiable, so the
+ * bean is safe to share across request threads.
  */
 @Component
 public final class MessageCatalog {

@@ -33,71 +33,31 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /**
  * The one maintenance flow of the customer master: display, review, add and change one customer
- * (F-002; UC-02, UC-03, UC-04).
- *
- * <p><b>What it replaces.</b> Both MTNCUSTR variants. The 5250 variant supplies the record
- * procedures and the nine field rules; the USPS variant runs the same logic and adds
- * {@code Edit_Address}:
- * <table>
- *   <caption>Source procedure and method</caption>
- *   <tr><th>Source</th><th>Here</th></tr>
- *   <tr><td>{@code ReadRecd} [5250_Subfile/MTNCUSTR.SQLRPGLE:315-338] for function {@code D}
- *       and {@code E}</td>
- *       <td>{@link #get(CustomerId)}; a missing row is 404 DEM0599 instead of
- *       {@code SQLProblem('Calling error 1 ...')} ending the program</td></tr>
- *   <tr><td>{@code EditUpdData} / {@code EditAddData} [5250_Subfile/MTNCUSTR.SQLRPGLE:387-544],
- *       then {@code Edit_Address} [USPS_Address/MTNCUSTR.SQLRPGLE:471-499], then the
- *       DEM0000 / DEM0009 confirmation [5250_Subfile/MTNCUSTR.SQLRPGLE:225,277]</td>
- *       <td>{@link #review(Purpose, Customer)}</td></tr>
- *   <tr><td>{@code AddRecd} [5250_Subfile/MTNCUSTR.SQLRPGLE:548-566]: CUSTNEXT
- *       {@code in *LOCK}, {@code BASE36ADD}, {@code out}, stamp, {@code insert}</td>
- *       <td>{@link #add(Customer)}, with {@link CustomerIdAllocator#next()} in place of the data
- *       area</td></tr>
- *   <tr><td>{@code UpdateRecd} [5250_Subfile/MTNCUSTR.SQLRPGLE:567-607]: {@code update ...
- *       where CUSTID = :CUSTID and CHGTIME = :Orig_CHGTIME}, then {@code SQLNODATA} → DEM1002
- *       and re-read, {@code SQLROWLOCKED} → DEM1001</td>
- *       <td>{@link #update(CustomerId, Customer, long)}, with the {@code row_version} token in
- *       place of the timestamp equality</td></tr>
- * </table>
+ * (F-002; UC-02, UC-03, UC-04). It replaces both MTNCUSTR variants; each method cites the source
+ * procedure it replaces ({@code ReadRecd}, {@code EditUpdData} and {@code Edit_Address},
+ * {@code AddRecd}, {@code UpdateRecd}) in its own documentation.
  *
  * <p><b>One flow for both variants.</b> Every write runs all nine 5250 field rules in 5250 order,
  * stopping at the first error ({@link CustomerValidator}). Address standardization runs only in
  * {@link #review(Purpose, Customer)}, after the nine rules pass, so the user confirms the
  * standardized values before saving; {@link #add(Customer)} and
- * {@link #update(CustomerId, Customer, long)} re-run the field rules as an API guard but never call
- * the address service again. With standardization disabled the flow is exactly the 5250 variant,
- * because {@link AddressStandardizationService} then returns the address unchanged.
+ * {@link #update(CustomerId, Customer, long)} re-run the rules as an API guard but never call the
+ * address service. With standardization disabled the flow is exactly the 5250 variant. A review
+ * failure after the State rule reports the accepted input State ({@code stateAccepted}); see
+ * {@link #review(Purpose, Customer)}.
  *
- * <p><b>Normalization.</b> Every value is passed through {@link TextNormalizer#field(String)}
- * before the rules run: trailing blanks are removed (CHAR padding parity) and text is uppercased
- * with the length-preserving rule, as the 5250 fields without {@code CHECK(LC)} uppercase what is
- * keyed [5250_Subfile/MTNCUSTD.DSPF:54-133]. An absent {@code active} on an add, or on an ADD
- * review, becomes {@code Y}, as {@code ADDING} sets {@code ACTIVE = 'Y'} before the first screen
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:251-255]; any value that is present, blank included, is validated
- * as given.
+ * <p><b>Normalization.</b> Values pass through {@link TextNormalizer#field(String)} before the
+ * rules, as the 5250 fields without {@code CHECK(LC)} uppercase what is keyed
+ * [5250_Subfile/MTNCUSTD.DSPF:54-133]. An absent {@code active} on an add or an ADD review becomes
+ * {@code Y} [5250_Subfile/MTNCUSTR.SQLRPGLE:251-255]. The details are at {@code normalize}.
  *
- * <p><b>Transactions and locking.</b>
- * <ul>
- *   <li>{@link #get(CustomerId)}: one read-only transaction, whose read runs through
- *       {@link LockWaitingReads}: behind a table lock, such as a generator load's
- *       {@code ACCESS EXCLUSIVE}, it waits until the holder commits, re-checking after every
- *       {@code customer-master.db.lock-timeout}, so the 45-second socket bound only ends a read on a
- *       database that stops answering.</li>
- *   <li>{@link #review(Purpose, Customer)}: no transaction, so no connection is held while the
- *       address service is called. The class carries no {@code @Transactional} for this reason.</li>
- *   <li>{@link #add(Customer)}: one transaction: {@code SET LOCAL lock_timeout}, the allocation guard
- *       and {@code nextval} inside {@link CustomerIdAllocator#next()}, then the {@code INSERT}.
- *       The field rules and the principal check run before {@code SET LOCAL lock_timeout}, the
- *       allocation and any write, so a rejected add consumes no id. If the State rule is the first
- *       use of the {@code StateService} cache, the cache loads with one read of STATES inside this
- *       transaction, before the lock timeout is set.</li>
- *   <li>{@link #update(CustomerId, Customer, long)}: one transaction: {@code SET LOCAL lock_timeout},
- *       then {@code UPDATE ... WHERE custid = ? AND row_version = ?}. When no row matches, the row is
- *       re-read in the same transaction: absent gives 404 DEM0599, present gives 409 DEM1002 with the
- *       row as now stored.</li>
- * </ul>
- * No row lock outlives the request: there is no {@code SELECT ... FOR UPDATE}, and this class never
- * touches the id sequence itself. A write's lock wait longer than
+ * <p><b>Transactions and locking.</b> {@link #review(Purpose, Customer)} runs with no transaction,
+ * so no connection is held during the address call; this is why the class carries no
+ * {@code @Transactional}. {@link #get(CustomerId)}, {@link #add(Customer)} and
+ * {@link #update(CustomerId, Customer, long)} each run in one transaction, described at each
+ * method. No row lock outlives a request, so none is held across think time: there is no
+ * {@code SELECT ... FOR UPDATE}, and the id sequence is touched only through
+ * {@link CustomerIdAllocator}. A write's lock wait longer than
  * {@code customer-master.db.lock-timeout} (SQLSTATE {@code 55P03}, the counterpart of the source's
  * {@code 57033}, recognised by {@link LockWaitingReads#isLockWait(Throwable)}) becomes
  * {@link CustomerLockedException}, 409 DEM1001.
@@ -106,21 +66,13 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * injected {@link Clock}, {@code chguser} from {@link CurrentUser#name()} (the authenticated
  * principal, never the database role) and {@code row_version} are written by the same
  * {@code INSERT} or {@code UPDATE} as the data, so they commit or roll back with it. After each
- * commit one INFO line {@code customer.write action=ADD|UPDATE custId=... user=... version=...} is
- * logged; it carries no customer data beyond the id. The line is operational and best-effort: a
- * logging failure never changes the outcome of the committed write, and is reported instead by one
- * line on standard error.
+ * commit one operational INFO line,
+ * {@code customer.write action=ADD|UPDATE custId=... user=... version=...}, is logged with no
+ * customer data beyond the id. It is best-effort: a logging failure never changes the outcome of
+ * the committed write (details at {@code registerAfterCommitLog}).
  *
  * <p><b>Errors.</b> Every failure is a typed exception carrying a message code only; no SQL text
  * or SQLSTATE reaches a message. {@code controller.ApiExceptionHandler} maps them to problem+json.
- *
- * <p>Example, as the controller calls it:
- * <pre>{@code
- * ReviewResult checked = service.review(Purpose.ADD, draft);  // 200 DEM0009, or 422 / 502
- * Customer added = service.add(checked.customer());            // EEEF on a fresh database
- * Customer changed = service.update(added.custId(), edited, added.rowVersion());
- * changed.rowVersion();                                        // 1
- * }</pre>
  *
  * <p>The bean is stateless apart from its collaborators and the lock-timeout statement fixed at
  * construction, so it is thread-safe. It is deliberately not {@code final}: Spring proxies it for

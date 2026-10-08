@@ -31,17 +31,13 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 /**
- * The single builder of RFC 9457 {@code application/problem+json} error bodies.
- *
- * <p><b>What it replaces.</b> On the IBM i, an interactive program reported a condition by sending a
- * {@code CUSTMSGF} message id plus substitution data to its program message queue through
- * {@code SndMsgPgmQ} ({@code SRV_MSG}), which the screen's message subfile then displayed; a
- * "never should happen" SQL error went through {@code SQLProblem} ({@code SRV_SQL}), which dumped the
- * program and ended it with a CPF9898 escape message carrying the SQLSTATE and the SQL message text.
- * Here every error response is a {@link ProblemDetail} whose {@code code} is the catalog key and whose
- * {@code detail} is the catalog text with the arguments substituted, and nothing internal (SQL text,
- * SQLSTATE, stack trace, exception message, class name) ever reaches the body. The SQLSTATE survives only
- * in the server log, through {@link #findSqlState(Throwable)}.
+ * The single builder of RFC 9457 {@code application/problem+json} error bodies. It replaces
+ * {@code SndMsgPgmQ} ({@code SRV_MSG}), which sends a {@code CUSTMSGF} message id and its substitution
+ * data to the message subfile, and {@code SQLProblem} ({@code SRV_SQL}), whose CPF9898 escape message
+ * carries the SQLSTATE and the SQL message text. Every body carries the catalog key as {@code code} and
+ * the catalog text, with the arguments substituted, as {@code detail}; nothing internal (SQL text,
+ * SQLSTATE, stack trace, exception message, class name) reaches it. The SQLSTATE survives only in the
+ * server log, through {@link #findSqlState(Throwable)}.
  *
  * <p><b>Ownership.</b> No other class constructs a {@code ProblemDetail} or writes a problem body:
  * {@code ApiExceptionHandler} uses {@link #response(ProblemDetail, HttpHeaders)} for errors that reach
@@ -51,37 +47,25 @@ import org.springframework.stereotype.Component;
  * {@link #write(HttpServletResponse, ProblemDetail)}.
  *
  * <p><b>Dependency direction.</b> The security configuration depends on this class, so it imports only
- * {@link MessageCatalog}, Spring, Jackson, Jakarta Servlet, SLF4J and the JDK. It never imports DTOs,
- * services, security or domain types; that is why {@link #withCurrent(ProblemDetail, Object)} accepts a
- * plain {@code Object}. Importing any of them would close a cycle through the security package.
+ * {@link MessageCatalog}, Spring, Jackson, Jakarta Servlet, SLF4J and the JDK. A DTO, service, security
+ * or domain import would close a cycle through the security package, which is why
+ * {@link #withCurrent(ProblemDetail, Object)} takes a plain {@code Object}.
  *
  * <p><b>Body shape.</b> {@code type} ({@value #TYPE_PREFIX}{@code <code>}), {@code title} (the HTTP
  * reason phrase), {@code status}, {@code detail}, {@code instance} (the request path), then the
- * properties in insertion order: {@code code}, {@code args} (always present, possibly empty), and, only
+ * properties in insertion order: {@code code}, {@code args} (always present, possibly empty) and, only
  * when a helper sets them, {@code errors}, {@code current}, {@code stateAccepted} and {@code errorId}.
- * The properties appear as top-level members because the Boot-configured {@link ObjectMapper} carries
- * Spring's {@code ProblemDetailJacksonMixin}; a plain {@code new ObjectMapper()} would nest them under
- * {@code properties}, so this class always serializes with the injected mapper. The OpenAPI document
- * describes this shape as the {@code Problem} schema, from the documentation-only {@code ProblemSchema}
- * record, which changes whenever this shape does.
- *
- * <p>Example:
- * <pre>{@code
- * ProblemDetail p = problems.create(HttpStatus.UNPROCESSABLE_ENTITY, "DEM0502", List.of("Name"),
- *         "/api/customers/review");
- * problems.withErrors(p, List.of(problems.fieldProblem("name", "DEM0502", List.of("Name"))));
- * // {"type":"urn:customer-master:problem:DEM0502","title":"Unprocessable Entity","status":422,
- * //  "detail":"Name: Must not be blank","instance":"/api/customers/review","code":"DEM0502",
- * //  "args":["Name"],"errors":[{"field":"name","code":"DEM0502","message":"Name: Must not be blank"}]}
- * return problems.response(p);
- * }</pre>
+ * The properties are top-level members because the Boot-configured {@link ObjectMapper} carries
+ * Spring's {@code ProblemDetailJacksonMixin}; a plain {@code new ObjectMapper()} nests them under
+ * {@code properties}, so this class serializes only with the injected mapper. The documentation-only
+ * {@code ProblemSchema} record describes this shape as the OpenAPI {@code Problem} schema and changes
+ * with it.
  *
  * <p><b>Thread safety.</b> One instance serves every request thread without locking. Its only instance
- * fields are two final collaborators. The {@link MessageCatalog} is immutable. The {@link ObjectMapper}
- * is mutable, but Spring Boot configures it completely before injecting it here, and this class never
- * reconfigures it; it only serializes with it, which Jackson supports concurrently once configuration
- * is complete. Request data stays isolated because every {@code ProblemDetail} and {@link FieldProblem}
- * this class builds is a new, request-local object that it never shares or retains.
+ * fields are two final collaborators: the immutable {@link MessageCatalog} and the {@link ObjectMapper},
+ * which Spring Boot configures completely before injecting it and which this class only serializes
+ * with, as Jackson allows concurrently. Every {@code ProblemDetail} and {@link FieldProblem} it builds
+ * is a new, request-local object that it never shares or retains.
  */
 @Component
 public class ProblemFactory {
@@ -92,10 +76,8 @@ public class ProblemFactory {
     /** The media type of every error body. */
     public static final MediaType PROBLEM_JSON = MediaType.APPLICATION_PROBLEM_JSON;
 
-    /** Property holding the catalog key. */
     static final String PROPERTY_CODE = "code";
 
-    /** Property holding the substitution values, as strings. */
     static final String PROPERTY_ARGS = "args";
 
     /** Property holding the field errors; the first entry receives focus in the UI. */
@@ -113,7 +95,6 @@ public class ProblemFactory {
     /** Upper bound on the cause chain walked by {@link #findSqlState(Throwable)}. */
     private static final int MAX_CAUSE_DEPTH = 20;
 
-    /** The {@code Content-Type} header value written by {@link #write(HttpServletResponse, ProblemDetail)}. */
     private static final String PROBLEM_JSON_VALUE = MediaType.APPLICATION_PROBLEM_JSON_VALUE;
 
     /**

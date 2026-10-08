@@ -20,15 +20,11 @@ import java.util.Objects;
  * every missing-row case becomes this one exception and the one message the source already defines for
  * it. The program dump and the SQL diagnostics are not reproduced.
  *
- * <p><b>Throwers.</b> {@code CustomerMaintenanceService.get} when {@code GET /api/customers/{custId}}
- * names no stored row, and {@code CustomerMaintenanceService.update} when {@code PUT
- * /api/customers/{custId}} names no stored row: the versioned {@code UPDATE} changes zero rows and the
- * re-read in the same transaction finds nothing. A re-read that does find the row raises
- * {@code StaleCustomerException} instead.
- *
- * <p><b>Mapping.</b> This class knows nothing of HTTP. {@code controller.ApiExceptionHandler} alone maps
- * it, through {@code controller.ProblemFactory}, to a 404 {@code application/problem+json} response
- * whose {@code code} is {@code DEM0599} and whose {@code detail} is the catalog text.
+ * <p><b>Throwers.</b> {@code CustomerMaintenanceService.get} and {@code CustomerMaintenanceService.update}
+ * when the id names no stored row; for an update, the re-read after a versioned {@code UPDATE} that
+ * changed zero rows finds nothing. A re-read that does find the row raises
+ * {@code StaleCustomerException} instead. {@code controller.ApiExceptionHandler} maps it to HTTP 404
+ * {@code DEM0599}.
  *
  * <p><b>What never travels.</b> The exception message is the catalog code {@code DEM0599} alone. It
  * holds no SQL text, no SQLSTATE and not the requested id, so a log line or a stray
@@ -37,17 +33,6 @@ import java.util.Objects;
  *
  * <p>The package depends only on the JDK and the domain types, which import nothing from the service
  * layer, so repositories and services can throw it without a dependency cycle.
- *
- * <pre>{@code
- * Customer customer = repository.findById(id)
- *         .orElseThrow(() -> new CustomerNotFoundException(id));
- * }</pre>
- *
- * <p>The application payload is immutable: the final {@code id} field is set once by the constructor
- * and holds an immutable {@link CustomerId}. The exception instance itself is not immutable, because
- * it inherits the mutable stack trace, suppressed exceptions and cause of {@link Throwable}. A new
- * instance is created for each failure and stays with the request that raised it; it is not cached,
- * shared or reused across requests or threads.
  */
 public final class CustomerNotFoundException extends RuntimeException {
 

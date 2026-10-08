@@ -14,22 +14,9 @@ import org.springframework.data.jdbc.repository.config.AbstractJdbcConfiguration
  * Spring Data JDBC configuration of customer-api: registers the converters that store a
  * {@link CustomerId} in the {@code custmast.custid char(4)} column and read it back.
  *
- * <p>Replaces the CHAR(4) CUSTID handling of {@code 5250_Subfile/MTNCUSTR.SQLRPGLE}, where
- * {@code CUSTMAST_ds extname('CUSTMAST')} carries {@code CUSTID} as plain 4-character text
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:61], {@code ReadRecd} selects by {@code CUSTID = :pID}
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:316-333] and {@code AddRecd} inserts the record
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:558-560]. The column is {@code CustID CHAR(4)} in
- * [5250_Subfile/Custmast2.sql:10] and {@code custid char(4)} in migration V3. In the target the
- * key is the {@link CustomerId} value type, and these converters keep it a 4-character string in
- * the database:
- * <ul>
- *   <li>writing: {@link CustomerId#toString()}, the 4 characters, for the {@code INSERT}, the
- *       {@code WHERE custid = ?} of {@code findById} and the versioned {@code UPDATE};</li>
- *   <li>reading: {@link CustomerId#parse(String)}, the shared codec, which rejects anything
- *       outside {@code ^[A-Z0-9]{4}$}. Nothing is trimmed or padded, because a {@code char(4)}
- *       value always reads back as exactly 4 characters and V3's {@code custmast_custid_ck}
- *       admits only that format.</li>
- * </ul>
+ * <p>CUSTID is {@code CHAR(4)} text in the source [5250_Subfile/Custmast2.sql:10] and
+ * {@code custid char(4)} in migration V3; the converters keep the {@link CustomerId} key a
+ * 4-character string in the database.
  *
  * <p><b>Values only.</b> The converters map values and nothing else. Column names come from the
  * {@code @Column} annotations on {@code Customer}, {@code Address} and {@code State}, and the
@@ -93,7 +80,6 @@ public class JdbcConfig extends AbstractJdbcConfiguration {
     @WritingConverter
     enum CustomerIdToStringConverter implements Converter<CustomerId, String> {
 
-        /** The only instance. */
         INSTANCE;
 
         /**
@@ -115,7 +101,6 @@ public class JdbcConfig extends AbstractJdbcConfiguration {
     @ReadingConverter
     enum StringToCustomerIdConverter implements Converter<String, CustomerId> {
 
-        /** The only instance. */
         INSTANCE;
 
         /**

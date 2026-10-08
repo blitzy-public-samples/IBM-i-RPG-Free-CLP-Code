@@ -1,25 +1,13 @@
 /**
- * Browser entry point of the Customer Master SPA.
- *
- * What it replaces. On IBM i a menu called PMTCUSTR with its mode; the
- * program opened its display file and ran `Init` each time it was entered
- * [5250_Subfile/PMTCUSTR.SQLRPGLE:706-767]. Here the browser loads
- * `index.html`, which loads this module, and React mounts the provider tree
- * in `App` once into `<div id="root">`. Screens then mount and unmount beneath
- * it, which is the program lifecycle in web terms.
+ * Browser entry point: mounts `App` under `StrictMode` into `#root`.
  *
  * Stylesheet order is a contract: `tokens.css` declares the CSS custom
- * properties (palette, spacing, type, focus ring, inactive red, the
- * reverse-image error colours), and `global.css`, which consumes them through
- * `var(--…)`, must load after it.
+ * properties (palette, spacing, type, focus ring), and `global.css`, which
+ * consumes them through `var(--…)`, must load after it.
  *
  * `StrictMode` stays on. The providers beneath it tolerate double-invoked
  * effects: the one document key listener and the message-catalog fetch are
  * idempotent.
- *
- * Deliberately nothing else lives here: providers belong to `App.tsx`, the
- * key listener to `KeyScopeProvider`, message texts to the catalog served by
- * `GET /api/messages`; there is no service worker and no analytics.
  */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';

@@ -1,23 +1,7 @@
 /**
- * Typed calls to the customers resource: search, read, review, add, update.
+ * Typed calls to the customers resource. Each call is one stateless request:
+ * the server keeps no cursor, lock or conversation between calls.
  *
- * What it replaces. On the 5250, PMTCUSTR read the list through its `ItemCur`
- * cursor (5250_Subfile/PMTCUSTR.SQLRPGLE:208-223) and called MTNCUSTR as a
- * program with the customer id and a function code (`CustDsp`,
- * 5250_Subfile/PMTCUSTR.SQLRPGLE:76-90; 5250_Subfile/MTNCUSTR.SQLRPGLE:45-48),
- * which read, edited and wrote CUSTMAST itself. Here each of those steps is one
- * stateless HTTP request; the server keeps no cursor, no lock and no
- * conversation between them.
- *
- * | Call     | Request                           | Success                              |
- * |----------|-----------------------------------|--------------------------------------|
- * | `search` | `GET /api/customers?…`            | 200 `SearchResponse`                 |
- * | `get`    | `GET /api/customers/{custId}`     | 200 `CustomerResponse`               |
- * | `review` | `POST /api/customers/review`      | 200 `ReviewResponse`                 |
- * | `add`    | `POST /api/customers`             | 201 `CustomerResponse`, version 0    |
- * | `update` | `PUT /api/customers/{custId}`     | 200 `CustomerResponse`, version + 1  |
- *
- * Constraints:
  * - Trust boundary. A write body holds only what the API accepts from a
  *   caller: the nine customer data fields, plus `purpose` on review and
  *   `version` on update. It never carries `custId` (the server allocates it on
@@ -28,41 +12,19 @@
  *   `current` customer of a 409, a `CustomerResponse` that does carry
  *   `custId`, `chgTime` and `chgUser`, and the API rejects any unknown
  *   property with 400 APP0400.
- * - Errors. Nothing here catches. Every non-2xx response rejects with the
- *   `ApiError` of `./client`, which the calling feature hands to
- *   `errors/useProblemPresenter.ts`.
- * - Cancellation. Only the reads, `search` and `get`, take an `AbortSignal`,
- *   which a query passes on so a read nobody waits for any more is aborted;
- *   abandoned before its answer arrived, it rejects with the signal's
- *   reason, while an error answer that arrived still rejects with its
+ * - Cancellation. Only the reads, `search` and `get`, take an `AbortSignal`.
+ *   A read abandoned before its answer arrived rejects with the signal's
+ *   reason, not an `ApiError`; an error answer that arrived keeps its
  *   `ApiError`. `review`, `add` and `update` take none: a write is never
  *   cancelled, because once sent it may commit.
- * - Layer rule. The only runtime import is `request` from `./client`; types
- *   come from the generated `./schema` as type-only imports. Nothing is
- *   imported from `components/`, `errors/`, `features/` or `auth/`, and
- *   nothing here renders, touches the DOM or keeps state.
+ * - Errors. Nothing here catches: every non-2xx response rejects with the
+ *   `ApiError` of `./client`.
  * - API types. Features import the customer types from this module, never
  *   from `./schema` directly.
- *
- * @example
- * ```ts
- * const page = await customersApi.search({ name: 'NIBH' });
- * const customer = await customersApi.get('AAAD');
- * const reviewed = await customersApi.review({ purpose: 'EDIT', ...draft });
- * const saved = await customersApi.update(customer.custId, {
- *   ...reviewed.customer,
- *   version: customer.version,
- * });
- * ```
  */
 import { request } from './client';
 import type { components, operations } from './schema';
 
-// ---------------------------------------------------------------------------
-// Types (aliases of the generated OpenAPI schemas)
-// ---------------------------------------------------------------------------
-
-/** The generated OpenAPI component schemas. */
 type Schemas = components['schemas'];
 
 /**
@@ -119,10 +81,6 @@ export type ReviewPurpose = ReviewRequest['purpose'];
  */
 export type CustomerSearchParams = NonNullable<operations['searchCustomers']['parameters']['query']>;
 
-// ---------------------------------------------------------------------------
-// Field names
-// ---------------------------------------------------------------------------
-
 /**
  * The nine JSON property names of the customer data fields, in screen order:
  * Active, Name, Address, City, State, ZIP, Account Manager Phone, Account
@@ -142,7 +100,6 @@ export const CUSTOMER_FIELD_NAMES = [
   'corpPhone',
 ] as const satisfies readonly (keyof CustomerFields)[];
 
-/** One of the nine customer data field names. */
 export type CustomerFieldName = (typeof CUSTOMER_FIELD_NAMES)[number];
 
 /** Rows per search page: SFLPAG 12 of PMTCUSTD (5250_Subfile/PMTCUSTR.SQLRPGLE:134). */
@@ -168,20 +125,12 @@ function pickFields(source: Partial<CustomerFields>): CustomerFields {
   return fields;
 }
 
-/** The path of one customer; the id is percent-encoded, so no value can leave the path segment. */
+/** Percent-encodes the id, so no value can leave the path segment. */
 function customerPath(custId: string): string {
   return `/api/customers/${encodeURIComponent(custId)}`;
 }
 
-// ---------------------------------------------------------------------------
-// The calls
-// ---------------------------------------------------------------------------
-
-/**
- * The customers resource. Each method sends one request through `./client`
- * (HTTP Basic, `X-Requested-With`) and resolves with the parsed body; a
- * non-2xx response rejects with `ApiError`, uncaught.
- */
+/** The customers resource; each method resolves with the parsed response body. */
 export const customersApi = {
   /**
    * One page of customers matching the filters, in name, city, state, id
@@ -194,11 +143,8 @@ export const customersApi = {
    * (`state` neither blank nor two characters), with `errors` naming the
    * parameter.
    *
-   * `signal`, when given, aborts the read once its list is no longer wanted
-   * (replaced by a new search, reset, or left by an unmounted owner); a call
-   * abandoned before its answer arrived then rejects with the signal's
-   * reason, not an `ApiError`, while an error answer that arrived keeps its
-   * `ApiError`.
+   * `signal` aborts the read once its list is no longer wanted; see
+   * Cancellation in the module comment.
    */
   search(params: CustomerSearchParams = {}, signal?: AbortSignal): Promise<SearchResponse> {
     return request<SearchResponse>('/api/customers', {
@@ -220,10 +166,8 @@ export const customersApi = {
    * Rejects with 404 DEM0599 when the customer no longer exists, and 400
    * APP0400 when `custId` is not four characters of A–Z and 0–9.
    *
-   * `signal`, when given, aborts the read once nobody waits for it (the
-   * window that asked closed); a call abandoned before its answer arrived
-   * then rejects with the signal's reason, not an `ApiError`, while an
-   * error answer that arrived keeps its `ApiError`.
+   * `signal` aborts the read once nobody waits for it; see Cancellation in
+   * the module comment.
    */
   get(custId: string, signal?: AbortSignal): Promise<CustomerResponse> {
     return request<CustomerResponse>(customerPath(custId), { signal });

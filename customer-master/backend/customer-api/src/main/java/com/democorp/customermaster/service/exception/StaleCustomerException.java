@@ -20,44 +20,19 @@ import java.util.Objects;
  * in place of the source's {@code ReadRecd}. No lock is held across the user's think time, as in the
  * source.
  *
- * <p><b>Thrower.</b> {@code CustomerMaintenanceService.update}, for {@code PUT /api/customers/{custId}},
- * when the versioned {@code UPDATE} changes no row and the re-read finds the row with a different
- * {@code row_version}. A re-read that finds nothing raises {@link CustomerNotFoundException} instead, and
- * a lock wait that expires raises {@link CustomerLockedException}, the counterpart of the source's
- * {@code SQLROWLOCKED} branch.
- *
- * <p><b>Mapping.</b> This class knows nothing of HTTP or of the API's DTOs.
- * {@code controller.ApiExceptionHandler} alone maps it, through {@code controller.ProblemFactory}, to a 409
- * {@code application/problem+json} response whose {@code code} is {@code DEM1002}, whose {@code detail}
- * is the catalog text, and whose {@code current} member is {@link #current()} rendered in the
- * {@code CustomerResponse} shape, including its {@code version}. The client's
- * {@code ConflictCompareDialog} compares the user's values with that record, and either loads it
- * ("Refresh", the source behaviour) or re-applies the user's edits onto it with its version.
+ * <p><b>Thrower.</b> {@code CustomerMaintenanceService.update}, when the versioned {@code UPDATE} changes
+ * no row and the re-read finds the row; a re-read that finds nothing raises
+ * {@link CustomerNotFoundException} instead. {@code controller.ApiExceptionHandler} maps it to HTTP 409
+ * {@code DEM1002}, with {@link #current()} rendered as the problem's {@code current} member, including its
+ * {@code version}.
  *
  * <p><b>What never travels.</b> The exception message is the catalog code {@code DEM1002} alone. It
  * holds no SQL text, no SQLSTATE and no customer data: neither {@link #getMessage()} nor
  * {@link #toString()} renders the stored row, so a log line written for this exception records no
- * customer data. The row reaches the client only through the explicit
- * {@code current} member the handler builds.
+ * customer data.
  *
  * <p>The package depends only on the JDK and the domain types, which import nothing from the service
  * layer, so the maintenance service can throw it without a dependency cycle.
- *
- * <pre>{@code
- * try {
- *     return repository.save(edited);
- * } catch (OptimisticLockingFailureException e) {
- *     Customer stored = repository.findById(edited.custId())
- *             .orElseThrow(() -> new CustomerNotFoundException(edited.custId()));
- *     throw new StaleCustomerException(stored);
- * }
- * }</pre>
- *
- * <p>The application payload is immutable: the final {@code current} field is set once by the
- * constructor and holds a {@link Customer}, which is itself immutable, so no defensive copy is taken.
- * The exception instance itself is not immutable, because it inherits the mutable stack trace,
- * suppressed exceptions and cause of {@link Throwable}. A new instance is created for each failure and
- * stays with the request that raised it; it is not cached, shared or reused across requests or threads.
  */
 public final class StaleCustomerException extends RuntimeException {
 

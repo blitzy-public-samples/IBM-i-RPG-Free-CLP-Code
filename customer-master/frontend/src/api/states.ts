@@ -1,58 +1,21 @@
 /**
- * The states resource: the typed call behind the State picker.
+ * The states resource: the typed call behind the State picker,
+ * `GET /api/states?nameContains=&sort=name|code` → 200 `[{state, name}]`.
  *
- * What it replaces. On the 5250, the State prompt was the program PMTSTATER,
- * called with the state field as its one parameter (`PmtState
- * extpgm('PMTSTATER')`, 5250_Subfile/PMTCUSTR.SQLRPGLE:87-90, and the
- * `pState` parameter of 5250_Subfile/PMTSTATER.SQLRPGLE:52-54). Its cursor
- * `DataCur` read STATES with `upper(NAME) like '%<filter>%'` and ordered the
- * rows by NAME or by STATE as F7 toggled them
- * (5250_Subfile/PMTSTATER.SQLRPGLE:150-162,262-273,395-400). Here the same
- * read is one stateless request:
- *
- * `GET /api/states?nameContains=<filter>&sort=name|code` → 200 `[{state, name}]`
- *
- * - `nameContains` is the "Name Contains" entry, at most 10 characters as in
- *   the PMTSTATED field SC_NAME (5250_Subfile/PMTSTATED.DSPF:88). It is sent
- *   exactly as given: the server trims and uppercases it and matches it
- *   anywhere in the uppercased name, and a blank value returns all 58 rows.
- *   An over-long value is answered 400 APP0400.
- * - `sort` is the F7 order: `name` (the order the picker opens with) or
- *   `code`. Any other value is answered 400 APP0400.
- * - Option 1, which returned the code to the caller, is the picker's own
- *   `onSelect(code)`; nothing about it reaches the API.
- *
- * Constraints:
- * - Layer rule: the only runtime import is {@link request} from `./client`,
- *   and types come from the generated `./schema` as type-only imports. Nothing
- *   is imported from `components/`, `errors/`, `features/` or `auth/`; nothing
- *   here renders, touches the DOM or keeps state.
- * - API types: `features/states/*` take {@link StateResponse} and
- *   {@link StateSort} from here and never import `schema.d.ts` themselves.
- * - Errors are not caught. A failed call rejects with the `ApiError` that
- *   `./client` built (400 APP0400, 401 APP0401, 500 DEM9999, or the synthetic
- *   DEM9999 under status 0 when no HTTP response arrived), and the State
- *   picker passes it to `errors/useProblemPresenter.ts`.
- * - No caching. The server's `StateService` holds the states in memory; the
- *   picker loads the list once when it opens and asks again only when Enter
- *   applies a changed filter or F7 changes the order, as PMTSTATER reopened
- *   its cursor.
- *
- * @example
- * ```ts
- * // The picker opens: all states, by name.
- * const all = await statesApi.list('', 'name');
- *
- * // Filter "car" applied with Enter, then F7: North and South Carolina by code.
- * const carolinas = await statesApi.list('car', 'code');
- * ```
+ * - The server filters and orders, as PMTSTATER's name-contains read and F7
+ *   toggle did (5250_Subfile/PMTSTATER.SQLRPGLE:150-162,262-273,395-400): it
+ *   trims and uppercases `nameContains` and matches it anywhere in the
+ *   uppercased name. A filter over the 10 characters of the PMTSTATED field
+ *   (5250_Subfile/PMTSTATED.DSPF:88), or a `sort` other than `name` or `code`,
+ *   is answered 400 APP0400.
+ * - Errors are not caught: a failed call rejects with the `ApiError` that
+ *   `./client` built, and the State picker hands it to `useProblemPresenter`.
+ * - No caching: every call is a new request, which the server answers from
+ *   STATES, and the picker asks again only when Enter applies a changed filter
+ *   or F7 changes the order.
  */
 import { request } from './client';
 import type { components, operations } from './schema';
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /**
  * One row of the state list: alias of the schema `StateResponse`, the two
@@ -73,11 +36,6 @@ type ListStatesQuery = NonNullable<operations['listStates']['parameters']['query
  */
 export type StateSort = NonNullable<ListStatesQuery['sort']>;
 
-// ---------------------------------------------------------------------------
-// The resource
-// ---------------------------------------------------------------------------
-
-/** The typed calls of the states resource. */
 export const statesApi = {
   /**
    * The states whose name contains `nameContains`, in `sort` order.

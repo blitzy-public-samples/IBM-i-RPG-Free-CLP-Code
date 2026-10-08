@@ -130,7 +130,7 @@ No manual step is needed. The services start in health order:
 | API and Swagger UI | `http://localhost:8081/swagger-ui.html` |
 | OpenAPI document | `http://localhost:8081/v3/api-docs` |
 
-The host ports are set by `FRONTEND_PORT` (default 8080) and `API_PORT` (default 8081).
+The host ports are set by `FRONTEND_PORT` (default 8080) and `API_PORT` (default 8081). Both are published on `127.0.0.1` only: the localhost URLs above work, and other machines cannot reach the demo or its publicly known users. To share the UI, override the demo users and `DB_PASSWORD` in `.env` first, then set `FRONTEND_BIND_ADDRESS` to `0.0.0.0` (every interface) or one interface's address; `API_BIND_ADDRESS` does the same for the API port, which is best kept private, because the UI already proxies `/api`.
 
 If another program already holds one of them, `up` cannot bind it and Docker reports the port as already allocated or the address as already in use. Choose unused ports, set them as `FRONTEND_PORT` and `API_PORT` in `.env` (see [Configuration](#configuration)), run `docker compose down` (without `-v`, so the data stays) if the failed start left containers behind, and start again. Then use those ports in place of 8080 and 8081 in the URLs above, the quick API check and the `BASE_URL` of a host Playwright run; `npm run dev` always proxies to 8081, so it needs the default `API_PORT`. To run a second stack beside one already running on the same Docker host, also give it its own `COMPOSE_PROJECT_NAME` (in its `.env`, exported, or with `docker compose -p <name>`): the containers, network, `pgdata` volume and `<name>-app:local` image are named after the project, so under the same name `up` reconfigures the running stack instead of starting a second one.
 

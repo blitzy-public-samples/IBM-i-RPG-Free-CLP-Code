@@ -1,43 +1,23 @@
 /**
- * Edit with confirmation (F-002, UC-03): change one customer through the search list's option 2,
- * with field validation, the confirmation pass and the last-change stamp.
- *
- * What it replays. MTNCUSTR called with function code `E` from PMTCUSTR option 2
+ * Edit with confirmation (F-002, UC-03): a change with field validation, the confirmation and the
+ * last-change stamp, replaying MTNCUSTR function `E` from PMTCUSTR option 2
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:447-466], [5250_Subfile/MTNCUSTR.SQLRPGLE:195-247]:
- * - ReadRecd and FillScreenFields fill the change window; the cursor starts on Name.
- * - Enter runs EditUpdData. A blank Name fails rule 2 with DEM0502 "Name: Must not be blank",
- *   the field shown in reverse image with the cursor on it [5250_Subfile/MTNCUSTR.SQLRPGLE:455-464].
- * - A passed review protects every field and shows DEM0000 "Press Enter to update. F12 to Cancel."
+ * - A blank Name fails rule 2 with DEM0502, the field highlighted with the cursor on it
+ *   [5250_Subfile/MTNCUSTR.SQLRPGLE:455-464]; a passed review shows DEM0000
  *   [5250_Subfile/MTNCUSTR.SQLRPGLE:221-226], [5250_Subfile/CRTMSGF.CLLE:12-13].
- * - F12 (or F5) at the confirmation loops back to ReadRecd: the stored record is shown again and
- *   the entries are discarded. This is a preserved source defect, asserted as the source behaves
- *   [5250_Subfile/MTNCUSTR.SQLRPGLE:226-247].
- * - Enter at the confirmation runs UpdateRecd and closes the window; PMTCUSTR re-reads the row
- *   into the subfile, so the list row changes in place with no new search
+ * - F12 (or F5) at the confirmation reloads the stored record and discards the entries, a preserved
+ *   source defect asserted as the source behaves [5250_Subfile/MTNCUSTR.SQLRPGLE:226-247].
+ * - Enter at the confirmation updates, and the list row is re-read in place with no new search
  *   [5250_Subfile/PMTCUSTR.SQLRPGLE:454-457].
- * - The update stamps ChgTime and ChgUser; MTNCUSTD shows them as "Last Change … by …"
- *   [5250_Subfile/MTNCUSTR.SQLRPGLE:340-363,576-591], [5250_Subfile/MTNCUSTD.DSPF:125-133]. The
- *   target stamps the authenticated principal (the Sales user) and bumps the row version.
+ * - The update stamps ChgTime and ChgUser [5250_Subfile/MTNCUSTR.SQLRPGLE:340-363,576-591],
+ *   [5250_Subfile/MTNCUSTD.DSPF:125-133]; the target stamps the authenticated principal.
  *
- * Ground rules this spec follows:
- * - It edits only the customer it creates through `createCustomer` (same-origin
- *   `POST /api/customers`), so it never depends on or changes a seed row, and every run is
- *   independent because `uniqueName` draws a fresh name.
- * - It searches with the 11-character `filter` of `uniqueName`, never the full name: a full
- *   13-character entry carries no wildcard and finds nothing (preserved PMTCUSTR defect).
- * - Credentials live in page memory only, so after sign-in it moves on by keys and fills alone,
- *   never by `page.goto`.
- * - Toasts clear on every click and command key, so each message is asserted right after the key
- *   that raised it.
- * - Enter is a command only on a text input, an option field or the scope's container; the
- *   confirmation panel focuses its own container on mount, which is where the commit Enter lands.
+ * It edits only the customer it creates through `createCustomer`, and searches with the
+ * 11-character `filter` of `uniqueName`: a full 13-character entry carries no wildcard and finds
+ * nothing (preserved PMTCUSTR defect).
  */
 import { createCustomer, expect, getCustomer, newCustomerFields, test, toasts, uniqueName, USERS } from '../fixtures/auth';
 import type { CustomerFields, CustomerResponse } from '../fixtures/auth';
-
-// ---------------------------------------------------------------------------
-// Catalog texts (messages.properties, AAP 0.7.3), compared exactly
-// ---------------------------------------------------------------------------
 
 /** DEM0000, the notice of a passed EDIT review: the edit confirmation prompt. */
 const DEM0000 = 'Press Enter to update. F12 to Cancel.';
@@ -45,14 +25,9 @@ const DEM0000 = 'Press Enter to update. F12 to Cancel.';
 /** DEM0502 `{0}: Must not be blank` with the Name rule's label argument. */
 const DEM0502_NAME = 'Name: Must not be blank';
 
-// ---------------------------------------------------------------------------
-// Test data and screen texts
-// ---------------------------------------------------------------------------
-
 /** The city the customer is created with, and the one the reload at the confirmation brings back. */
 const ORIGINAL_CITY = 'SPRINGFIELD';
 
-/** The city the edit changes it to. */
 const CHANGED_CITY = 'SHELBYVILLE';
 
 /** The detail window in any of its three functions (MTNCUSTR H2TextD, H2TextE, H2TextA). */
@@ -61,7 +36,6 @@ const DETAIL_DIALOG_NAME = /Displaying Customer|Change Customer|Add Customer/;
 /** English three-letter months, as Db2 `varchar_format(…, 'Mon')` and the stamp use them. */
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
 
-/** The browser-local calendar and clock fields of one instant, as the SPA's `Date` getters read them. */
 type LocalDateTime = {
   year: number;
   month: number;
@@ -70,10 +44,6 @@ type LocalDateTime = {
   minutes: number;
   seconds: number;
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /** Escapes every regular-expression metacharacter, so a configured username matches literally. */
 function escapeRegExp(text: string): string {
@@ -91,7 +61,6 @@ function stampPattern(user: string): RegExp {
   );
 }
 
-/** Zero-pads a non-negative integer to `width` digits. */
 function pad(value: number, width: number): string {
   return String(value).padStart(width, '0');
 }
@@ -110,10 +79,6 @@ function expectedStamp(at: LocalDateTime, user: string): string {
   const time = `${pad(at.hours, 2)}:${pad(at.minutes, 2)}:${pad(at.seconds, 2)}`;
   return `Last Change ${date} at ${time} by ${user}`;
 }
-
-// ---------------------------------------------------------------------------
-// The flow
-// ---------------------------------------------------------------------------
 
 test.use({ startPath: '/customers' });
 
@@ -177,7 +142,6 @@ test('edit with confirmation: blank Name rejected, F12 at the confirmation reloa
     await expect(cityInput).toHaveValue(ORIGINAL_CITY);
     await expect(nameInput).toBeEditable();
     await expect(nameInput).toBeFocused();
-    // The add through the API stamped the Sales user, so the stamp line is shown.
     await expect(stampLine).toHaveText(stampPattern(maintenanceUser));
   });
 
@@ -241,7 +205,6 @@ test('edit with confirmation: blank Name rejected, F12 at the confirmation reloa
     await expect(cells.nth(2)).toHaveText(CHANGED_CITY);
     await expect(cells.nth(3)).toHaveText(created.state);
     await expect(cells.nth(4)).toHaveText(created.zip.slice(0, 5));
-    // The option that opened the window is cleared once it closes.
     await expect(optionInput).toHaveValue('');
     // No new search: the row was replaced from the PUT response.
     expect(searchRequests).toHaveLength(1);
@@ -252,7 +215,6 @@ test('edit with confirmation: blank Name rejected, F12 at the confirmation reloa
     expect(stored.version).toBe(1);
     expect(stored.chgUser).toBe(maintenanceUser);
     expect(stored.city).toBe(CHANGED_CITY);
-    // Only the city, the stamp time and the version changed.
     expect(stored).toEqual({ ...created, city: CHANGED_CITY, chgTime: stored.chgTime, version: 1 });
 
     const changedAt = stored.chgTime;

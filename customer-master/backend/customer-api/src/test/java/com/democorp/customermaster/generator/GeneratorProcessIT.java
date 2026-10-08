@@ -41,65 +41,39 @@ import org.springframework.security.web.SecurityFilterChain;
 /**
  * Runs the packaged {@code customer-api} jar as the test-data generator CLI, a separate JVM started with
  * {@code java -jar app.jar --spring.profiles.active=generator}, against the shared Testcontainers
- * database, exactly as the Compose {@code generator} service runs it.
+ * database, as the Compose {@code generator} service runs it. The generator replaces LOADCUST2
+ * [5250_Subfile/LOADCUST2.CLLE], which submitted LOADCUSTR [5250_Subfile/LOADCUSTR.SQLRPGLE] to batch
+ * with the row count, by one synchronous process whose outcome is its exit status and one printed line,
+ * {@code Loaded <n> customers <first>..<last> in <s> s}.
  *
- * <p><b>What it replaces.</b> LOADCUST2 [5250_Subfile/LOADCUST2.CLLE] took the row count as
- * {@code PARM(&NUM)} and submitted {@code CALL PGM(LOADCUSTR) PARM((&NUM))} to batch; LOADCUSTR
- * [5250_Subfile/LOADCUSTR.SQLRPGLE] truncated CUSTMAST, numbered the rows from {@code 1001} and loaded
- * them from the CSZ table. The target is one synchronous process whose outcome is its exit status and
- * one printed line, {@code Loaded <n> customers <first>..<last> in <s> s}.
+ * <p><b>Environment.</b> Every run starts from the inherited environment without the variables of
+ * {@link #SCRUBBED_PREFIXES} and {@link #SCRUBBED_NAMES}, among them every {@code CM_*},
+ * {@code customer-master.*} relaxed-binding, Spring config and JSON, and JVM option variable, so none of
+ * them can set a security property or a {@code -D} system property in the child. The one exception is
+ * deliberate: after the scrub, {@link #securityUserSettingsAreNeverBoundByTheGenerator()} adds security
+ * user settings that {@code UsersProperties} validation would reject, and its run still loads, because
+ * {@code SecurityConfig}, the only registrar of {@code UsersProperties}, is servlet-only and absent from
+ * the generator context.
  *
- * <p><b>What is proved here, and only here, end to end through the real jar.</b>
- * <ul>
- *   <li>The option bridge of {@code application-generator.yml}: the flat flags {@code --count},
- *       {@code --start-id}, {@code --csz-file} and {@code --seed} reach {@code GeneratorProperties};
- *       {@code GENERATOR_COUNT} applies without a flag, and a flag wins over its variable.</li>
- *   <li>Determinism: the same {@code --seed} loads the same names, compared by
- *       {@code md5(string_agg(name, ',' ORDER BY custid))}.</li>
- *   <li>Strictness: a mistyped flag exits 1 with {@code Unknown option --<name>} and leaves the table
- *       and the id sequence untouched.</li>
- *   <li>The properties registration rule: no run has a {@code CM_*} variable or a
- *       {@code customer-master.security.*} property. No inherited JVM option variable
- *       ({@code JDK_JAVA_OPTIONS}, {@code JAVA_TOOL_OPTIONS}, {@code _JAVA_OPTIONS}) reaches a child, so
- *       no {@code -D} system property exists in it, and a run whose invoking environment carries such
- *       variables, with {@code -D} count and security properties, still loads exactly its
- *       {@code GENERATOR_COUNT}. A run that adds user settings {@code UsersProperties} validation would
- *       reject still loads, because {@code SecurityConfig}, the only registrar of
- *       {@code UsersProperties}, is servlet-only and absent from the generator context. No run logs a
- *       web server, a {@code SecurityFilterChain}, a {@code customer-master.security.users} binding or
- *       the JVM's {@code Picked up ...} echo of an option variable.</li>
- *   <li>The same rule inside one context: an {@link ApplicationContextRunner} over the generator
- *       profile's configuration holds no {@code UsersProperties}, {@code SecurityConfig} or
- *       {@code SecurityFilterChain}, and holds {@code AppProperties} and {@code GeneratorProperties}.</li>
- * </ul>
+ * <p><b>Database.</b> The test context inherited from {@link AbstractPostgresIT} has already migrated
+ * V1 to V4 into {@value #SCHEMA}. The child receives the container's address through the {@code DB_*}
+ * variables {@code application.yml} reads, and the generator profile disables Flyway, so the child runs
+ * no migration. A rejected run changes neither {@code custmast} nor {@code custmast_id_seq}.
  *
- * <p><b>Database.</b> The Spring test context inherited from {@link AbstractPostgresIT} has already
- * migrated V1 to V4 into {@value #SCHEMA} and empties {@code custmast} and restarts
- * {@code custmast_id_seq} before every test. The child receives the container's address through
- * {@code DB_HOST}, {@code DB_PORT}, {@code DB_NAME}, {@code DB_USER}, {@code DB_PASSWORD} and
- * {@code DB_SCHEMA}, the variables {@code application.yml} reads. The generator profile disables
- * Flyway, so the child runs no migration. Each successful load truncates and reloads {@code custmast}
- * and restarts {@code custmast_id_seq} in the same transaction; a rejected run, such as
- * {@code --cuont=5}, changes neither.
- *
- * <p><b>Process handling.</b> The child's stdout and stderr go to one file per run in a
- * {@link TempDir}, never to an unread pipe on which the child could block. Every run is bounded by
- * {@value #PROCESS_TIMEOUT_SECONDS} seconds; a child that overruns is killed with its descendants and
- * the test fails with its log, and a child still alive for any other reason is killed in
- * {@code finally}, so no JVM outlives its test. Every assertion about a run carries the child's whole
- * log in its message.
+ * <p><b>Process handling.</b> The child's combined output goes to one log file per run in a
+ * {@link TempDir}, never to an unread pipe on which it could block. Every run is bounded by
+ * {@value #PROCESS_TIMEOUT_SECONDS} s; a child that overruns is killed with its descendants and the test
+ * fails with its log, and one still alive for any other reason is killed in {@code finally}, so no JVM
+ * outlives its test. Every assertion about a run carries the child's whole log in its message.
  *
  * <p>The jar is {@code target/app.jar}, passed by Failsafe as system property {@code app.jar.path};
- * Failsafe's {@code integration-test} phase runs after {@code package}, so {@code ./mvnw verify}
- * builds it first.
+ * {@code integration-test} runs after {@code package}, so {@code ./mvnw verify} builds it first.
  */
 @DisplayName("Generator CLI: the packaged jar run as a separate process")
 class GeneratorProcessIT extends AbstractPostgresIT {
 
-    /** Longest a single generator run may take before it is killed and the test fails. */
     private static final long PROCESS_TIMEOUT_SECONDS = 180;
 
-    /** Longest wait for a killed child to be reaped. */
     private static final long DESTROY_WAIT_SECONDS = 10;
 
     /** The schema the test context migrated and the child must use ({@code DB_SCHEMA}). */
@@ -183,25 +157,17 @@ class GeneratorProcessIT extends AbstractPostgresIT {
      */
     private static final Pattern LOADED_REPORT = Pattern.compile("(?m)^Loaded \\d+ customers ");
 
-    /** One file per run under {@link #logDir}. */
     private final AtomicInteger runs = new AtomicInteger();
 
-    /** Receives the child's combined stdout and stderr, one file per run. */
     @TempDir
     Path logDir;
 
-    /** The reader the generator itself uses, to learn which cities of the test CSV a load may draw. */
     @Autowired
     private CszSource cszSource;
 
     /** The outcome of one child process: its exit status and its whole combined output. */
     private record RunResult(int exitCode, String output) {
 
-        /**
-         * Describes the run for an assertion message.
-         *
-         * @return the exit status followed by the child's whole log
-         */
         String describe() {
             return "exit status " + exitCode + "; generator output:" + System.lineSeparator() + output;
         }
@@ -441,13 +407,6 @@ class GeneratorProcessIT extends AbstractPostgresIT {
         }
     }
 
-    /**
-     * Tells whether an inherited environment variable is removed before a run.
-     *
-     * @param name the variable name
-     * @return {@code true} for a name in {@link #SCRUBBED_NAMES} or starting with a
-     *         {@link #SCRUBBED_PREFIXES} entry
-     */
     private static boolean isScrubbed(String name) {
         return SCRUBBED_NAMES.contains(name) || SCRUBBED_PREFIXES.stream().anyMatch(name::startsWith);
     }
@@ -497,11 +456,6 @@ class GeneratorProcessIT extends AbstractPostgresIT {
         return jar;
     }
 
-    /**
-     * Returns the {@code java} launcher of the JVM running this test.
-     *
-     * @return {@code <java.home>/bin/java}, or {@code java.exe} on Windows
-     */
     private static Path javaExecutable() {
         boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
         return Path.of(System.getProperty("java.home"), "bin", windows ? "java.exe" : "java");
@@ -565,13 +519,6 @@ class GeneratorProcessIT extends AbstractPostgresIT {
         assertThat(result.output()).as("outcome line %s; %s", report, result.describe()).containsPattern(report);
     }
 
-    /**
-     * Returns {@code count} successive ids from {@code start}, in ordinal order.
-     *
-     * @param start the first id
-     * @param count how many ids
-     * @return their values
-     */
     private static List<String> successiveIds(CustomerId start, int count) {
         List<String> ids = new ArrayList<>(count);
         CustomerId id = start;
@@ -597,21 +544,11 @@ class GeneratorProcessIT extends AbstractPostgresIT {
                 .toList();
     }
 
-    /**
-     * Counts the stored customers.
-     *
-     * @return {@code count(*)} of {@code custmast}
-     */
     private long rowCount() {
         Long count = jdbcTemplate.queryForObject("SELECT count(*) FROM custmast", Long.class);
         return count == null ? 0 : count;
     }
 
-    /**
-     * Returns the name checksum {@value #CHECKSUM_SQL}.
-     *
-     * @return the md5 of the names in id order, or {@code ""} for an empty table
-     */
     private String checksum() {
         return jdbcTemplate.queryForObject(CHECKSUM_SQL, String.class);
     }
@@ -632,7 +569,6 @@ class GeneratorProcessIT extends AbstractPostgresIT {
      */
     private static final class TestClassExcludeFilter extends TypeExcludeFilter {
 
-        /** Simple-name suffixes of test classes, as Surefire and Failsafe select them. */
         private static final List<String> TEST_CLASS_SUFFIXES = List.of("Test", "Tests", "IT");
 
         @Override

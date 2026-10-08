@@ -102,16 +102,12 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 @DisplayName("Customer id allocation and the load guard under concurrency")
 class CustomerIdAllocationIT extends AbstractPostgresIT {
 
-    /** Worker threads of the parallel-add test. */
     private static final int ADD_THREADS = 16;
 
-    /** Sequential adds per worker thread of the parallel-add test. */
     private static final int ADDS_PER_THREAD = 50;
 
-    /** Rows each test load writes. */
     private static final int LOAD_COUNT = 50;
 
-    /** Seed of the generator's random source, so every load is reproducible. */
     private static final long LOAD_SEED = 7L;
 
     /** Interval between two {@code pg_stat_activity} probes of {@link #awaitLockWait(String)}. */
@@ -120,13 +116,10 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
     /** Longest wait for a lock waiter to appear: well inside the loader's 5-second lock timeout. */
     private static final Duration LOCK_PROBE_DEADLINE = Duration.ofSeconds(3);
 
-    /** Longest wait of a worker thread for its release latch. */
     private static final long RELEASE_TIMEOUT_SECONDS = 10;
 
-    /** Longest wait for all parallel adds to finish. */
     private static final long PARALLEL_ADDS_TIMEOUT_SECONDS = 60;
 
-    /** The 4-character base-36 id format of {@code custmast_custid_ck}. */
     private static final String ID_FORMAT = "^[A-Z0-9]{4}$";
 
     /** {@code pg_stat_activity} match for the load guard of {@code CustomerIdAllocator.lockForLoad()}. */
@@ -171,31 +164,23 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
             + " corpphone, acctmgr, acctphone, active, chgtime, chguser, row_version)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-    /** Street of every fixture customer. */
     private static final String ADDR = "1 MAIN ST";
 
-    /** City of every fixture customer. */
     private static final String CITY = "SPRINGFIELD";
 
     /** State of every fixture customer; present in {@code states}. */
     private static final String STATE = "CA";
 
-    /** ZIP of every fixture customer. */
     private static final String ZIP = "90210";
 
-    /** Corporate phone of every fixture customer. */
     private static final String CORP_PHONE = "(415) 555-0100";
 
-    /** Account manager of every fixture customer. */
     private static final String ACCT_MGR = "JANE DOE";
 
-    /** Account manager phone of every fixture customer. */
     private static final String ACCT_PHONE = "(415) 555-0101";
 
-    /** Active code of every fixture customer. */
     private static final String ACTIVE = "Y";
 
-    /** The stamp the generator writes on every loaded row. */
     private static final String SYSTEM_USER = CustomerDataGenerator.SYSTEM_USER;
 
     /**
@@ -213,11 +198,9 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
     @Autowired
     private CustomerLoader customerLoader;
 
-    /** The add path of the API, which allocates through {@link #allocator}. */
     @Autowired
     private CustomerMaintenanceService maintenanceService;
 
-    /** The application's UTC clock, for the change stamps of fixture rows and loads. */
     @Autowired
     private Clock clock;
 
@@ -434,8 +417,9 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
 
 
     /**
-     * Releases every parked worker, ends the worker threads, and proves that no session other than this
-     * one still holds or awaits a lock on {@code custmast} or sits inside a transaction. Runs after every
+     * Releases every parked worker, ends the worker threads, proves that no other client backend holds or
+     * awaits a lock on {@code custmast} (background workers such as autovacuum are excluded), and
+     * separately that no other session of this database is left idle in a transaction. Runs after every
      * test, failed or not, so no lock, transaction or connection survives into the next test.
      *
      * @throws InterruptedException if this thread is interrupted while waiting for the workers to end
@@ -614,23 +598,12 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
         throw new AssertionError(message + "; sessions: " + sessions());
     }
 
-    /**
-     * Runs a {@code count(*)} query.
-     *
-     * @param sql the query, returning one {@code bigint}
-     * @return the count
-     */
     private long count(String sql) {
         Long value = jdbcTemplate.queryForObject(sql, Long.class);
         assertThat(value).as("result of %s", sql).isNotNull();
         return value;
     }
 
-    /**
-     * Describes the database's other sessions for failure messages.
-     *
-     * @return one line per session: pid, state, wait event type and the start of its query
-     */
     private List<String> sessions() {
         return jdbcTemplate.queryForList(SESSIONS_SQL, String.class);
     }

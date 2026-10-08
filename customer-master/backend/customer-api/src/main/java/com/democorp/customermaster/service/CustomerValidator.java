@@ -14,13 +14,11 @@ import org.springframework.stereotype.Component;
 /**
  * The nine customer field rules, applied in source order and stopping at the first failure.
  *
- * <p><b>Source.</b> This class replaces MTNCUSTR's {@code EditUpdData} and its routines
- * {@code Edit_SD_ACTIVE} through {@code Edit_SD_CORPPH} [5250_Subfile/MTNCUSTR.SQLRPGLE:387-544].
- * {@code EditAddData} only calls {@code EditUpdData}, so add and edit share the same rules. Each
- * routine either accepted its screen field or sent one CUSTMSGF message through {@code SndSflMsg}
- * and set the field's reverse-image and position-cursor indicators, after which {@code EditUpdData}
- * returned. Here the failing rule throws a {@link CustomerValidationException} carrying the same
- * message id, its substitution argument and the field to highlight, and no later rule runs.
+ * <p><b>Source.</b> MTNCUSTR's {@code EditUpdData} and its routines {@code Edit_SD_ACTIVE} through
+ * {@code Edit_SD_CORPPH} [5250_Subfile/MTNCUSTR.SQLRPGLE:387-544]. {@code EditAddData} only calls
+ * {@code EditUpdData}, so add and edit share the same rules. The failing rule throws a
+ * {@link CustomerValidationException} carrying the source message id, its substitution argument
+ * and the field to highlight, and no later rule runs.
  *
  * <table>
  *   <caption>Rules in evaluation order</caption>
@@ -46,48 +44,25 @@ import org.springframework.stereotype.Component;
  *       <td>DEM0502 {@code ["Corporate Phone"]}</td><td>Edit_SD_CORPPH</td></tr>
  * </table>
  *
- * <p>The labels are the {@code SndSflMsg} arguments of the source, character for character. With
- * the catalog texts {@code "{0}: Must be Y or N"} and {@code "{0}: Must not be blank"} they render,
- * for example, {@code "Active Status: Must be Y or N"} and
- * {@code "Account Manager Phone: Must not be blank"}. Rule 7 is the account manager's phone and
- * rule 8 the account manager's name, as {@code EditUpdData} calls {@code Edit_SD_ACCTPH} before
- * {@code Edit_SD_ACCTMGR}.
+ * <p>The labels are the {@code SndSflMsg} arguments of the source, character for character. Rule 7
+ * is the account manager's phone and rule 8 the account manager's name, as {@code EditUpdData}
+ * calls {@code Edit_SD_ACCTPH} before {@code Edit_SD_ACCTMGR}.
  *
  * <p><b>Rule numbers are part of the contract.</b> {@code CustomerMaintenanceService.review}
- * reads {@link CustomerValidationException#rule()} and treats a value above
+ * treats a {@link CustomerValidationException#rule()} above
  * {@link CustomerValidationException#STATE_RULE} as "the State rule passed", because
  * {@code Edit_SD_STATE} had already moved the valid state into the working record
- * [5250_Subfile/MTNCUSTR.SQLRPGLE:488-494]. It then reports that state as {@code stateAccepted}.
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:488-494], and reports that state as {@code stateAccepted}.
  *
  * <p><b>All nine rules run.</b> The USPS variant comments out the ADDR, CITY, STATE and ZIP edits
- * and relies on {@code Edit_Address} alone [USPS_Address/MTNCUSTR.SQLRPGLE:405-459]. The target
- * keeps the four address rules, so a blank street yields {@code "Address: Must not be blank"}
- * rather than a USPS error. Address standardization is a later, separate stage owned by
- * {@code AddressStandardizationService} (rule {@link CustomerValidationException#ADDRESS_RULE}).
+ * and relies on {@code Edit_Address} alone [USPS_Address/MTNCUSTR.SQLRPGLE:405-459]. This class
+ * keeps them, so a blank street yields {@code "Address: Must not be blank"} rather than a USPS
+ * error, and address standardization stays a later stage in {@code AddressStandardizationService}.
  *
- * <p><b>What this class does not do.</b>
- * <ul>
- *   <li>It does not normalize, default or change anything. The caller,
- *       {@code CustomerMaintenanceService}, uppercases and strips every value with
- *       {@code TextNormalizer.field} and applies the add default {@code active = Y} to an absent
- *       value before calling {@link #validate(Customer)}. A value that is present, even blank, is
- *       checked as given.</li>
- *   <li>It enforces no ZIP or phone format and no length; the source has no format rule, and
- *       lengths are enforced by the request DTOs ({@code @CodePointLength}, in characters as the
- *       columns count them, 400 APP0400).</li>
- *   <li>It builds no message text. {@code ProblemFactory} renders {@code detail} from the catalog
- *       using the exception's {@code code} and {@code args}, and the exception message is the code
- *       alone, so no value the user typed reaches an exception message or a log line.</li>
- * </ul>
- *
- * <p>Example, as the maintenance service uses it:
- * <pre>{@code
- * Customer draft = Customer.draft("ACME INC", new Address("1 MAIN ST", "AUBURN", "ME", "04210"),
- *         "(207) 555-0100", "JANE DOE", "", "Y");
- * validator.validate(draft);
- * // throws CustomerValidationException: rule 7, DEM0502 ["Account Manager Phone"],
- * // errors [FieldError("acctPhone", "DEM0502")]
- * }</pre>
+ * <p><b>It does not</b> normalize or default anything: the caller normalizes every value and
+ * defaults an absent {@code active} to {@code Y} on an add, and a present value, even blank, is
+ * checked as given. It enforces no format or length rule; the request DTOs enforce lengths with
+ * 400 APP0400. It builds no message text and puts no user value in an exception message.
  *
  * <p>The validator holds no mutable state and {@link StateService} is thread-safe, so one instance
  * serves all requests concurrently.

@@ -33,55 +33,46 @@ import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.relational.core.conversion.DbActionExecutionException;
 
 /**
- * Proves that the Spring Data JDBC mapping of {@link Customer} reads and writes exactly the columns
- * migration V3 creates, that saving a loaded aggregate issues the version-conditional {@code UPDATE},
- * and that a stale save fails with an unwrapped {@link OptimisticLockingFailureException}.
+ * Guards the Spring Data JDBC mapping of {@link Customer}: it uses exactly the columns migration V3
+ * creates, and saving a loaded aggregate issues the version-conditional {@code UPDATE}.
  *
- * <p><b>Source behaviour re-verified.</b> MTNCUSTR's three record procedures, which
- * {@link CustomerRepository} replaces:
- * <ul>
- *   <li>{@code ReadRecd} selects all twelve CUSTMAST columns by {@code CUSTID} and keeps
- *       {@code Orig_CHGTIME} as the concurrency token [5250_Subfile/MTNCUSTR.SQLRPGLE:315-338];
- *       here {@code findById} fills every property, including the token {@code row_version};</li>
- *   <li>{@code AddRecd} takes the next key (CUSTNEXT, advanced by BASE36ADD from CRTDTAARA's
- *       {@code EEEE}), stamps CHGTIME and CHGUSER, and inserts
- *       [5250_Subfile/MTNCUSTR.SQLRPGLE:548-566], [5250_Subfile/CRTDTAARA.clle:1-9]; here
- *       {@code CustomerIdAllocator.next()} returns {@code EEEF} and {@code save} of the new aggregate
- *       inserts it with {@code row_version} 0;</li>
- *   <li>{@code UpdateRecd} updates {@code WHERE CUSTID = :CUSTID AND CHGTIME = :Orig_CHGTIME}, and zero
- *       rows means DEM1002 [5250_Subfile/MTNCUSTR.SQLRPGLE:574-607]; here the token is
- *       {@code row_version} ({@code @Version}), and zero rows raise
- *       {@link OptimisticLockingFailureException}, which the maintenance service turns into DEM1002.</li>
- * </ul>
+ * <p><b>Source mapping.</b> {@link CustomerRepository} replaces MTNCUSTR's three record procedures.
+ * {@code ReadRecd} selects all twelve CUSTMAST columns by {@code CUSTID} and keeps {@code Orig_CHGTIME}
+ * as the concurrency token [5250_Subfile/MTNCUSTR.SQLRPGLE:315-338]; it becomes {@code findById}, with
+ * {@code row_version} as the token. {@code AddRecd} takes the next key (CUSTNEXT, advanced by BASE36ADD
+ * from CRTDTAARA's {@code EEEE}), stamps CHGTIME and CHGUSER, and inserts
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:548-566], [5250_Subfile/CRTDTAARA.clle:1-9]; it becomes the insert of
+ * an aggregate whose id {@code CustomerIdAllocator} allocates, {@code EEEF} first. {@code UpdateRecd}
+ * updates {@code WHERE CUSTID = :CUSTID AND CHGTIME = :Orig_CHGTIME}, and zero rows means DEM1002
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:574-607]; it becomes the {@code @Version} update on
+ * {@code row_version}, whose zero-row {@link OptimisticLockingFailureException} the maintenance service
+ * turns into DEM1002.
  *
  * <p><b>The risk this class closes.</b> Spring Data JDBC's default naming strategy would derive
  * {@code cust_id}, {@code corp_phone}, {@code acct_mgr}, {@code acct_phone}, {@code chg_time} and
  * {@code chg_user}, while V3 keeps the source names ({@code custid}, {@code corpphone},
  * {@code acctmgr}, {@code acctphone}, {@code chgtime}, {@code chguser}) plus {@code row_version}
  * [5250_Subfile/Custmast2.sql:9-21]. Every property of {@link Customer} and {@link Address} therefore
- * names its column with {@code @Column}, and {@link #generatedSqlUsesOnlyV3ColumnNames} proves that the
- * generated {@code SELECT}, {@code INSERT} and {@code UPDATE} use only V3 names.
+ * names its column with {@code @Column}.
  *
- * <p><b>How the generated SQL is observed.</b> At runtime, with no property change: for the duration of
- * one action, {@link #withJdbcDebug(Runnable)} raises the {@value #JDBC_TEMPLATE_LOGGER} logger to
- * {@code DEBUG} through Boot's {@link LoggingSystem} and restores its configured level in
- * {@code finally}. {@link OutputCaptureExtension} captures the console, and only the output written
- * after a mark taken before the action is parsed, so statements of other tests and of
- * {@code DatabaseCleaner} never reach the assertions. {@code JdbcTemplate} logs each prepared statement
- * as {@code Executing prepared SQL statement [...]}, with {@code ?} placeholders after
- * {@code NamedParameterJdbcTemplate} has expanded the named parameters Spring Data JDBC binds.
+ * <p><b>How the generated SQL is observed.</b> {@link #withJdbcDebug(Runnable)} raises the
+ * {@value #JDBC_TEMPLATE_LOGGER} logger to {@code DEBUG} through Boot's {@link LoggingSystem} for one
+ * action and restores its configured level in {@code finally}. Only the console output that
+ * {@link OutputCaptureExtension} captures after a mark taken before the action is parsed, so statements
+ * of other tests and of {@code DatabaseCleaner} never reach the assertions. Statements are logged
+ * with {@code ?} placeholders, after {@code NamedParameterJdbcTemplate} has expanded the named
+ * parameters Spring Data JDBC binds.
  *
- * <p><b>Context policy.</b> The class uses the base context of {@link AbstractPostgresIT} unchanged: no
- * {@code @MockitoBean}, {@code @TestPropertySource}, {@code @Import} or nested configuration, so it adds
- * no context variant. {@link OutputCaptureExtension} is a JUnit extension and leaves the context alone.
+ * <p><b>Context policy.</b> The class uses the base context of {@link AbstractPostgresIT} unchanged and
+ * adds no context variant; {@link OutputCaptureExtension} is a JUnit extension and leaves the context
+ * alone.
  *
  * <p><b>Data and transactions.</b> Test databases hold no seed rows, and the base class empties
- * {@code custmast} and restarts {@code custmast_id_seq} before every test, so every row here is
- * inserted by the test and the first allocation is {@value DatabaseCleaner#FIRST_INTERACTIVE_ID}.
- * Plain SQL runs in autocommit through {@code jdbcTemplate}. {@code CustomerIdAllocator.next()}
- * requires an open transaction ({@code Propagation.MANDATORY}), so it is only ever called inside
- * {@code transactionTemplate}, together with the {@code save} it allocates for; no transaction or lock
- * outlives a test.
+ * {@code custmast} and restarts {@code custmast_id_seq} before every test, so the first allocation is
+ * {@value DatabaseCleaner#FIRST_INTERACTIVE_ID}. Plain SQL runs in autocommit through
+ * {@code jdbcTemplate}. {@code CustomerIdAllocator.next()} requires an open transaction
+ * ({@code Propagation.MANDATORY}), so it runs only inside {@code transactionTemplate}, together with the
+ * {@code save} it allocates for; no transaction or lock outlives a test.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class CustomerRepositoryIT extends AbstractPostgresIT {
@@ -109,16 +100,13 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
                     + "\\s+AND\\s+(\"?custmast\"?\\.)?\"?row_version\"?\\s*=\\s*\\?",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
-    /** A generated read of the customer table. */
     private static final Pattern SELECT_FROM_CUSTMAST =
             Pattern.compile("^\\s*SELECT\\s.*\\sFROM\\s+\"custmast\"",
                     Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
-    /** A generated insert into the customer table. */
     private static final Pattern INSERT_INTO_CUSTMAST =
             Pattern.compile("^\\s*INSERT\\s+INTO\\s+\"custmast\"", Pattern.CASE_INSENSITIVE);
 
-    /** A generated update of the customer table. */
     private static final Pattern UPDATE_CUSTMAST =
             Pattern.compile("^\\s*UPDATE\\s+\"custmast\"", Pattern.CASE_INSENSITIVE);
 
@@ -126,7 +114,6 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
     private static final List<String> V3_COLUMNS = List.of("custid", "name", "addr", "city", "state", "zip",
             "corpphone", "acctmgr", "acctphone", "active", "chgtime", "chguser", "row_version");
 
-    /** The table every generated statement names. */
     private static final String CUSTMAST = "custmast";
 
     /** Inserts one complete row with an explicit column list, in V3 order. */
@@ -138,16 +125,12 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
     private static final String SELECT_ROW_SQL = "SELECT custid, name, addr, city, state, zip, corpphone,"
             + " acctmgr, acctphone, active, chgtime, chguser, row_version FROM custmast WHERE custid = ?";
 
-    /** The id of the fully populated plain-SQL row. */
     private static final String ACME_ID = "AAAB";
 
-    /** The name of the plain-SQL row. */
     private static final String ACME_NAME = "ACME TOOLS";
 
-    /** The street of every plain-SQL row. */
     private static final String ROW_ADDR = "12 ELM ST";
 
-    /** The city of every plain-SQL row. */
     private static final String ROW_CITY = "SPRINGFIELD";
 
     /** The state of every plain-SQL row, present in V2's {@code states}. */
@@ -156,13 +139,10 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
     /** The ZIP of every plain-SQL row, a ZIP+4 so the full 10-character value is read. */
     private static final String ROW_ZIP = "62701-1234";
 
-    /** The corporate phone of every plain-SQL row. */
     private static final String ROW_CORP_PHONE = "(217) 555-0100";
 
-    /** The account manager of every plain-SQL row. */
     private static final String ROW_ACCT_MGR = "JANE Q PUBLIC";
 
-    /** The account manager's phone of every plain-SQL row. */
     private static final String ROW_ACCT_PHONE = "(217) 555-0199";
 
     /** The active code of every plain-SQL row: {@code N}, so the column default {@code Y} cannot pass. */
@@ -181,15 +161,12 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
     private static final OffsetDateTime DRAFT_CHG_TIME =
             OffsetDateTime.of(2026, 10, 6, 9, 30, 15, 987_654_000, ZoneOffset.UTC);
 
-    /** The application's repository bean, the Spring Data proxy the maintenance service calls. */
     @Autowired
     private CustomerRepository repository;
 
-    /** The application's allocator, which assigns the id of a new aggregate inside its transaction. */
     @Autowired
     private CustomerIdAllocator allocator;
 
-    /** Boot's logging system, which raises and restores the {@value #JDBC_TEMPLATE_LOGGER} level. */
     @Autowired
     private LoggingSystem loggingSystem;
 
@@ -412,21 +389,10 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
         return draft;
     }
 
-    /**
-     * Reads one row back with plain SQL.
-     *
-     * @param custId the 4-character id
-     * @return every column of the row
-     */
     private StoredRow storedRow(String custId) {
         return jdbcTemplate.queryForObject(SELECT_ROW_SQL, CustomerRepositoryIT::mapStoredRow, custId);
     }
 
-    /**
-     * Counts the rows of {@code custmast}.
-     *
-     * @return the row count
-     */
     private int customerCount() {
         Integer count = jdbcTemplate.queryForObject("SELECT count(*) FROM custmast", Integer.class);
         return count == null ? 0 : count;
@@ -498,25 +464,10 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
         return statements;
     }
 
-    /**
-     * Selects the statements a pattern finds a match in.
-     *
-     * @param statements the captured statements
-     * @param pattern    the pattern to look for
-     * @return the matching statements, in order
-     */
     private static List<String> matching(List<String> statements, Pattern pattern) {
         return statements.stream().filter(statement -> pattern.matcher(statement).find()).toList();
     }
 
-    /**
-     * Maps one plain-SQL row to a {@link StoredRow}.
-     *
-     * @param rs     the result set, positioned on the row
-     * @param rowNum the row number, unused
-     * @return the row's columns
-     * @throws SQLException if a column cannot be read
-     */
     private static StoredRow mapStoredRow(ResultSet rs, int rowNum) throws SQLException {
         OffsetDateTime chgTime = rs.getObject("chgtime", OffsetDateTime.class);
         return new StoredRow(rs.getString("custid"), rs.getString("name"), rs.getString("addr"),
@@ -526,23 +477,6 @@ class CustomerRepositoryIT extends AbstractPostgresIT {
                 rs.getLong("row_version"));
     }
 
-    /**
-     * One {@code custmast} row as stored, read with plain SQL, the change time as an instant.
-     *
-     * @param custId     {@code custid}
-     * @param name       {@code name}
-     * @param addr       {@code addr}
-     * @param city       {@code city}
-     * @param state      {@code state}
-     * @param zip        {@code zip}
-     * @param corpPhone  {@code corpphone}
-     * @param acctMgr    {@code acctmgr}
-     * @param acctPhone  {@code acctphone}
-     * @param active     {@code active}
-     * @param chgTime    {@code chgtime}
-     * @param chgUser    {@code chguser}
-     * @param rowVersion {@code row_version}
-     */
     private record StoredRow(String custId, String name, String addr, String city, String state,
             String zip, String corpPhone, String acctMgr, String acctPhone, String active, Instant chgTime,
             String chgUser, long rowVersion) {

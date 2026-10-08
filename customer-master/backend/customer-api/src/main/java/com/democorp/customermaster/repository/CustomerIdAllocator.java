@@ -26,30 +26,22 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p><b>What it replaces.</b>
  * <ul>
- *   <li>The CUSTNEXT data area. CRTDTAARA creates it with {@code VALUE('EEEE')}
- *       [5250_Subfile/CRTDTAARA.clle:1-9]. AddRecd reads it {@code in *LOCK}, advances it with
- *       BASE36ADD, writes it back with {@code out} and uses the advanced value as the new CUSTID
- *       [5250_Subfile/MTNCUSTR.SQLRPGLE:548-555]. The first interactive id is therefore {@code EEEF},
- *       the {@code START WITH 191957} of migration V4. Here {@link #next()} takes the table guard and
- *       calls {@code nextval}, which is atomic. No object lock is held beyond the add transaction, and a
- *       rolled-back add only leaves a gap, as the source also consumes the key before an insert that can
- *       fail [5250_Subfile/MTNCUSTR.SQLRPGLE:556-565].</li>
- *   <li>LOADCUSTR's own counter. LOADCUSTR truncates CUSTMAST and numbers its rows from {@code 1001}
- *       through a separate BASE36ADD chain that never touches CUSTNEXT
- *       [5250_Subfile/LOADCUSTR.SQLRPGLE:95,133-137]. With two counters, an interactive add fails as a
- *       duplicate once a load has issued the id CUSTNEXT hands out next. This is a corrected defect: the
- *       generator and the API share this one sequence. {@code CustomerLoader} replaces the table under
- *       {@link #lockForLoad()} and, in the same transaction, moves the sequence past the rows it wrote
- *       through {@link #restartAfterLoad(int)}.</li>
- *   <li>The {@code ALCOBJ ... WAIT(5)} guard of LOADCUST2 [5250_Subfile/LOADCUST2.CLLE:10-18]. It becomes
- *       the {@code ACCESS EXCLUSIVE} table lock of {@link #lockForLoad()}. The caller's
- *       {@code lock_timeout} provides the bounded wait.</li>
- *   <li>BASE36ADD's silent rollover from {@code 9999} to {@code AAAA}, which leaves the limit check to
- *       its caller [BASE36/SRV_BASE36.RPGLE:9-13]. The sequence is {@code NO CYCLE}: past
- *       {@code MAXVALUE 1679615} ({@code 9999}) {@code nextval} raises SQLSTATE {@code 2200H}, and
- *       {@link #next()} turns that into {@link CustomerIdExhaustedException} (HTTP 503 APP0503), so no
- *       id is reissued by wrap-around. Only a committed load resets the range, through
- *       {@link #restartAfterLoad(int)}, after it has replaced every earlier row.</li>
+ *   <li>The CUSTNEXT data area, created at {@code EEEE} by CRTDTAARA
+ *       [5250_Subfile/CRTDTAARA.clle:1-9] and advanced by AddRecd with BASE36ADD under
+ *       {@code *LOCK} [5250_Subfile/MTNCUSTR.SQLRPGLE:548-555], becomes {@link #next()}. The first id
+ *       is {@code EEEF}, V4's {@code START WITH 191957}; a rolled-back add leaves a gap, as the source
+ *       also consumes the key before an insert that can fail
+ *       [5250_Subfile/MTNCUSTR.SQLRPGLE:556-565].</li>
+ *   <li>LOADCUSTR's separate counter [5250_Subfile/LOADCUSTR.SQLRPGLE:95,133-137] becomes this one
+ *       shared sequence, which {@link #restartAfterLoad(int)} moves past the rows a load wrote. This
+ *       corrects the source defect of two counters, under which an interactive add fails as a
+ *       duplicate once a load has issued the id CUSTNEXT hands out next.</li>
+ *   <li>LOADCUST2's {@code ALCOBJ ... WAIT(5)} [5250_Subfile/LOADCUST2.CLLE:10-18] becomes
+ *       {@link #lockForLoad()}.</li>
+ *   <li>BASE36ADD's rollover from {@code 9999} to {@code AAAA} [BASE36/SRV_BASE36.RPGLE:9-13] becomes
+ *       {@code NO CYCLE}: {@code nextval} past {@code 9999} raises SQLSTATE {@code 2200H}, which
+ *       {@link #next()} turns into {@link CustomerIdExhaustedException} (HTTP 503 APP0503), so no id
+ *       is reissued by wrap-around.</li>
  * </ul>
  *
  * <p><b>The guard.</b> Every writer that allocates or resets ids first takes a table lock on
@@ -64,34 +56,18 @@ import org.springframework.transaction.annotation.Transactional;
  * production code outside this class calls {@code nextval} or {@code ALTER SEQUENCE}, and nothing calls
  * {@code setval}. With a single order, adds and loads cannot deadlock.
  *
- * <p><b>Transactions.</b> Every public method requires an open transaction
- * ({@link Propagation#MANDATORY}). A call without one fails with
+ * <p><b>Transactions and lock waits.</b> Every public method requires an open transaction
+ * ({@link Propagation#MANDATORY}); a call without one fails with
  * {@link org.springframework.transaction.IllegalTransactionStateException} before any SQL runs, so a
- * guard can never be taken and released in autocommit. Callers set {@code SET LOCAL lock_timeout} before
- * calling: {@code CustomerMaintenanceService.add} from {@code customer-master.db.lock-timeout}, and
- * {@code CustomerLoader.load} with {@code '5s'}. This class never sets it.
+ * guard can never be taken and released in autocommit. Callers set {@code SET LOCAL lock_timeout}
+ * before calling; this class never sets it. A lock wait past the caller's timeout surfaces as
+ * {@link CannotAcquireLockException} with the {@code 55P03} failure as its cause, for the reason
+ * {@code lockWaitOrSelf} states.
  *
- * <p><b>Lock-wait timeouts.</b> A lock wait that exceeds the caller's timeout fails with SQLSTATE
- * {@code 55P03}. Every statement of this class reports it as
- * {@link org.springframework.dao.CannotAcquireLockException}, with the original data-access exception,
- * and so the {@link SQLException} carrying {@code 55P03}, as its cause. The
- * {@link NamedParameterJdbcTemplate} translates failures through the
- * {@link org.springframework.jdbc.core.JdbcTemplate} it wraps, whose default translator (the
- * {@code SQLException} subclass translator with its SQLSTATE-class fallback) leaves {@code 55P03}
- * uncategorized, so the type is fixed here. {@code CustomerMaintenanceService} maps it to 409 DEM1001,
- * and the generator to "Cannot allocate CUSTMAST".
- *
- * <p><b>SQL.</b> All names are unqualified. The schema comes from the JDBC {@code currentSchema} and
- * Hikari's {@code schema} setting ({@code DB_SCHEMA}), so no statement names a library or schema. The
- * only value placed into SQL text is the range-checked {@code int} of {@link #restartAfterLoad(int)},
- * because {@code RESTART WITH} takes a literal. No caller text ever reaches a statement.
- *
- * <p>Example, inside the add transaction:
- * <pre>{@code
- * jdbcTemplate.execute("SET LOCAL lock_timeout = '5s'");
- * CustomerId id = allocator.next(); // EEEF on a fresh database
- * customerRepository.save(newCustomer(id, fields));
- * }</pre>
+ * <p><b>SQL.</b> All names are unqualified; the schema comes from the connection
+ * ({@code DB_SCHEMA}). The only value placed into SQL text is the range-checked {@code int} of
+ * {@link #restartAfterLoad(int)}, because {@code RESTART WITH} takes a literal; no caller text ever
+ * reaches a statement.
  *
  * <p>The class is stateless apart from its thread-safe {@link NamedParameterJdbcTemplate}, so one
  * instance serves all threads. It and its public methods stay non-final, so Spring's proxy can apply

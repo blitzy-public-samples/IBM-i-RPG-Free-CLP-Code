@@ -43,10 +43,8 @@ import org.springframework.dao.DataIntegrityViolationException;
  */
 class FlywayMigrationIT extends AbstractPostgresIT {
 
-    /** The migrations every context applies: V1 to V4. */
     private static final String MIGRATION_LOCATION = "classpath:db/migration";
 
-    /** The seed location Docker Compose adds: V5. */
     private static final String SEED_LOCATION = "classpath:db/seed";
 
     /** The form of every generated schema name: safe to double-quote and to embed in a pattern. */
@@ -64,7 +62,6 @@ class FlywayMigrationIT extends AbstractPostgresIT {
     /** A state code V2 does not load; one rolled-back check adds it to the generated schema only. */
     private static final String SCHEMA_ONLY_STATE = "QQ";
 
-    /** A state code that no schema's {@code states} holds. */
     private static final String UNKNOWN_STATE = "ZZ";
 
     /** The SQLSTATE {@code foreign_key_violation}. */
@@ -417,7 +414,7 @@ class FlywayMigrationIT extends AbstractPostgresIT {
     }
 
     /**
-     * Asserts V2's 58 rows, spot-checking the first and last code in mixed case.
+     * Asserts V2's 58 rows, spot-checking the first and last codes and their mixed-case names.
      *
      * @param schema the migrated schema
      */
@@ -447,37 +444,17 @@ class FlywayMigrationIT extends AbstractPostgresIT {
         assertThat(sequence.get("last_value")).isNull();
     }
 
-    /**
-     * Returns the stored name of one customer.
-     *
-     * @param custmast the quoted, schema-qualified table
-     * @param custId   the customer id
-     * @return the name
-     */
     private String nameOf(String custmast, String custId) {
         return jdbcTemplate.queryForObject(
                 "select name from " + custmast + " where custid = ?", String.class, custId);
     }
 
-    /**
-     * Runs a {@code count(*)} query.
-     *
-     * @param sql  the query
-     * @param args its bound parameters
-     * @return the count
-     */
     private long count(String sql, Object... args) {
         Long count = jdbcTemplate.queryForObject(sql, Long.class, args);
         assertThat(count).as("result of %s", sql).isNotNull();
         return count;
     }
 
-    /**
-     * Trims each value, for {@code char(n)} columns.
-     *
-     * @param values the values
-     * @return the trimmed values in order
-     */
     private static List<String> trimmed(List<String> values) {
         return values.stream().map(String::trim).toList();
     }
@@ -496,16 +473,9 @@ class FlywayMigrationIT extends AbstractPostgresIT {
         return "\"" + schema + "\"";
     }
 
-    /** The assertions one test runs against its migrated schema. */
     @FunctionalInterface
     private interface SchemaScenario {
 
-        /**
-         * Runs the assertions.
-         *
-         * @param schema the migrated schema
-         * @param result Flyway's result
-         */
         void run(String schema, MigrateResult result);
     }
 }

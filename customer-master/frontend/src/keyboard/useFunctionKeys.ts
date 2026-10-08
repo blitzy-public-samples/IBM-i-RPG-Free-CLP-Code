@@ -2,34 +2,23 @@
  * Function keys and keyboard scope: the contract half.
  *
  * On the 5250 the workstation reported every attention key as an AID byte
- * (F01–F24, PageDown/RollUp, PageUp/RollDown, Enter) [Copy_Mbrs/AIDBYTES.RPGLE:3-35],
- * and each display file declared which of them the screen accepted: the
- * search screen `CA03 CF04 CA05 CA06 CA09 CA12` [5250_Subfile/PMTCUSTD.DSPF:34-39],
- * the detail window `CF04 CA05 CA12` [5250_Subfile/MTNCUSTD.DSPF:33-35] and the
- * state window `CF03 CF05 CF07 CF12` [5250_Subfile/PMTSTATED.DSPF:68-71]. In the
- * browser each screen or dialog instead registers a *key scope* with
+ * [Copy_Mbrs/AIDBYTES.RPGLE:3-35], and each display file declared which of
+ * them the screen accepted: the search screen `CA03 CF04 CA05 CA06 CA09 CA12`
+ * [5250_Subfile/PMTCUSTD.DSPF:34-39], the detail window `CF04 CA05 CA12`
+ * [5250_Subfile/MTNCUSTD.DSPF:33-35] and the state window
+ * `CF03 CF05 CF07 CF12` [5250_Subfile/PMTSTATED.DSPF:68-71]. In the browser
+ * each screen or dialog instead registers a *key scope* with
  * {@link useFunctionKeys}: its bindings are the keys it enables, and its
  * `onUnbound` callback answers every other function key (each screen shows
  * DEM0003 "Key is not active now" there; this module raises no message).
+ * Home (AID x'F8') is a navigation key here, and the 5250 mouse AIDs
+ * ME00–ME14 have no counterpart: a click is a click.
  *
  * `KeyScopeProvider.tsx` owns the one document-level `keydown` listener and the
- * stack of scopes, and dispatches by the keyboard scope contract:
- * - only the topmost (most recently pushed) scope receives keys; every scope
- *   beneath it is suspended, and each keydown runs at most one handler;
- * - the command keys are F1–F24, Enter, PageUp and PageDown ({@link CommandKey}).
- *   Escape runs the F12 binding. A key held with Shift, Ctrl, Alt or Meta is a
- *   modifier chord and passes through untouched;
- * - Enter is a command only when focus is in a text input, an option field or
- *   the scope's own container ({@link FunctionKeyOptions.containerRef}); on a
- *   button, link, checkbox or textarea it keeps its native action;
- * - everything else passes through untouched, including Home (AID x'F8'),
- *   which is a navigation key here, Tab, the arrow keys and text entry. The
- *   5250 mouse AIDs ME00–ME14 have no counterpart: a click is a click.
- *
- * The scope types and {@link KeyScopeContext} live in this file rather than in
- * the provider so the import direction stays one-way
- * (`KeyScopeProvider.tsx` → this file) and no cycle exists. This module imports
- * nothing but React.
+ * stack of scopes; its documentation sets out the dispatch rules. The scope
+ * types and {@link KeyScopeContext} live in this file so the import direction
+ * stays one-way (`KeyScopeProvider.tsx` → this file) and no cycle exists. This
+ * module imports nothing but React.
  */
 import { createContext, useContext, useLayoutEffect, useRef } from 'react';
 import type { RefObject } from 'react';
@@ -76,7 +65,6 @@ export type CommandKey = FunctionKey | 'Enter' | 'PageUp' | 'PageDown';
  */
 export type KeyBindings = Partial<Record<CommandKey, () => void>>;
 
-/** Options of {@link useFunctionKeys}. */
 export interface FunctionKeyOptions {
   /**
    * Called with a function key the scope does not bind while the scope is
@@ -100,24 +88,16 @@ export interface FunctionKeyOptions {
 /**
  * One registered scope as the provider sees it. The methods read the scope's
  * latest bindings, `onUnbound` and container at keydown time, so a re-render
- * with new handlers takes effect without re-registering.
- *
- * Internal: used by KeyScopeProvider.
+ * with new handlers takes effect without re-registering. Internal: used by
+ * KeyScopeProvider.
  */
 export interface KeyScope {
-  /** The handler bound to `key`, or `undefined` when the key is unbound. */
   getBinding(key: CommandKey): (() => void) | undefined;
-  /** Forwards an unbound function key to the scope's `onUnbound`. */
   onUnbound(key: CommandKey): void;
-  /** The scope's container element, or `null` when it has none. */
   getContainer(): HTMLElement | null;
 }
 
-/**
- * The scope stack's registration API.
- *
- * Internal: used by KeyScopeProvider.
- */
+/** The scope stack's registration API. Internal: used by KeyScopeProvider. */
 export interface KeyScopeRegistry {
   /**
    * Appends `scope` to the stack, making it topmost, and returns a function
@@ -128,13 +108,10 @@ export interface KeyScopeRegistry {
 
 /**
  * Carries the provider's {@link KeyScopeRegistry}; `null` outside a
- * `KeyScopeProvider`.
- *
- * Internal: used by KeyScopeProvider.
+ * `KeyScopeProvider`. Internal: used by KeyScopeProvider.
  */
 export const KeyScopeContext = createContext<KeyScopeRegistry | null>(null);
 
-/** The values a registered scope reads at keydown time. */
 interface LatestScopeState {
   readonly bindings: KeyBindings;
   readonly onUnbound: (key: CommandKey) => void;
@@ -153,13 +130,10 @@ interface LatestScopeState {
  * );
  * ```
  *
- * - **Provider required.** The hook throws when no `KeyScopeProvider` is above
- *   it, so component tests of any consumer must render inside
- *   `<KeyScopeProvider>`.
  * - **Latest handlers, stable position.** New `bindings`, `onUnbound` or
- *   `containerRef` values on a re-render are picked up in place: the scope
- *   keeps its position in the stack and is never re-pushed. Only mounting,
- *   unmounting and `active` transitions push or remove it.
+ *   `containerRef` values on a re-render are picked up in place, and the scope
+ *   is never re-pushed: only mounting, unmounting and `active` transitions
+ *   push or remove it.
  * - **Registered in a layout effect.** The provider listens in the document's
  *   capture phase, ahead of React, so a scope must exist as soon as its
  *   component is committed; a passive effect could miss a keydown arriving
@@ -172,10 +146,10 @@ interface LatestScopeState {
  *   after the scope beneath them is registered, so the order is right; tests
  *   must likewise mount stacked scopes in separate steps.
  *
- * @param bindings The keys this scope enables and their handlers.
- * @param options `onUnbound` (required), `active` (default `true`) and the
- *   optional `containerRef` for the Enter rule.
- * @throws Error when rendered outside a `KeyScopeProvider`.
+ * @param bindings The keys this scope enables; see {@link KeyBindings}.
+ * @param options See {@link FunctionKeyOptions}.
+ * @throws Error when rendered outside a `KeyScopeProvider`, so component tests
+ *   of any consumer must render inside `<KeyScopeProvider>`.
  */
 export function useFunctionKeys(bindings: KeyBindings, options: FunctionKeyOptions): void {
   const registry = useContext(KeyScopeContext);
@@ -186,11 +160,9 @@ export function useFunctionKeys(bindings: KeyBindings, options: FunctionKeyOptio
   const { onUnbound, containerRef } = options;
   const active = options.active ?? true;
 
-  // The scope's getters run inside the provider's native listener, outside
-  // React, so they read from a ref. The ref is written only in a layout
-  // effect, never during render, and this effect is declared before the
-  // registration effect so a newly pushed scope already sees this render's
-  // handlers.
+  // The scope's getters run in the provider's native listener, outside React,
+  // so they read a ref. It is written only in a layout effect, declared before
+  // the registration effect so a newly pushed scope sees this render's handlers.
   const latestRef = useRef<LatestScopeState>({ bindings, onUnbound, containerRef });
   useLayoutEffect(() => {
     latestRef.current = { bindings, onUnbound, containerRef };

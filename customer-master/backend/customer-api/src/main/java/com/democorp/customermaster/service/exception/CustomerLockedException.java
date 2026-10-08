@@ -11,39 +11,21 @@ package com.democorp.customermaster.service.exception;
  * as {@code SQLSTATE 55P03} once {@code SET LOCAL lock_timeout}
  * ({@code customer-master.db.lock-timeout}, 5 seconds by default) expires.
  *
- * <p>Thrown by {@code CustomerMaintenanceService.update} when the versioned
- * {@code UPDATE} waits on a row another transaction holds, and by
- * {@code CustomerMaintenanceService.add} when the id-allocation guard waits on a
- * running test-data load. {@code controller.ApiExceptionHandler} maps it, through
- * {@code controller.ProblemFactory}, to HTTP 409 with code {@code DEM1001}
- * ("Customer being updated by another user or job."). The mapping lives only there:
- * this class carries no HTTP status and no message text.
+ * <p>Created by {@code CustomerMaintenanceService} when an add or an update waits past
+ * the lock timeout, whether on the id-allocation guard, the insert or the versioned
+ * update, and by {@code controller.ApiExceptionHandler} for an add or update whose
+ * connection-pool borrow timed out in a saturated pool, a lock wait in another form.
+ * A lock timeout inside {@code CustomerRepository.save} arrives wrapped in Spring Data's
+ * {@code DbActionExecutionException}, and Spring's PostgreSQL error codes leave
+ * {@code 55P03} uncategorized, so callers test the SQLSTATE in the cause chain.
+ * {@code ApiExceptionHandler} maps it to HTTP 409 {@code DEM1001}.
  *
  * <p>The source passed {@code SQLERRMC} as message data, but the DEM1001 text has no
  * {@code &1} substitution variable ({@code 5250_Subfile/CRTMSGF.CLLE}), so that data was
  * never shown. The target therefore sends no data with DEM1001: the exception message
  * is the catalog code alone and never holds SQL text, an SQLSTATE or {@code SQLERRMC}.
- * The optional cause, typically Spring's {@code CannotAcquireLockException} from
- * {@code CustomerIdAllocator}, or the data-access exception carrying {@code 55P03} that
- * {@code CustomerRepository.save} wraps, is kept only so the server log can record it; it
- * is never exposed to a client.
- *
- * <p>The package depends on the JDK alone, so repository and service classes can throw
- * these exceptions without introducing a dependency cycle.
- *
- * <p>{@code CustomerRepository.save} wraps a lock timeout in Spring Data's
- * {@code DbActionExecutionException}, and Spring's PostgreSQL error codes leave
- * {@code 55P03} uncategorized, so the caller tests the SQLSTATE in the cause chain:
- * <pre>{@code
- * try {
- *     return repository.save(customer);
- * } catch (DbActionExecutionException e) {
- *     if (hasSqlState(e, "55P03")) {       // walks getCause() to the SQLException
- *         throw new CustomerLockedException(e.getCause());
- *     }
- *     throw e;
- * }
- * }</pre>
+ * The optional cause is kept for server-side diagnostics only; it is never exposed to a
+ * client.
  */
 public final class CustomerLockedException extends RuntimeException {
 

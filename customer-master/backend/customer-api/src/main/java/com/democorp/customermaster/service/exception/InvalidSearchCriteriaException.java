@@ -15,42 +15,18 @@ import java.util.Objects;
  *       field and opens no cursor. Here the search is likewise not run, and the field name
  *       {@code state} drives the highlight and focus in the client.</li>
  *   <li><b>{@value #APP0400}</b> "Request is not valid: {0}" for API guards the 5250 screen enforced
- *       through field lengths or never needed: {@code size} outside 1-100, {@code name} or {@code city}
- *       longer than 13 characters, a {@code name}, {@code city} or 2-character {@code state} filter
- *       containing U+0000 (which PostgreSQL text cannot hold), a malformed {@code cursor}, and, in the
- *       state list, a {@code sort} other than {@code name} or {@code code} or a {@code nameContains}
- *       longer than 10 characters or containing U+0000. Exactly one argument is required: a short,
- *       fixed reason written by the thrower, such as {@code "size must be between 1 and 100"},
- *       {@code "cursor is not valid"}, {@code "name must not contain U+0000"} or
- *       {@code "sort must be name or code"}.</li>
+ *       through field lengths or never needed. Exactly one argument is required: a short, fixed reason
+ *       written by the thrower, such as {@code "size must be between 1 and 100"}.</li>
  * </ul>
  *
- * <p><b>Throwers.</b> {@code CustomerSearchService} (customer search filters, page size and cursor) and
- * {@code StateService} (state-list filter and sort).
- *
- * <p><b>Mapping.</b> This class knows nothing of HTTP. {@code ApiExceptionHandler} alone maps it, through
- * {@code ProblemFactory}, to a 400 {@code application/problem+json} response whose {@code code} is
- * {@link #code()}, whose {@code detail} is {@code MessageCatalog.text(code, args)}, and whose
- * {@code errors[0]} is {@code {field, code, message}} with {@link #field()} as the field.
+ * <p><b>Throwers.</b> {@code CustomerSearchService} and {@code StateService}, which own the guards.
+ * {@code ApiExceptionHandler} maps it to HTTP 400 with {@code errors[0].field} = {@link #field()}.
  *
  * <p><b>What never travels.</b> Unlike the source's SQLProblem escape message, which carried the
  * SQLSTATE and SQL message text (Service_Pgms/SRV_SQL.SQLRPGLE, lines 20-57), neither the exception
  * message nor the arguments hold SQL text, SQLSTATE values, URLs, stack data or echoed user input. The
  * exception message is the catalog code alone, so a log line or a stray {@code toString()} discloses
  * nothing the client could not already see.
- *
- * <p>Example:
- * <pre>{@code
- * throw new InvalidSearchCriteriaException(InvalidSearchCriteriaException.DEM0007, "state", List.of());
- * throw new InvalidSearchCriteriaException(
- *         InvalidSearchCriteriaException.APP0400, "size", List.of("size must be between 1 and 100"));
- * }</pre>
- *
- * <p>The application payload is immutable: the final fields {@code code} and {@code field}, and the
- * final {@code args} list, an unmodifiable copy, are set once by the constructor. The exception instance
- * itself is not immutable, because it inherits the mutable stack trace, suppressed exceptions and cause
- * of {@link Throwable}. A new instance is created for each failure and stays with the request that
- * raised it; it is not cached, shared or reused across requests or threads.
  */
 public final class InvalidSearchCriteriaException extends RuntimeException {
 

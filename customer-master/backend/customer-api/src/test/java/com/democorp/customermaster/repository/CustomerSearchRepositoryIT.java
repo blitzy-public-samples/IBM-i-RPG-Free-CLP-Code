@@ -31,9 +31,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 /**
- * Re-verifies the customer search list query of PMTCUSTR against PostgreSQL 18.6: the filters, the
- * blank-padded {@code LIKE} parity with Db2, literal matching of backslashes and apostrophes, the sort,
- * the plans the patterns produce, keyset pagination and the 9,999-row cap.
+ * Re-verifies the customer search list query of PMTCUSTR against PostgreSQL 18.6.
  *
  * <p><b>Source behaviour.</b> PMTCUSTR's cursor {@code ItemCur} selects
  * {@code where NAME LIKE :wkName and CITY LIKE :wkCity and STATE between ... and ACTIVE between ...
@@ -48,28 +46,13 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
  * index prefix {@code name LIKE :namePrefix}, drops {@code rpad} only for a pure literal prefix that
  * does not end in a blank, and doubles every backslash.
  *
- * <p><b>What is proved.</b>
- * <ul>
- *   <li><b>Filters</b> through {@link CustomerSearchRepository#find(SearchCriteria, int)}: name and city
- *       prefixes, the exact state, inactive rows excluded unless included, and user {@code %} and
- *       {@code _} acting as wildcards.</li>
- *   <li><b>Padding parity</b> (a preserved source defect): a full 13-character filter finds nothing; a
- *       13-character filter with an inner {@code %} matches only at the end of the 40-character padded
- *       value; a {@code _} matches a pad blank; a lead that ends in blanks is completed only by padding.
- *       Each case gives a different answer without {@code rpad}, so these tests discriminate.</li>
- *   <li><b>Literals:</b> the seed names {@code URNA \NUNC\ COMPANY} and {@code NIBH L'LOR COMPANY}
- *       match literally, and a control row proves {@code \} does not act as an escape.</li>
- *   <li><b>Sort:</b> {@code name, city, state, custid} under {@code customer_sort}, letters before
- *       digits.</li>
- *   <li><b>Plans</b> of the exact statement {@code find} runs ({@link CustomerSearchRepository#buildQuery
- *       (SearchCriteria, int)}): a three-letter prefix is served by {@code custmast_name} with no
- *       {@code rpad}; {@code AB_} and {@code AB}, ten blanks, {@code %} use {@code custmast_name} on the
- *       lead {@code AB} with the {@code rpad} check as a filter.</li>
- *   <li><b>Pagination</b> through {@link CustomerSearchService}: 30 pages of the default 12 rows with
- *       no duplicate and no gap, across rows that tie on name, city and state.</li>
- *   <li><b>Cap:</b> the page that reaches 9,999 rows is cut there, carries {@code limitReached} and
- *       DEM0006, and has no next cursor.</li>
- * </ul>
+ * <p><b>Padding parity.</b> The padding cases reproduce a preserved source defect, and each gives a
+ * different answer without {@code rpad}, so they discriminate.
+ *
+ * <p><b>Independent oracle.</b> The pagination and cap walks compare the ids served with the list order
+ * read by plain SQL ({@code EXPECTED_ORDER_SQL}), independently of the repository. The plan checks
+ * {@code EXPLAIN} the exact statement {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}
+ * produces, with the same bound parameters {@code find} uses.
  *
  * <p><b>Fixtures.</b> Test databases hold no seed rows and the base class empties {@code custmast}
  * before every test, so each test writes its own rows: small fixtures with plain SQL and the explicit V3
@@ -96,25 +79,20 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     private static final String EXPECTED_ORDER_SQL =
             "SELECT custid, name, city, state FROM custmast ORDER BY name, city, state, custid";
 
-    /** Street of every fixture row; the search never reads it. */
     private static final String ADDR = "1 MAIN ST";
 
     /** ZIP of every fixture row; the list shows its first five characters. */
     private static final String ZIP = "90210";
 
-    /** Corporate and account manager phone of every fixture row. */
     private static final String PHONE = "(415) 555-0100";
 
-    /** Account manager of every fixture row. */
     private static final String MANAGER = "JANE DOE";
 
     /** Change user of every fixture row: a test user, never {@code *SYSTEM*}. */
     private static final String CHG_USER = "maint";
 
-    /** Active flag of a customer the list shows by default. */
     private static final String ACTIVE = "Y";
 
-    /** Active flag of a customer the list shows only with F9. */
     private static final String INACTIVE = "N";
 
     /** Page size of the small fixture criteria; the repository ignores it and honours the limit. */
@@ -138,7 +116,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     /** First id of a generated load, LOADCUSTR's {@code varCUSTID = '1001'}. */
     private static final String FIRST_GENERATED_ID = "1001";
 
-    /** Seed of every generated load, so each test sees the same rows. */
     private static final long GENERATOR_SEED = 42L;
 
     /** City/state/ZIP rows of the generated loads; every state exists in V2. */
@@ -150,10 +127,8 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
             new CszSource.CszRow(84101, "STANDARD", "SALT LAKE CITY", "UT"),
             new CszSource.CszRow(2108, "STANDARD", "BOSTON", "MA"));
 
-    /** The index {@code custmast_name (name varchar_pattern_ops)} of V3. */
     private static final String NAME_INDEX = "custmast_name";
 
-    /** The padded match the repository issues when padding can contribute. */
     private static final String RPAD = "rpad";
 
     @Autowired
@@ -173,10 +148,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
 
     @Autowired
     private Clock clock;
-
-    // ---------------------------------------------------------------------------------------------
-    // Filters
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Name prefix {@code AC}: the active matches by default; with F9 the inactive {@code ACME HOLDINGS}
@@ -242,10 +213,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
         assertThat(names(find(criteria("AC_E", "", "", true))))
                 .containsExactly("ACME HOLDINGS", "ACME TOOLS");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Padding parity with Db2's blank-padded CHAR (preserved source defect)
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * A full 13-character entry loses the appended {@code %} to the {@code varchar(13)} cut, so its
@@ -318,10 +285,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
                 .containsExactly("AB");
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Literal backslash and apostrophe (seed names of ids 6 and 3)
-    // ---------------------------------------------------------------------------------------------
-
     /**
      * The seed names {@code URNA \NUNC\ COMPANY} and {@code NIBH L'LOR COMPANY} match literally. The
      * control {@code URNA NUNC COMPANY} would match {@code URNA \NUNC} if PostgreSQL's default
@@ -338,10 +301,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
         assertThat(names(find(criteria("NIBH L'LOR", "", "", false))))
                 .containsExactly("NIBH L'LOR COMPANY");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Sort
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Rows inserted out of order come back by name, city, state and then custid, with letters before
@@ -371,10 +330,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
                 .as("the prefix filter keeps the same order")
                 .containsExactly("ALPHA", "ALPHA", "ALPHA", "ALPHA", "ALPHAB", "ALPHA2");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Plans of the exact statement find() runs
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * A three-letter prefix is a pure literal prefix: the statement carries no {@code rpad}, and
@@ -418,10 +373,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
                     .noneMatch(PlanNode::isSeqScanOnCustmast);
         }
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Pagination and the 9,999-row cap, through the service
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Walks 30 pages of the default 12 rows from the service's opaque cursors over 400 active rows
@@ -506,10 +457,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
         assertThat(served).hasSize(maxRows).doesNotHaveDuplicates().containsExactlyElementsOf(expectedIds);
         assertThat(inactiveServed).as("inactive rows served with includeInactive").isPositive();
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Fixtures and helpers
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Writes the four-row filter fixture: three active customers in Illinois, California and Utah, and
@@ -607,12 +554,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
         return searchRepository.find(criteria, FIXTURE_LIMIT);
     }
 
-    /**
-     * Maps result rows to their names, keeping the order.
-     *
-     * @param rows the rows
-     * @return the names
-     */
     private static List<String> names(List<CustomerSummary> rows) {
         return rows.stream().map(CustomerSummary::name).toList();
     }
@@ -677,13 +618,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
         }
     }
 
-    /**
-     * Returns a text member of a plan node.
-     *
-     * @param node  the plan node
-     * @param field the member name
-     * @return its text, or {@code null} when the node has no such member
-     */
     private static String text(JsonNode node, String field) {
         JsonNode value = node.get(field);
         return value == null || value.isNull() ? null : value.asText();
@@ -702,12 +636,10 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     private record PlanNode(String nodeType, String relationName, String indexName, String indexCond,
             String recheckCond, String filter) {
 
-        /** Whether the node reads {@code custmast_name} (index, index-only or bitmap index scan). */
         boolean usesNameIndex() {
             return NAME_INDEX.equals(indexName);
         }
 
-        /** Whether the node is a sequential scan of {@code custmast}. */
         boolean isSeqScanOnCustmast() {
             return "Seq Scan".equals(nodeType) && "custmast".equals(relationName);
         }
@@ -731,14 +663,6 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     private record ExplainedPlan(String json, List<PlanNode> nodes) {
     }
 
-    /**
-     * The sort keys of one stored row.
-     *
-     * @param custId the id
-     * @param name   the name
-     * @param city   the city
-     * @param state  the state
-     */
     private record KeyRow(String custId, String name, String city, String state) {
 
         /** Whether this row ties with {@code other} on name, city and state, so only custid orders them. */

@@ -1,15 +1,9 @@
 /*
- * Customer Master design-token layer.
- *
- * The palette and the shared design scales (colour, spacing, type, shape,
- * elevation, component sizes and layers) are defined here as CSS custom
- * properties; global.css and the components consume them through var(--…).
- * Colour is token-only: outside this file no colour literal is written
- * except `transparent`, `currentColor` and the forced-colors system colours.
- * Structural constants local to the rules that use them (border widths, the
- * bold weight, the visually-hidden clip, grid geometry, viewport arithmetic
- * and the breakpoints) stay literal in global.css, whose header lists them.
- * Token names are a cross-folder contract: rename none of them.
+ * Customer Master design-token layer: CSS custom properties that global.css
+ * and the components consume through var(--…). Token names are a
+ * cross-folder contract: rename none of them. Colour is token-only: outside
+ * this file no colour literal is written except `transparent`,
+ * `currentColor` and the forced-colors system colours.
  *
  * The palette translates the 5250 display attributes of PMTCUSTD (search
  * subfile), MTNCUSTD (17x54 detail window, pink border) and PMTSTATED
@@ -21,10 +15,7 @@
  * Self-contained: no imports, external resources or web fonts.
  */
 :root {
-  /* One light theme only; form controls and scrollbars render in light mode. */
   color-scheme: light;
-
-  /* ---- Colour ---------------------------------------------------------- */
 
   /* Page background: the screen behind every 5250 record format. */
   --color-bg: #ffffff;
@@ -53,48 +44,26 @@
   /* WINDOW overlay: dims the screen beneath an open dialog (--color-fg at 45%). */
   --color-backdrop: rgb(31 35 40 / 0.45);
 
-  /* ---- Spacing (rem, so it scales with the user's font size) ----------- */
-
-  /* Hairline gaps: key buttons, table cell block padding. */
   --space-1: 0.25rem;
-  /* Field padding, gaps between related controls. */
   --space-2: 0.5rem;
-  /* Label-to-input column gap, button inline padding. */
   --space-3: 0.75rem;
-  /* Screen and window padding, section separation. */
   --space-4: 1rem;
-  /* Larger separation between screen regions. */
   --space-5: 1.5rem;
-  /* Largest separation, e.g. page-level blocks. */
   --space-6: 2rem;
-
-  /* ---- Type ------------------------------------------------------------ */
 
   /* Proportional system text for labels, headings and messages. */
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   /* 5250 fixed-pitch grid: codes, ids, phones and inputs, so `size` matches character counts. */
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  /* Key legends, field messages. */
   --font-size-sm: 0.875rem;
-  /* Body text; equals the 16px browser default. */
   --font-size-md: 1rem;
-  /* Screen titles ("Customer Master", "USA States"). */
   --font-size-lg: 1.25rem;
-  /* Body line height. */
   --line-height: 1.5;
 
-  /* ---- Elevation and sizes --------------------------------------------- */
-
-  /* Window lift (MTNCUSTD, PMTSTATED WINDOW): dialogs float above the dimmed screen. */
   --shadow-dialog: 0 4px 16px var(--color-backdrop);
-  /* Message lift (MSGSFL): toasts stand off the screen or window beneath them. */
   --shadow-toast: 0 2px 8px var(--color-backdrop);
-  /* Sign-in page column width: a narrow centred form. */
   --size-sign-in: 36rem;
 
-  /* ---- Shape and layers ------------------------------------------------ */
-
-  /* Corner radius for inputs, buttons, dialogs and toasts. */
   --radius: 4px;
   /* Focus ring thickness; WCAG 2.2 focus appearance needs at least 2 CSS px. */
   --focus-ring-width: 3px;
@@ -105,13 +74,16 @@
   /*
    * Height of the toast band, the strip above the bottom --space-4 margin
    * where messages show. Every screen and window keeps it clear at all times,
-   * so a message there never hides a focused control, even one focused just
-   * before the message renders. A catalog message (at most 48 characters)
-   * wraps to two lines at a 320px viewport, about 66px tall: 10rem holds a
-   * status and an alert together, and 30vh keeps most of a short viewport
-   * usable while still holding one message from 256px tall and two from about
-   * 467px. A longer message continues below the band and comes into view as
-   * the page scrolls to its end.
+   * so a message that fits in the band never hides a focused control, even
+   * one focused just before the message renders. A catalog message (at most
+   * 48 characters) wraps to two lines at a 320px viewport, about 66px tall:
+   * 10rem holds a status and an alert together, and 30vh keeps most of a
+   * short viewport usable while still holding one message from 256px tall
+   * and two from about 467px. A message longer than the band continues below
+   * it and comes into view as the page scrolls to its end; while the page is
+   * scrolled there, the message reaches above the band, over an open window
+   * and any control focused in it, by as much as it is longer than the band
+   * (toast clearance in global.css).
    */
   --toast-band-block-size: min(10rem, 30vh);
 }

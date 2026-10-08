@@ -1,39 +1,22 @@
 /**
  * Concurrent edit conflict: two Sales sessions change the same customer.
  *
- * Source behaviour. MTNCUSTR's UpdateRecd makes the UPDATE conditional on the
- * CHGTIME read when the record was displayed. When another user or job has
- * changed the row meanwhile, no row matches (SQLNODATA): the program sends
- * DEM1002 "Someone else changed record. Rewiew data.", re-reads the record
- * (ReadRecd) and refills the screen with it (FillScreenFields), so the user
- * reviews the current data and keys the change again; no lock is held while
- * the user thinks [5250_Subfile/MTNCUSTR.SQLRPGLE:567-607],
- * [5250_Subfile/CRTMSGF.CLLE:40-41].
+ * Source. MTNCUSTR's UpdateRecd makes the UPDATE conditional on the CHGTIME
+ * read when the record was displayed. When the row has changed meanwhile, it
+ * sends DEM1002 and re-reads the record; no lock is held while the user thinks
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:567-607], [5250_Subfile/CRTMSGF.CLLE:40-41].
  *
- * Target behaviour exercised here, through the browser and the Compose stack:
- * - The PUT is conditional on the `version` read when the window opened. A
- *   stale one answers 409 DEM1002 with `current`, the customer as now stored.
- * - The detail window then opens the comparison window ("Record Changed")
- *   over its confirmation. That window shows the DEM1002 text itself, so no
- *   alert toast carries it, and lists every field with the user's value, the
- *   current value and "Changed" where the two differ.
- * - "Refresh" is the source outcome: the current record replaces the entries
- *   on the editable form, and a save then stores it as it stands.
- * - "Re-apply my changes" copies the fields the user edited onto the current
- *   record and reviews again under its version, landing on the confirmation
- *   (DEM0000), so one Enter saves the merge.
+ * Target. The PUT is conditional on the `version` read when the window opened;
+ * a stale one answers 409 DEM1002 with `current`. The comparison window
+ * ("Record Changed") marks the fields that differ. "Refresh" is the source
+ * outcome: the current record replaces the entries. "Re-apply my changes"
+ * copies the user's edits onto `current` and reviews again under its version.
  *
- * Data. Each test creates its own uniquely named customer through the API
- * fixture and verifies the stored result through it; no seed row and no
- * database connection is involved. Session A is the `asMaintenance` fixture;
- * session B is a second browser context signed in by `openSignedInPage`, which
- * the test closes in `finally`. Credentials live in page memory only, so
- * neither page navigates after sign-in: both land on `/customers` and move on
- * by keys and clicks alone.
- *
- * The DEM texts are the catalog's (messages.properties): DEM1002 carries the
- * source text with its typo corrected ("Review"), DEM0000 the edit
- * confirmation notice.
+ * Session A is the `asMaintenance` fixture; session B is a second browser
+ * context opened by `openSignedInPage`, which the test owns and closes in
+ * `finally`. Each test creates its own uniquely named customer through the API
+ * fixture and checks the stored result through it, touching no seed row and no
+ * database. DEM1002 is the source text with its typo corrected ("Review").
  */
 import {
   createCustomer,
@@ -55,30 +38,18 @@ import type { APIRequestContext, CustomerResponse, Locator, Page } from '../fixt
  */
 type Browser = Parameters<typeof openSignedInPage>[0];
 
-// ---------------------------------------------------------------------------
-// Catalog texts and test values
-// ---------------------------------------------------------------------------
-
 /** The edit confirmation notice of a passed review (catalog key DEM0000). */
 const DEM0000 = 'Press Enter to update. F12 to Cancel.';
 
 /** The stale-update message (catalog key DEM1002), the source text with "Rewiew" corrected. */
 const DEM1002 = 'Someone else changed record. Review data.';
 
-/** The city every test customer is created with, the value both sessions read at version 0. */
 const STORED_CITY = 'SPRINGFIELD';
 
-/** Session A's change, saved first. */
 const A_CITY = 'SHELBYVILLE';
 
-/** Session B's change, keyed on the record it read before A saved. */
 const B_CORP_PHONE = '(217) 555-0199';
 
-// ---------------------------------------------------------------------------
-// Locators
-// ---------------------------------------------------------------------------
-
-/** The customer detail window in edit mode, named by its header "Customer Master" / "Change Customer". */
 function detailDialog(page: Page): Locator {
   return page.getByRole('dialog', { name: /Change Customer/ });
 }
@@ -101,12 +72,10 @@ function field(scope: Locator, label: string): Locator {
   return scope.getByLabel(label, { exact: true });
 }
 
-/** The read-only confirmation panel a passed review shows inside the detail window. */
 function confirmationPanel(detail: Locator): Locator {
   return detail.getByRole('group', { name: 'Confirm customer' });
 }
 
-/** The search results row of the customer named `name`, located by its row option input. */
 function listRow(page: Page, name: string): Locator {
   return page.getByRole('row').filter({ has: page.getByLabel(`Option for ${name}`, { exact: true }) });
 }
@@ -132,16 +101,6 @@ async function expectConflictRow(page: Page, conflict: Locator, label: string, m
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// Steps shared by both tests
-// ---------------------------------------------------------------------------
-
-/**
- * Searches for `filter` and opens `name` with option 2 (Edit), then waits for
- * the editable form to show the record as read at version 0.
- *
- * @returns the detail window
- */
 async function openForEdit(page: Page, filter: string, name: string): Promise<Locator> {
   const nameFilter = page.getByLabel('Name starts with:', { exact: true });
   await nameFilter.fill(filter);
@@ -160,12 +119,6 @@ async function openForEdit(page: Page, filter: string, name: string): Promise<Lo
   return detail;
 }
 
-/**
- * Presses Enter on a form field, which sends the review, and waits for the
- * confirmation with its DEM0000 notice.
- *
- * @returns the confirmation panel, on which Enter commits
- */
 async function reviewFrom(page: Page, detail: Locator, input: Locator): Promise<Locator> {
   await input.press('Enter');
   await expect(toasts(page).status).toContainText(DEM0000);
@@ -174,25 +127,18 @@ async function reviewFrom(page: Page, detail: Locator, input: Locator): Promise<
   return confirm;
 }
 
-/** What {@link reachConflict} leaves open for the test to resolve. */
 type ConflictReached = {
-  /** The customer as created, at version 0. */
   created: CustomerResponse;
-  /** Session B's detail window, still open beneath the comparison. */
   detailB: Locator;
-  /** Session B's comparison window. */
   conflict: Locator;
 };
 
 /**
- * Brings session B to the DEM1002 comparison:
- * 1. creates a customer (city SPRINGFIELD) through the API;
- * 2. both sessions open it for edit at version 0;
- * 3. A changes City to SHELBYVILLE and saves (version 1);
- * 4. B, still holding version 0, changes Corporate Phone and confirms, and the
- *    stale PUT is answered 409 DEM1002.
- * It then checks the comparison: the DEM1002 text in the window and in no
- * alert toast, City and Corporate Phone marked "Changed", Name not.
+ * Creates a customer, has both sessions open it at version 0, saves A's City
+ * change, then confirms B's Corporate Phone change against the stale version.
+ * Checks that B's comparison shows DEM1002 with no alert toast and marks City
+ * and Corporate Phone "Changed" but not Name, and returns what the test needs
+ * to resolve the conflict.
  */
 async function reachConflict(
   page: Page,
@@ -205,11 +151,9 @@ async function reachConflict(
   expect(created.city, 'created city').toBe(STORED_CITY);
   expect(created.corpPhone, 'the created phone must differ from session B\'s change').not.toBe(B_CORP_PHONE);
 
-  // Both sessions read the record before either saves.
   const detailA = await openForEdit(page, filter, name);
   const detailB = await openForEdit(pageB, filter, name);
 
-  // A saves first.
   const cityA = field(detailA, 'City');
   await cityA.fill(A_CITY);
   const confirmA = await reviewFrom(page, detailA, cityA);
@@ -221,7 +165,6 @@ async function reachConflict(
   expect(afterA.version, 'version after session A saved').toBe(1);
   expect(afterA.city, 'city after session A saved').toBe(A_CITY);
 
-  // B confirms its change against the version it read: the update is stale.
   const phoneB = field(detailB, 'Corporate Phone');
   await phoneB.fill(B_CORP_PHONE);
   const confirmB = await reviewFrom(pageB, detailB, phoneB);
@@ -258,10 +201,6 @@ async function withSessionB(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 test.use({ startPath: '/customers' });
 
 test.describe('concurrent edit conflict', () => {
@@ -274,7 +213,6 @@ test.describe('concurrent edit conflict', () => {
     await withSessionB(browser, baseURL, async (pageB) => {
       const { created, detailB, conflict } = await reachConflict(page, pageB, api, 'CONF REAPPLY');
 
-      // Re-apply reviews the merge at once and lands on the confirmation.
       await conflict.getByRole('button', { name: 'Re-apply my changes', exact: true }).click();
       await expect(conflict).toBeHidden();
       await expect(toasts(pageB).status).toContainText(DEM0000);
@@ -286,7 +224,6 @@ test.describe('concurrent edit conflict', () => {
       await confirm.press('Enter');
       await expect(detailB).toBeHidden();
       await expect(toasts(pageB).alert).toHaveText('');
-      // The saved row is updated in place in B's list.
       await expect(listRow(pageB, created.name)).toContainText(A_CITY);
 
       const stored = await getCustomer(api, created.custId);
@@ -303,7 +240,6 @@ test.describe('concurrent edit conflict', () => {
     await withSessionB(browser, baseURL, async (pageB) => {
       const { created, detailB, conflict } = await reachConflict(page, pageB, api, 'CONF REFRESH');
 
-      // Refresh discards B's entries: the editable form shows the current record.
       await conflict.getByRole('button', { name: 'Refresh', exact: true }).click();
       await expect(conflict).toBeHidden();
       const city = field(detailB, 'City');
@@ -317,7 +253,6 @@ test.describe('concurrent edit conflict', () => {
       await confirm.press('Enter');
       await expect(detailB).toBeHidden();
       await expect(toasts(pageB).alert).toHaveText('');
-      // The saved row is updated in place in B's list.
       await expect(listRow(pageB, created.name)).toContainText(A_CITY);
 
       const stored = await getCustomer(api, created.custId);

@@ -44,46 +44,31 @@ import org.xml.sax.SAXException;
  * and the XMLTABLE parsing inside {@code USAdrVal} [USPS_Address/USADRVAL.SQLRPGLE:74-136],
  * over the {@code USAdrValDS} template [Copy_Mbrs/USADRVALDS.RPGLE:3-13].
  *
- * <ul>
- *   <li><b>Request</b> [USADRVAL.SQLRPGLE:74-93]. Root {@code AddressValidateRequest} with
- *       {@code USERID} and {@code PASSWORD}, {@code <Revision>1</Revision>} and one
- *       {@code <Address ID="0">} holding {@code Address1}, {@code Address2}, {@code City},
- *       {@code State}, {@code Zip5} and {@code Zip4} in that order. The source inserts
- *       values without escaping, so an {@code &} or {@code <} broke the document; the codec
- *       escapes them (a behaviour changed on purpose) and strips surrounding blanks, as
- *       the source trims its data-area credentials.</li>
- *   <li><b>Valid responses</b> [USADRVAL.SQLRPGLE:100-133]. Missing or empty address
- *       elements read {@code ""}, the {@code default ' '} of the XMLTABLE columns; a
- *       non-blank City is a success whatever else the row holds [118-121]; a blank City
- *       with one valid {@code Error} is an address-level error.</li>
- *   <li><b>Faults</b> [USADRVAL.SQLRPGLE:94-96,114-116,134-136]. Every response the
- *       source's {@code SQLSTATE <> '00000'} test would reject raises
- *       {@link AddressServiceUnavailableException}, without the JDK parser printing
- *       {@code [Fatal Error]} to standard error and without resolving any DOCTYPE
- *       entity.</li>
- *   <li><b>Error texts for the fault log line.</b> {@code serviceError} reads the first
- *       {@code Number} and {@code Description} of a root {@code <Error>} or of the one
- *       {@code Address}'s first {@code Error}, stripped and unvalidated, {@code null} for
- *       an absent element, and yields nothing for any other body, a DOCTYPE included,
- *       without printing anything.</li>
- * </ul>
+ * <p><b>Request</b> [USADRVAL.SQLRPGLE:74-93]. The source concatenates values unescaped, so an
+ * {@code &} or {@code <} breaks the document; the codec escapes them, a deliberate behaviour
+ * change, and strips surrounding blanks, as the source trims its data-area credentials.
  *
- * <p><b>Test values.</b> Every address and credential is fictitious. The base row
- * ({@code STE 2}, {@code 8 ELMWOOD DR}, {@code OLD HAVEN}, {@code CT}, {@code 06399},
- * {@code 1234}) is the one the {@code usps/*.xml} fixtures use. The inline response
- * documents start from that row and, for a blank City, the error triple
- * {@code -2147219401} / {@code clsAMS} / {@code Address Not Found.}; each boundary or
- * fault case changes one thing in such a document, whose unchanged form a control test
- * parses. The placeholder password carries {@code &} and {@code "} so that attribute
- * escaping is exercised.
+ * <p><b>Valid responses</b> [USADRVAL.SQLRPGLE:100-133]. A missing or empty element reads
+ * {@code ""}, the XMLTABLE {@code default ' '}; a non-blank City is a success whatever else the
+ * row holds [118-121]; a blank City with one valid {@code Error} is an address-level error.
+ *
+ * <p><b>Faults</b> [USADRVAL.SQLRPGLE:94-96,114-116,134-136]. Every response the source's
+ * {@code SQLSTATE <> '00000'} test would reject raises
+ * {@link AddressServiceUnavailableException}, without resolving any DOCTYPE entity and
+ * without the JDK parser printing {@code [Fatal Error]} to standard error.
+ * {@code serviceError}, which reads the error texts for the fault log line, is held to the
+ * same silence.
+ *
+ * <p><b>Test values.</b> Every address and credential is fictitious. The base row is the
+ * one the {@code usps/*.xml} fixtures use; each inline boundary or fault document changes
+ * one thing in a base document whose unchanged form a control test parses. The
+ * placeholder password carries {@code &} and {@code "} so attribute escaping is exercised.
  *
  * <p><b>Captured output.</b> {@link OutputCaptureExtension} captures each test invocation
  * separately. The {@link CapturedOutput} a test receives holds that invocation's output
  * plus class-level output written outside any invocation's capture, such as while JUnit
  * constructs the test instance, so the standard-error assertions prove that each fault
  * case's own parse printed nothing.
- *
- * <p>Plain JUnit 5 and AssertJ: no application context, no network.
  */
 @DisplayName("UspsXmlCodec: USPS Web Tools request document and response rules")
 @ExtendWith(OutputCaptureExtension.class)
@@ -95,7 +80,6 @@ class UspsXmlCodecTest {
     /** Fictitious USPS Web Tools password; {@code &} and {@code "} need escaping. */
     private static final String PASSWORD = "pl&ce\"holder";
 
-    /** The fixtures' base row as a request. */
     private static final AddressValidationRequest BASE_REQUEST =
             new AddressValidationRequest("STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234");
 
@@ -103,17 +87,11 @@ class UspsXmlCodecTest {
     private static final String[] ADDRESS_FIELDS =
             {"Address1", "Address2", "City", "State", "Zip5", "Zip4"};
 
-    /** The fixtures' base row as the values of {@link #ADDRESS_FIELDS}, in the same order. */
     private static final String[] BASE_ROW = {"STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234"};
 
-    /** Error number Web Tools returns for an address it cannot find. */
     private static final int ADDRESS_NOT_FOUND = -2147219401;
 
     private final UspsXmlCodec codec = new UspsXmlCodec();
-
-    // ---------------------------------------------------------------------------------
-    // Request document [USADRVAL.SQLRPGLE:74-93]
-    // ---------------------------------------------------------------------------------
 
     @Test
     @DisplayName("request document has the source's root, attributes, children and element order")
@@ -221,10 +199,6 @@ class UspsXmlCodecTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageNotContaining(street);
     }
-
-    // ---------------------------------------------------------------------------------
-    // Valid responses [USADRVAL.SQLRPGLE:100-133]
-    // ---------------------------------------------------------------------------------
 
     @Test
     @DisplayName("success with ZIP+4: all six values, no error, extra elements ignored")
@@ -412,10 +386,6 @@ class UspsXmlCodecTest {
                 "STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234", 0, "", ""));
     }
 
-    // ---------------------------------------------------------------------------------
-    // Faults [USADRVAL.SQLRPGLE:94-96,114-116,134-136]
-    // ---------------------------------------------------------------------------------
-
     @ParameterizedTest(name = "{0} is a service fault")
     @ValueSource(strings = {
         "doctype-xxe.xml",
@@ -514,10 +484,6 @@ class UspsXmlCodecTest {
         }
     }
 
-    // ---------------------------------------------------------------------------------
-    // Error texts read for the fault log line
-    // ---------------------------------------------------------------------------------
-
     /**
      * Bodies holding a USPS {@code Error} element, each followed by the {@code Number} and
      * {@code Description} texts {@code serviceError} must read, {@code null} for an absent
@@ -581,10 +547,6 @@ class UspsXmlCodecTest {
         assertThat(codec.serviceError(repeated)).contains(new UspsXmlCodec.ServiceError("1", "First."));
         assertThat(codec.serviceError(rootWithoutChildren)).contains(new UspsXmlCodec.ServiceError(null, ""));
     }
-
-    // ---------------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------------
 
     /**
      * Asserts that the codec let no parser diagnostic reach the console: the JDK's

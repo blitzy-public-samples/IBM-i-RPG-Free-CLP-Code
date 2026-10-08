@@ -6,64 +6,18 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One page of customer search results on the wire, the 200 body of
- * {@code GET /api/customers}:
- * {@code {items: [{custId, name, city, state, zip5, active}], nextCursor, limitReached, notice}}.
+ * One page of customer search results, the 200 body of {@code GET /api/customers} and the
+ * counterpart of one load of the PMTCUSTD subfile [5250_Subfile/PMTCUSTR.SQLRPGLE:532-600].
  *
- * <p>Replaces one load of the PMTCUSTD subfile and the indicators and messages that went with
- * it [5250_Subfile/PMTCUSTR.SQLRPGLE:180,287-297,532-600], [5250_Subfile/PMTCUSTD.DSPF:77-88]:
+ * <p>{@code nextCursor} and {@code notice} are explicit nullable members: the bottom page sends
+ * {@code "nextCursor": null} and a page without a message sends {@code "notice": null}, so the
+ * client tells "no next page" and "no message" from an explicit value rather than from a missing
+ * member. {@code controller/DtoSchemaCustomizer} publishes {@code notice} as a {@link Notice} or
+ * {@code null}, a form swagger-core cannot derive from an annotation. {@link #items()} is never
+ * {@code null} and is an unmodifiable copy.
  *
- * <table>
- *   <caption>Component, source counterpart and wire meaning</caption>
- *   <tr><th>Property</th><th>Source</th><th>Content</th></tr>
- *   <tr><td>{@code items}</td><td>The subfile records {@code SflFillPage} writes, at most
- *       {@code SFLPAG(0012)} per page</td>
- *       <td>The rows of this page as {@link CustomerSummaryResponse}; never {@code null}, and
- *       {@code []} when nothing matched</td></tr>
- *   <tr><td>{@code nextCursor}</td><td>{@code SFLEND(*MORE)} under indicator 97, set from
- *       {@code EofData}: "More..." while the SQL cursor still holds rows, "Bottom" at the
- *       end</td>
- *       <td>The opaque cursor of the next page, or {@code null} when no page follows or the cap
- *       was reached</td></tr>
- *   <tr><td>{@code limitReached}</td><td>{@code SflRRN = MAXSFLRECDS} (9,999)</td>
- *       <td>{@code true} on the page that brings the rows served to 9,999; that page has no
- *       {@code nextCursor} and carries DEM0006</td></tr>
- *   <tr><td>{@code notice}</td><td>{@code SndSflMsg('DEM0002')} on an empty first page,
- *       {@code SndSflMsg('DEM0006')} at the cap</td>
- *       <td>A {@link Notice}, or {@code null} when the page carries no message</td></tr>
- * </table>
- *
- * <p><b>Values only.</b> {@code service/CustomerSearchService} decides every value: it cuts the
- * page at the cap, encodes the base64url cursor and resolves the notice text through the message
- * catalog. This record copies those values into the wire shape and never builds, decodes or
- * inspects the cursor, so the cursor stays opaque to every layer above the service.
- *
- * <p><b>Nulls are part of the contract.</b> The record carries no serialization annotation, in
- * particular no {@code @JsonInclude(NON_NULL)}: the bottom page serializes
- * {@code "nextCursor": null} and a page without a message serializes {@code "notice": null}, so
- * the client tells "no next page" and "no message" from an explicit value rather than from a
- * missing member. Its {@code @Schema} annotations are documentation only and publish that shape:
- * all four members are {@code required}, and {@code nextCursor} is a string or {@code null}.
- * {@code controller/DtoSchemaCustomizer} publishes {@code notice} as a {@link Notice} or
- * {@code null}, a form swagger-core cannot derive from an annotation.
- *
- * <p><b>Member order.</b> The component order is the JSON member order. The committed OpenAPI
- * snapshot and the frontend's {@code src/api/schema.d.ts} list the properties alphabetically
- * instead, because {@code application.yml} sets {@code springdoc.writer-with-order-by-keys: true}.
- * Reordering the components changes only the JSON; adding, removing or renaming one also changes
- * the snapshot and the types, which must then be regenerated.
- *
- * <p>Example, a search that matches nothing:
- * <pre>{@code
- * SearchResponse.from(SearchPage.empty(new SearchPage.Notice("DEM0002",
- *         "No records match the selection criteria")));
- * // serializes as
- * // {"items":[],"nextCursor":null,"limitReached":false,
- * //  "notice":{"code":"DEM0002","message":"No records match the selection criteria"}}
- * }</pre>
- *
- * <p>Instances are immutable and therefore thread-safe: {@link #items()} is an unmodifiable
- * list.
+ * <p>{@code service/CustomerSearchService} decides every value. This record never builds, decodes
+ * or inspects the cursor, which stays opaque.
  *
  * @param items        rows of this page; {@code null} is stored as an empty list, and any other
  *                     list is copied into an unmodifiable list

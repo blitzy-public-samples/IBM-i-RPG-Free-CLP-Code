@@ -5,50 +5,26 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Provides the application's one {@link Clock}, in UTC, from which every stored timestamp is taken.
+ * Provides the application's one {@link Clock}, in UTC: the source of the {@code chgtime} stamp of
+ * every API add and update and of every generated row. The column is {@code timestamptz(6)} and
+ * holds an instant, which the browser shows in its own local time; the source stored local time
+ * with no zone.
  *
- * <p>The bean replaces these IBM i time sources:
- * <ul>
- *   <li>MTNCUSTR AddRecd stamps a new customer with {@code CHGTIME = %timestamp()}.</li>
- *   <li>MTNCUSTR UpdateRecd stamps a change with {@code CHGTIME = CURRENT TIMESTAMP} inside the
- *       UPDATE itself.</li>
- *   <li>LOADCUSTR leaves {@code CHGTIME} at the cleared, lowest timestamp. The generator stamps
- *       the load start instead.</li>
- * </ul>
- * The source stores local time with no zone. The target column {@code chgtime} is
- * {@code timestamptz(6)} and holds an instant, which the browser shows in its own local time, so
- * the clock is UTC.
+ * <p><b>Stamps it supplies.</b> {@code CustomerMaintenanceService} stamps an add or update in the
+ * same INSERT or UPDATE as the data, and {@code CustomerGeneratorRunner} stamps the load time on
+ * every generated row, in place of the AddRecd and UpdateRecd stamps
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:556,587] and LOADCUSTR's cleared one
+ * [5250_Subfile/LOADCUSTR.SQLRPGLE:135,200]. The database's {@code CURRENT_TIMESTAMP}, not this
+ * clock, supplies the V3 {@code chgtime} column default and the stamps of the V5 seed rows.
  *
- * <p><b>Contract for production code.</b> Every timestamp comes from this bean, as
- * {@code OffsetDateTime.now(clock)}, and never from an argument-less {@code now()} or a clock the
- * caller builds itself:
- * <ul>
- *   <li>{@code CustomerMaintenanceService} sets {@code chgTime} on add and update, written in the
- *       same INSERT or UPDATE as the data, so the stamp commits or rolls back with the write.</li>
- *   <li>{@code CustomerGeneratorRunner} takes the load start from it, passes that value to
- *       {@code CustomerDataGenerator} as every generated row's {@code chgtime}; the elapsed time
- *       it prints is an interval, not a timestamp, and is measured with the monotonic
- *       {@code System.nanoTime()}. {@code CustomerLoader} writes the rows it is given and reads no
- *       clock.</li>
- * </ul>
+ * <p><b>Rule for production code.</b> A timestamp is taken as {@code OffsetDateTime.now(clock)},
+ * never from an argument-less {@code java.time} {@code now()} or a clock the caller builds itself.
  *
- * <p>The class carries no profile or condition: the bean exists in the web context, in the
- * {@code test} profile and in the {@code generator} profile, which runs with no web server. It is
- * found by component scanning from {@code CustomerMasterApplication}.
- *
- * <p><b>Fixed clocks in tests.</b> Spring Boot disables bean-definition overriding by default, so a
- * second bean named {@code clock} fails the context. A test that needs a fixed time declares a bean
- * under a different method name, such as {@code fixedClock()}, and marks it {@code @Primary}:
- * <pre>{@code
- * @TestConfiguration
- * static class FixedClockConfig {
- *     @Bean
- *     @Primary
- *     Clock fixedClock() {
- *         return Clock.fixed(Instant.parse("2026-10-05T14:03:09Z"), ZoneOffset.UTC);
- *     }
- * }
- * }</pre>
+ * <p>The class carries no profile or condition, so the bean exists in the web, test and generator
+ * contexts. A unit test passes {@code Clock.fixed(...)} to the consumer's constructor. A Spring
+ * test context adds a {@code @Primary} {@code Clock} bean under another method name, such as
+ * {@code fixedClock()}, because Spring Boot disables bean-definition overriding and a second bean
+ * named {@code clock} fails the context.
  */
 @Configuration(proxyBeanMethods = false)
 public class ClockConfig {

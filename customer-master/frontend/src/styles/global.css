@@ -1,43 +1,16 @@
 /*
- * Customer Master base styles and shared class contract.
- *
- * src/main.tsx loads this file after tokens.css. The palette and the shared
- * design scales come from the tokens defined there, through var(--…):
- * colour, spacing, font families and sizes, body line height, corner radius,
- * focus-ring width, elevation, component sizes and layers. No colour literal
- * is written here except `transparent`, `currentColor` and the forced-colors
- * system colours. The other literals are structural constants local to the
- * rules that use them: 0, 1 and 100%, keywords, grid lines and calc()
- * factors; the 600 bold weight and the 1.25 heading line height; the 2px
- * focus-ring offset; 1px, 2px and 4px border widths; the visually-hidden
- * clip (1px, -1px, 50%); grid fractions and the minmax(8rem, 14rem) label
- * column; the 80rem screen and min(40rem, 100%) toast inline bounds; 100vw
- * and 100vh viewport arithmetic; the 0.2em underline offset; and the 30rem
- * breakpoints, since a media query cannot read a custom property.
- * Self-contained: no imported stylesheets, external resources or web fonts.
+ * Customer Master base styles and shared class contract, loaded by
+ * src/main.tsx after tokens.css. Colours come only from its tokens: no colour
+ * literal is written here except `transparent`, `currentColor` and the
+ * forced-colors system colours. Self-contained: no imported stylesheets,
+ * external resources or web fonts.
  *
  * The class names below are a cross-folder contract used verbatim by
  * src/components, src/features, src/auth and src/pages. Rename none of them.
  *
- * 5250 display attributes carried from PMTCUSTD, MTNCUSTD and PMTSTATED:
- *   SH_FUNCT DSPATR(HI), centred by CenterStr  .screen-header__function
- *   USER keyword (row 2)                       .screen-header__user
- *   COLOR(BLU) options line and key legends    .instructions, .fkey-bar__key
- *   COLOR(WHT) + DSPATR(UL) column headings    .results-table th
- *   COLOR(PNK) sorted heading (PMTSTATED)      .is-sorted
- *   COLOR(RED) inactive rows and label         .row--inactive, .label--inactive-included
- *   SFLEND(*MORE)                              .paging-indicator
- *   'Demo Corp of America' DSPATR(UL)          .footer-brand
- *   WINDOW + WDWBORDER                         dialog, .dialog, .dialog__backdrop
- *   DSPATR(RI) on an invalid field             [aria-invalid="true"] reverse image
- *   DSPATR(PR) + HI protected value            .read-only, input[readonly]
- *   DSPATR(PC) cursor position                 :focus-visible ring
- *
  * Nothing in this file moves: there are no timed effects of any kind, so no
  * prefers-reduced-motion query is needed.
  */
-
-/* ==== Base elements ===================================================== */
 
 *,
 *::before,
@@ -85,7 +58,6 @@ table {
   border-collapse: collapse;
 }
 
-/* The results table carries a <caption> (visible or .visually-hidden). */
 caption {
   caption-side: top;
   padding-block: var(--space-2);
@@ -138,18 +110,18 @@ button {
   cursor: pointer;
 }
 
-/* Disabled is shown by colour and cursor only; no opacity, so text stays crisp. */
+/* No opacity, so disabled text stays crisp. */
 button:disabled {
   color: var(--color-muted);
   cursor: not-allowed;
 }
 
 /*
- * Enabled buttons. Hover (only where a real pointer hovers, so touch taps
- * leave no sticky state) brightens the face and darkens the outline; pressed
- * inverts to --color-bg on --color-fg (15.8:1). The pressed rule follows the
- * hover rule, so a press under the pointer shows the pressed image. Disabled
- * buttons match neither. .fkey-bar__key restates every property set here.
+ * Every hover rule in this file sits inside (hover: hover), so touch taps
+ * leave no sticky state, and every pressed rule follows its hover rule, so a
+ * press under the pointer shows the pressed image. A pressed button inverts
+ * to --color-bg on --color-fg (15.8:1). .fkey-bar__key restates every
+ * property set here.
  */
 @media (hover: hover) {
   button:not(:disabled):hover {
@@ -180,17 +152,12 @@ button:not(:disabled):active {
 }
 
 /*
- * Enabled editable fields. Hover (only where a real pointer hovers, so touch
- * taps leave no sticky state) darkens the outline to --color-fg (15.8:1 on
- * bg, 14.84:1 on surface), as button hover does; pressed turns the outline to
- * --color-accent (7.59:1 / 7.13:1), distinct from hover and from the
- * --color-focus ring. The pressed rule follows the hover rule, so a press
- * under the pointer shows the pressed image. The zero-specificity :where()
+ * Editable field outlines: --color-fg on hover (15.8:1 on bg, 14.84:1 on
+ * surface) and --color-accent when pressed (7.59:1 / 7.13:1), distinct from
+ * hover and from the --color-focus ring. The zero-specificity :where()
  * exclusions leave only :hover or :active in the specificity and skip
  * disabled, read-only and reverse-image ([aria-invalid]) fields, so their own
- * treatment holds in every state. The universal :focus-visible ring is
- * untouched; text colour and background do not change. Checkboxes and radios
- * stay native.
+ * treatment holds in every state.
  */
 @media (hover: hover) {
   :where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):where(:not(:disabled, [readonly], .read-only, [aria-invalid="true"])):hover {
@@ -208,10 +175,7 @@ a {
   text-decoration: underline;
 }
 
-/*
- * Hovered links darken to --color-fg; pressed links invert to --color-bg on
- * --color-accent (7.59:1). The underline stays in every state.
- */
+/* A pressed link inverts to --color-bg on --color-accent (7.59:1). */
 @media (hover: hover) {
   a:hover {
     color: var(--color-fg);
@@ -279,8 +243,6 @@ dialog::backdrop {
   background: var(--color-backdrop);
 }
 
-/* ==== Class contract ==================================================== */
-
 /*
  * Screen-reader-only text: the hidden "Inactive" label in inactive rows, the
  * "Signed in as" prefix in the header, hidden captions and action names.
@@ -298,7 +260,6 @@ dialog::backdrop {
   border: 0;
 }
 
-/* Page wrapper: about the 80-column 5250 screen at monospace size. */
 .screen {
   max-inline-size: 80rem;
   margin-inline: auto;
@@ -306,10 +267,9 @@ dialog::backdrop {
 }
 
 /*
- * Screen header (the SH_HDR record). Title centred on row 1; the user at the
- * start of row 2 and the function line centred under the title. Children are
- * placed by class, so DOM order does not matter; any extra child (such as a
- * sign-out button) auto-places into a free cell.
+ * Screen header (the SH_HDR record), with the user from the DDS USER keyword.
+ * Children are placed by class, so DOM order does not matter; any extra child
+ * (such as a sign-out button) auto-places into a free cell.
  */
 .screen-header {
   display: grid;
@@ -338,7 +298,6 @@ dialog::backdrop {
   text-align: center;
 }
 
-/* The DDS USER keyword. */
 .screen-header__user {
   grid-area: user;
   justify-self: start;
@@ -348,7 +307,7 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 
-/* Function-key legend (SFT_KEYS COLOR(BLU)); each key is a real button. */
+/* The SFT_KEYS COLOR(BLU) function-key legend. */
 .fkey-bar {
   display: flex;
   flex-wrap: wrap;
@@ -380,7 +339,6 @@ dialog::backdrop {
 }
 
 /*
- * Hover only where a real pointer hovers, so touch taps leave no sticky state.
  * The key states restate every property of the generic button hover and
  * pressed rules, which outrank .fkey-bar__key alone, so a key keeps its
  * accent border and legend.
@@ -393,7 +351,7 @@ dialog::backdrop {
   }
 }
 
-/* Pressed key: the legend inverts to --color-bg on --color-accent (7.59:1). */
+/* A pressed legend inverts to --color-bg on --color-accent (7.59:1). */
 .fkey-bar__key:not(:disabled):active {
   color: var(--color-bg);
   background: var(--color-accent);
@@ -442,7 +400,6 @@ dialog::backdrop {
   pointer-events: none;
 }
 
-/* The status and alert live-region containers inside the host. */
 .toast-region > * {
   display: flex;
   flex-direction: column;
@@ -456,8 +413,10 @@ dialog::backdrop {
 }
 
 /*
- * Toast clearance: keyboard focus is never hidden behind a message shown in
- * the band at the viewport bottom. The band is kept clear at all times rather
+ * Toast clearance: keyboard focus is never hidden behind a message that fits
+ * in the band at the viewport bottom. A message longer than the band can
+ * cover a control focused in an open window while the page is scrolled to
+ * its end (the last point below). The band is kept clear at all times rather
  * than only while a toast is shown. src/errors/useProblemPresenter.ts
  * publishes an alert and focuses the first invalid field in the same call, so
  * that focus scrolls before the toast renders; with the band already reserved
@@ -506,18 +465,16 @@ dialog::backdrop {
   pointer-events: none;
 }
 
-/* Information and confirmations (DEM0000, DEM0009, DEM0002, DEM0006). */
 .toast--status {
   border-inline-start-color: var(--color-accent);
 }
 
-/* Errors; the bold weight distinguishes them without relying on colour. */
+/* The bold weight marks an error without relying on colour. */
 .toast--alert {
   font-weight: 600;
   border-inline-start-color: var(--color-error-bg);
 }
 
-/* Dims the screen beneath an open window, one layer below the window itself. */
 .dialog__backdrop {
   position: fixed;
   inset: 0;
@@ -530,11 +487,7 @@ dialog::backdrop {
   border-color: var(--color-accent);
 }
 
-/*
- * Labelled field (FormField). Two columns, labels then inputs, as MTNCUSTD
- * puts labels at column 1 and inputs from column 9 to 17. The message sits
- * under its input.
- */
+/* Labels then inputs, as MTNCUSTD puts labels at column 1 and inputs from column 9 to 17. */
 .form-field {
   display: grid;
   grid-template-columns: minmax(8rem, 14rem) auto;
@@ -560,6 +513,7 @@ dialog::backdrop {
   color: var(--color-error-bg);
 }
 
+/* The 30rem breakpoints are literal: a media query cannot read a custom property. */
 @media (max-width: 30rem) {
   .form-field {
     grid-template-columns: minmax(0, 1fr);
@@ -638,7 +592,7 @@ textarea[aria-invalid="true"] {
   inline-size: 100%;
 }
 
-/* Column headings: COLOR(WHT) + DSPATR(UL); the bold weight carries 'Opt' DSPATR(HI). */
+/* COLOR(WHT) + DSPATR(UL) headings; the bold weight carries 'Opt' DSPATR(HI). */
 .results-table th {
   padding-block: var(--space-1);
   padding-inline: var(--space-2);
@@ -655,7 +609,6 @@ textarea[aria-invalid="true"] {
   text-decoration: none;
 }
 
-/* Monospace cells keep the 5250 grid for ids, codes and ZIP. */
 .results-table td {
   padding-block: var(--space-1);
   padding-inline: var(--space-2);
@@ -673,12 +626,10 @@ textarea[aria-invalid="true"] {
   margin-inline-end: var(--space-1);
 }
 
-/* Button labels stay whole; only the cell text wraps on a narrow viewport. */
 .results-table button {
   overflow-wrap: normal;
 }
 
-/* On a narrow viewport the cells give up some inline padding before any text wraps. */
 @media (max-width: 30rem) {
   .results-table th,
   .results-table td {
@@ -686,29 +637,26 @@ textarea[aria-invalid="true"] {
   }
 }
 
-/*
- * Inactive rows (indicator 83, COLOR(RED)). Inputs inside keep their own
- * colours, and the row also carries a .visually-hidden "Inactive" label.
- */
+/* Indicator 83 COLOR(RED); the row also carries a .visually-hidden "Inactive" label. */
 .row--inactive,
 .row--inactive td {
   color: var(--color-inactive);
 }
 
-/* The sorted column heading (COLOR(PNK)), set alongside aria-sort. */
+/* COLOR(PNK) sorted heading, set alongside aria-sort. */
 .is-sorted,
 .results-table th.is-sorted {
   color: var(--color-highlight);
 }
 
-/* A field whose value differs from the current record; the row also says "Changed". */
+/* A differing row also says "Changed", so colour is not the only signal. */
 .conflict-row--differs th,
 .conflict-row--differs td {
   font-weight: 600;
   color: var(--color-highlight);
 }
 
-/* SFLEND(*MORE): "More..." or "Bottom" under the list. */
+/* SFLEND(*MORE): "More..." or "Bottom". */
 .paging-indicator {
   margin-block: var(--space-1) 0;
   font-family: var(--font-mono);
@@ -730,16 +678,8 @@ textarea[aria-invalid="true"] {
   border-block-end: 1px solid var(--color-fg);
 }
 
-/* ==== Screen-specific layout hooks ====================================== */
+/* .search-panel, .customer-form, .confirmation-panel, .dialog--detail and .dialog--picker are deliberately unstyled hooks. */
 
-/*
- * Further classes the screens apply. .search-panel, .customer-form,
- * .confirmation-panel, .dialog--detail and .dialog--picker need nothing
- * beyond the rules above and stay unstyled hooks; .dialog--conflict scopes
- * the comparison's word wrapping below.
- */
-
-/* Sign-in page wrapper: a narrow centred column. */
 .sign-in {
   max-inline-size: var(--size-sign-in);
   margin-inline: auto;
@@ -773,7 +713,7 @@ textarea[aria-invalid="true"] {
   align-self: center;
 }
 
-/* "Last Change ... by ..." stamp (MTNCUSTD row 13). */
+/* MTNCUSTD row 13: "Last Change ... by ...". */
 .change-stamp {
   margin-block: var(--space-2) 0;
   font-family: var(--font-mono);
@@ -781,7 +721,6 @@ textarea[aria-invalid="true"] {
   color: var(--color-muted);
 }
 
-/* The DEM1002 text shown inside the conflict comparison window. */
 .conflict-message {
   margin-block: 0 var(--space-3);
   font-weight: 600;
@@ -809,15 +748,12 @@ textarea[aria-invalid="true"] {
   vertical-align: top;
 }
 
-/* The conflict window's Refresh and "Re-apply my changes" buttons, side by side under the comparison. */
 .conflict-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-block-start: var(--space-2);
 }
-
-/* ==== Forced colors (Windows High Contrast and similar) ================= */
 
 /*
  * Backgrounds are replaced by system colours, so the reverse image and the

@@ -9,43 +9,16 @@ import java.util.Objects;
  * <p>Replaces one record of the PMTCUSTD subfile, filled from the select list of
  * PMTCUSTR's {@code ItemCur} cursor ({@code NAME, CITY, STATE, ZIP, ACTIVE, CUSTID})
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:208-223] into the subfile fields
- * [5250_Subfile/PMTCUSTD.DSPF:57-72]:
- *
- * <table>
- *   <caption>Source column, subfile field and component</caption>
- *   <tr><th>Component</th><th>ItemCur column</th><th>Subfile field</th></tr>
- *   <tr><td>{@code custId}</td><td>{@code CUSTID CHAR(4)}</td>
- *       <td>{@code SF_CUST_H 4}, hidden; the key options 2 and 5 open and option 1
- *       returns</td></tr>
- *   <tr><td>{@code name}</td><td>{@code NAME CHAR(40)}</td><td>{@code SF_NAME 40A}</td></tr>
- *   <tr><td>{@code city}</td><td>{@code CITY CHAR(20)}</td><td>{@code SF_CITY 20A}</td></tr>
- *   <tr><td>{@code state}</td><td>{@code STATE CHAR(2)}</td><td>{@code SF_STATE 2A}</td></tr>
- *   <tr><td>{@code zip5}</td><td>{@code ZIP CHAR(10)}</td><td>{@code SF_ZIP 5A}: only the
- *       first five characters are shown</td></tr>
- *   <tr><td>{@code active}</td><td>{@code ACTIVE CHAR(1)}</td><td>{@code SF_ACT_H 1},
- *       hidden; an inactive row is shown in red ({@code COLOR(RED)} under indicator 83)</td></tr>
- * </table>
+ * [5250_Subfile/PMTCUSTD.DSPF:57-72].
  *
  * <p><b>Where the values come from.</b> {@code repository/CustomerSearchRepository}
- * builds each instance in its row mapper from
- * {@code SELECT custid, name, city, state, left(zip, 5) AS zip5, active}, so
- * {@code zip5} is already cut to five characters and this record never holds the full
- * ZIP. The values are stored column values, not filters or display text. The target
- * text columns are {@code varchar}, which adds no automatic padding, and values
- * written through {@link TextNormalizer#field(String)} carry no trailing blanks,
- * because it strips them. They are exactly what the keyset comparison
- * {@code (name, city, state, custid)} reads back, so they must not be trimmed or
- * padded again.
- *
- * <p><b>Who reads it.</b>
- * <ul>
- *   <li>{@code service/CustomerSearchService} builds the next-page cursor from the last
- *       row it serves: {@link #name()}, {@link #city()}, {@link #state()} and the
- *       4 characters of {@link #custId()}.</li>
- *   <li>{@code controller/dto/CustomerSummaryResponse} maps the six components, in this
- *       order, to the JSON list item {@code {custId, name, city, state, zip5, active}}.</li>
- * </ul>
- * This type holds no SQL, message text or serialization, and is not a mapped entity.
+ * selects {@code left(zip, 5) AS zip5}, so {@code zip5} is already cut to five
+ * characters and this record never holds the full ZIP. The values are stored column
+ * values, not filters or display text. The target text columns are {@code varchar},
+ * which adds no automatic padding, and values written through
+ * {@link TextNormalizer#field(String)} carry no trailing blanks, because it strips them.
+ * They are exactly what the keyset comparison {@code (name, city, state, custid)} reads
+ * back, so they must not be trimmed or padded again.
  *
  * <p><b>No {@code isActive()} convenience.</b> The record deliberately declares none.
  * Jackson treats a boolean {@code isActive()} as the getter of property
@@ -53,14 +26,6 @@ import java.util.Objects;
  * {@code Y}/{@code N} flag would serialize as {@code true}/{@code false}. Callers test
  * {@code "Y".equals(row.active())}; an inactive row ({@code N}) is the one the list
  * shows in red, as the subfile did under indicator 83.
- *
- * <p>Example, seed customer {@code AAAD}, whose stored ZIP is {@code 15762-0001}:
- * <pre>{@code
- * var row = new CustomerSummary(CustomerId.parse("AAAD"), "NIBH L'LOR COMPANY",
- *         "AUBURN", "ME", "15762", "Y");
- * row.custId().value(); // "AAAD"
- * row.active();         // "Y"
- * }</pre>
  *
  * <p>Instances are immutable and therefore thread-safe.
  *

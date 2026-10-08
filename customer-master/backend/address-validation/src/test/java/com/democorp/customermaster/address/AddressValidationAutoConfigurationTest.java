@@ -25,71 +25,40 @@ import com.democorp.customermaster.address.AddressValidationProperties.Client;
 import com.democorp.customermaster.address.AddressValidationProperties.Usps;
 
 /**
- * Specifies the bean selection of {@link AddressValidationAutoConfiguration}, which
- * replaces two IBM i mechanisms of the address service:
- * <ul>
- *   <li>the ADRVAL_BND binding directory, which bound the USADRVAL service program to
- *       its callers at bind time [USPS_Address/CRTBNDDIR.CLLE:4-7], now the choice of
- *       exactly one {@link AddressValidationClient} bean, the Java counterpart of the
- *       USAdrVal prototype [Copy_Mbrs/USADRVAL_P.RPGLE:2-4];</li>
- *   <li>the USPS_ID and USPS_PWD data areas read on every call
- *       [USPS_Address/USADRVAL.SQLRPGLE:43-46,66-69], now
- *       {@code customer-master.address.usps.user-id} and {@code .password}, bound into
- *       {@link AddressValidationProperties}.</li>
- * </ul>
+ * {@link AddressValidationAutoConfiguration} turns the ADRVAL_BND binding directory that
+ * bound the USADRVAL service program to its callers [USPS_Address/CRTBNDDIR.CLLE:4-7] into
+ * the choice of exactly one {@link AddressValidationClient} bean, the counterpart of the
+ * USAdrVal prototype [Copy_Mbrs/USADRVAL_P.RPGLE:2-4]. The USPS_ID and USPS_PWD data areas
+ * [USPS_Address/USADRVAL.SQLRPGLE:43-46,66-69] become
+ * {@code customer-master.address.usps.user-id} and {@code .password} in
+ * {@link AddressValidationProperties}, which fails startup for {@code client=usps} without
+ * a user id, where the source would have sent an empty {@code USERID}.
  *
- * <p><b>Selection rules under test.</b>
- * <ul>
- *   <li>No property, or {@code customer-master.address.client=stub} in any letter case,
- *       registers {@link StubAddressValidationClient}.</li>
- *   <li>{@code client=usps} registers {@link UspsWebToolsAddressValidationClient}, and
- *       startup fails fast when {@code usps.user-id} is missing or empty, where the
- *       source would have sent an empty {@code USERID} to USPS.</li>
- *   <li>Any other {@code client} text fails startup with a message that names the
- *       property but not the value: an unknown value, an empty one, or {@code stub} and
- *       {@code usps} with surrounding blanks or separators, which the bean conditions
- *       would not match, so the context never starts without a client.</li>
- *   <li>A client bean the application defines itself wins over both, because each
- *       auto-configured bean is {@code @ConditionalOnMissingBean}.</li>
- *   <li>{@code enabled=false} switches standardization off in customer-api only; the
- *       client bean is still registered.</li>
- *   <li>The class is listed in
- *       {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports},
- *       so a consuming application's component scan skips it and the bean is created
- *       once, under auto-configuration ordering and conditions.</li>
- * </ul>
- *
- * <p>The runner holds only the auto-configuration: it is the sole registrar of
- * {@link AddressValidationProperties}, so no {@code @EnableConfigurationProperties} is
- * added here. Pure JUnit 5, AssertJ and {@link ApplicationContextRunner}: no application
- * class, no mocks, and no network. No scenario calls
- * {@link UspsWebToolsAddressValidationClient#validate}; building that client only
- * configures a JDK HTTP client. The one credential value, {@value #TEST_USER_ID}, is
- * fictitious.
+ * <p>Each bean method is {@code @ConditionalOnProperty} on {@code customer-master.address.client}
+ * and {@code @ConditionalOnMissingBean}. A value neither condition matches would start a
+ * context without a client, so the properties binding rejects it at startup instead. The
+ * runner holds only the auto-configuration: it is the sole registrar of
+ * {@link AddressValidationProperties}, so no {@code @EnableConfigurationProperties} is added
+ * here. No scenario calls {@link UspsWebToolsAddressValidationClient#validate}, so nothing
+ * touches the network, and the one credential value, {@value #TEST_USER_ID}, is fictitious.
  */
 @DisplayName("AddressValidationAutoConfiguration: one client bean, chosen by customer-master.address.client")
 class AddressValidationAutoConfigurationTest {
 
-    /** Property selecting the client implementation. */
     private static final String CLIENT = "customer-master.address.client";
 
-    /** Property holding the USPS Web Tools user id. */
     private static final String USER_ID = "customer-master.address.usps.user-id";
 
-    /** Property switching standardization on or off in customer-api. */
     private static final String ENABLED = "customer-master.address.enabled";
 
     /** Fictitious USPS Web Tools user id; the only credential value in this class. */
     private static final String TEST_USER_ID = "TESTUSER123";
 
-    /** Startup failure message when {@code client} is not {@code stub} or {@code usps} as written. */
     private static final String INVALID_CLIENT_MESSAGE = CLIENT + " must be stub or usps";
 
-    /** Startup failure message when {@code client=usps} has no user id. */
     private static final String MISSING_USER_ID_MESSAGE =
             USER_ID + " must be set when " + CLIENT + "=usps";
 
-    /** Fully qualified name the auto-configuration imports file must list. */
     private static final String AUTO_CONFIGURATION_CLASS_NAME =
             "com.democorp.customermaster.address.AddressValidationAutoConfiguration";
 

@@ -3,32 +3,21 @@
   Customer Master :: Address Validation
 
   A plain library jar that knows the USPS Web Tools XML contract and nothing
-  about customers. It replaces the IBM i binding directory ADRVAL_BND
-  (USPS_Address/CRTBNDDIR.CLLE), which bound the USADRVAL service program
-  (USPS_Address/USADRVAL.SQLRPGLE) to its callers at bind time. Here,
-  customer-api declares a Maven dependency on this jar, and Spring Boot
-  auto-configuration (META-INF/spring/org.springframework.boot.autoconfigure.
-  AutoConfiguration.imports) registers exactly one AddressValidationClient bean.
+  about customers. It replaces ADRVAL_BND (USPS_Address/CRTBNDDIR.CLLE), which
+  bound USADRVAL (USPS_Address/USADRVAL.SQLRPGLE) at bind time: customer-api
+  depends on this jar, and its AutoConfiguration.imports registers exactly one
+  AddressValidationClient bean. The dependency points one way only: this module
+  must never depend on customer-api.
 
-  Module boundary: this module must never depend on customer-api; the
-  dependency points the other way only.
+  The response is read from a hardened DOM by walking its direct child
+  elements, with no XPath (the "USPS response reader" entry in
+  customer-master/docs/deviations-and-open-questions.md). XML needs only the
+  JDK java.xml module, HTTP only spring-web and the stub's JSON fixtures only
+  Spring Boot's JsonParserFactory, so no HTTP-client, XML or JSON library is
+  declared.
 
-  Versions: every dependency and plugin is managed by spring-boot-starter-parent
-  through the customer-master-parent POM, so no <version> element appears here.
-
-  Transport and XML: the real client uses Spring RestClient over the JDK
-  java.net.http.HttpClient, and the codec uses the JDK java.xml module (StAX
-  and DOM): StAX writes the request, and the response is read from a hardened
-  DOM by walking its direct child elements, with no XPath (the "USPS response
-  reader" entry in customer-master/docs/deviations-and-open-questions.md).
-  Neither needs a dependency beyond spring-web and the JDK, so no HTTP-client,
-  XML or JSON library (Jackson included) is declared. The stub reads its
-  fixtures through Spring Boot's JsonParserFactory instead.
-
-  Packaging: no <build> section and no spring-boot-maven-plugin. The compiler
-  (release 21, -parameters), Surefire and Failsafe come from the parent. A
-  repackaged (executable) jar would put classes under BOOT-INF/ and break
-  customer-api's dependency on this library.
+  No <build> section: a spring-boot-maven-plugin repackage would put classes
+  under BOOT-INF/ and break customer-api's dependency on this jar.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -49,21 +38,11 @@
   <description>USPS Web Tools address validation client (stub and real), replacing USADRVAL and ADRVAL_BND.</description>
 
   <dependencies>
-    <!--
-      @AutoConfiguration, @ConditionalOnProperty and @ConditionalOnMissingBean.
-      Its transitive spring-boot jar supplies @ConfigurationProperties,
-      @DefaultValue, @EnableConfigurationProperties and JsonParserFactory
-      (used by the stub to read stub/usps-stub-fixtures.json).
-    -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-autoconfigure</artifactId>
     </dependency>
 
-    <!--
-      RestClient and JdkClientHttpRequestFactory for the Web Tools client;
-      ClassPathResource arrives through spring-core.
-    -->
     <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-web</artifactId>
@@ -78,10 +57,6 @@
       <artifactId>slf4j-api</artifactId>
     </dependency>
 
-    <!--
-      JUnit Jupiter, AssertJ, Mockito, ApplicationContextRunner and
-      OutputCaptureExtension, plus Logback for captured log output in tests.
-    -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

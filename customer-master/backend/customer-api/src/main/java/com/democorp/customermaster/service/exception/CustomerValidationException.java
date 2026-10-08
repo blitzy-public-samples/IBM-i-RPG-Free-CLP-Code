@@ -16,47 +16,24 @@ import java.util.Set;
  * {@link #errors() fields} to highlight, the first of which receives focus.
  *
  * <h2>Rule numbering</h2>
- * <p>{@link #rule()} records which stage failed, so callers can tell how far evaluation progressed:
- * <table>
- *   <caption>Rules, in evaluation order</caption>
- *   <tr><th>Rule</th><th>Field (JSON name)</th><th>Code and args</th><th>Source routine</th></tr>
- *   <tr><td>1</td><td>{@code active}</td><td>DEM0501 {@code ["Active Status"]}</td><td>Edit_SD_ACTIVE</td></tr>
- *   <tr><td>2</td><td>{@code name}</td><td>DEM0502 {@code ["Name"]}</td><td>Edit_SD_NAME</td></tr>
- *   <tr><td>3</td><td>{@code addr}</td><td>DEM0502 {@code ["Address"]}</td><td>Edit_SD_ADDR</td></tr>
- *   <tr><td>4</td><td>{@code city}</td><td>DEM0502 {@code ["City"]}</td><td>Edit_SD_CITY</td></tr>
- *   <tr><td>5 ({@link #STATE_RULE})</td><td>{@code state}</td><td>DEM0503, no args</td><td>Edit_SD_STATE</td></tr>
- *   <tr><td>6</td><td>{@code zip}</td><td>DEM0502 {@code ["ZIP"]}</td><td>Edit_SD_ZIP</td></tr>
- *   <tr><td>7</td><td>{@code acctPhone}</td><td>DEM0502 {@code ["Account Manager Phone"]}</td><td>Edit_SD_ACCTPH</td></tr>
- *   <tr><td>8</td><td>{@code acctMgr}</td><td>DEM0502 {@code ["Account Manager Name"]}</td><td>Edit_SD_ACCTMGR</td></tr>
- *   <tr><td>9</td><td>{@code corpPhone}</td><td>DEM0502 {@code ["Corporate Phone"]}</td><td>Edit_SD_CORPPH</td></tr>
- *   <tr><td>10 ({@link #ADDRESS_RULE})</td><td>{@code state}, or {@code addr}, {@code city}, {@code state},
- *       {@code zip}</td><td>DEM0503 (standardized State not in STATES, no args), or DEM9898
- *       {@code [USPS error description]}</td><td>Edit_Address</td></tr>
- * </table>
+ * <p>{@link #rule()} records which stage failed: 1 to 9 for the field rules of {@code CustomerValidator}, in source
+ * order, and {@link #ADDRESS_RULE} (10) for the address stage of {@code AddressStandardizationService}, which raises
+ * DEM9898, or DEM0503 when the standardized State is not in STATES. The class Javadoc of
+ * {@code service.CustomerValidator} is the authoritative table of rules, fields, codes and args.
+ * {@link #STATE_RULE} (5) is the State rule. A rule above it means Edit_SD_STATE had already accepted the State
+ * ({@code 5250_Subfile/MTNCUSTR.SQLRPGLE:488-494}), so {@code CustomerMaintenanceService.review} wraps this
+ * exception in {@code ReviewFailedException} carrying {@code stateAccepted}.
  *
- * <p>Rules 1 to 9 are thrown by {@code CustomerValidator}, rule 10 by {@code AddressStandardizationService}, which runs
- * only after rules 1 to 9 have passed. {@code CustomerMaintenanceService.review} treats {@code rule() > STATE_RULE} as
- * "the State rule passed", because Edit_SD_STATE had already moved the valid state into the working record
- * ({@code 5250_Subfile/MTNCUSTR.SQLRPGLE:488-494}); it then wraps this exception in {@code ReviewFailedException}
- * carrying {@code stateAccepted}, which the UI's working State reads.
+ * <p>DEM9898 is raised only at {@link #ADDRESS_RULE} and names the fields {@code addr}, {@code city},
+ * {@code state} and {@code zip} in that order, with {@code addr} first, as the source put the cursor on ADDR
+ * ({@code PC_SD_ADDR}) and reverse image on all four fields.
  *
- * <h2>HTTP mapping</h2>
- * <p>Only {@code ApiExceptionHandler} maps this exception, through {@code ProblemFactory}: status 422, {@code code}
- * and {@code args} at the top level, {@code detail} = the catalog text of {@code code} with {@code args} substituted,
- * and one {@code errors[]} entry {@code {field, code, message}} per {@link FieldError}, in order, where
- * {@code message} is the catalog text of that entry's code with this exception's args. DEM9898 therefore yields four
- * entries sharing the one message {@code "USPS: <description>"}, with {@code addr} first, as the source put the
- * cursor on ADDR and reverse image on ADDR, CITY, STATE and ZIP.
+ * <p>{@code ApiExceptionHandler} maps it to HTTP 422 with one {@code errors[]} entry per {@link FieldError}, in
+ * order.
  *
  * <h2>Message safety</h2>
  * <p>{@link #getMessage()} is the code only. Field values, USPS descriptions and any other user-derived text live
  * solely in {@link #args()}, so logging this exception never writes customer data.
- *
- * <p>The application payload is immutable: the final fields {@code rule} and {@code code}, and the final
- * {@code args} and {@code errors} lists, unmodifiable copies holding immutable strings and {@link FieldError} records
- * respectively, are set once by the constructor. The exception instance itself is not immutable, because it inherits
- * the mutable stack trace, suppressed exceptions and cause of {@link Throwable}. A new instance is created for each
- * failure and stays with the request that raised it; it is not cached, shared or reused across requests or threads.
  */
 public final class CustomerValidationException extends RuntimeException {
 

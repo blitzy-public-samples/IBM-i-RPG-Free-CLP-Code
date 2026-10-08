@@ -54,7 +54,7 @@ import org.testcontainers.DockerClientFactory;
  * <p><b>Why it exists.</b> The source readme claims that PMTCUSTR's static {@code ItemCur} cursor
  * ({@code NAME LIKE}, {@code CITY LIKE}, {@code STATE between}, {@code ACTIVE between},
  * {@code order by NAME, CITY, STATE optimize for 13 rows}) [5250_Subfile/PMTCUSTR.SQLRPGLE:208-223]
- * showed "no discernable performance hit" with 1 million records [5250_Subfile/README.md:42]. That
+ * showed "no discernable performance hit" with 1 million records [5250_Subfile/README.md:42]. The
  * claim was never measured, and Custmast2.sql gives the cursor no composite index for its ORDER BY
  * [5250_Subfile/Custmast2.sql:26-31] (discrepancy D9). The target answers it with keyset pagination over
  * {@code custmast_search_keyset}, the {@code varchar_pattern_ops} indexes {@code custmast_name} and
@@ -63,56 +63,52 @@ import org.testcontainers.DockerClientFactory;
  * <p><b>Method.</b>
  * <ol>
  *   <li>Load {@value #ROWS} customers from {@value #START} with {@link CustomerLoader} (TRUNCATE, COPY
- *       and the sequence restart in one transaction) over a {@link CustomerDataGenerator} seeded with
+ *       and sequence restart in one transaction) over a {@link CustomerDataGenerator} seeded with
  *       {@value #SEED} and the bundled CSZ sample, then {@code ANALYZE custmast}, as the generator
  *       runner does after every load. A count above 385,245 takes the automatic {@code AAAA} start.</li>
- *   <li>Pick the name and city prefixes from the loaded rows: the first row at or after the middle id
- *       whose name (city) starts with three letters gives the three-letter prefix, and its first letter
- *       the one-letter prefix. The seed fixes the data, so the same values are chosen on every run on
- *       the same Java runtime.</li>
- *   <li>Read the first {@value #CHAIN_ROWS} active rows in list order with one plain
- *       {@code ORDER BY name, city, state, custid LIMIT}, which uses no keyset and no cursor, then
- *       walk the cursor chain from page 1 to page {@value #DEEP_PAGE} through the API. Before any
- *       measurement, page <i>k</i> must hold exactly rows 12(<i>k</i> - 1) + 1 to 12<i>k</i> of that
- *       order, in order, and its {@code nextCursor} must decode to the keys of its last row with
- *       {@code served} = 12<i>k</i>, so a repeated, skipped or reordered page fails the setup. Page
- *       {@value #DEEP_PAGE} - 1's cursor is the deep-page request, and its decoded position is the
- *       keyset of the deep-page plan.</li>
- *   <li>For each of eight operations, run {@value #WARMUP} warm-up calls (discarded; the first one is
- *       checked for correct content), then {@value #MEASURED} measured calls, sequentially on one
- *       thread, as user {@code inq} (role {@code INQUIRY}) over HTTP Basic against the random-port
- *       server. Each sample spans sending the request to reading the whole body, so it includes the
- *       security filter chain and its BCrypt check, the JSON rendering and the loopback transfer.</li>
+ *   <li>Choose the name and city prefixes from the first suitable row at or after the middle id
+ *       ({@link #chooseParameters(CustomerId)}). The seed fixes the data, so every run on the same Java
+ *       runtime chooses the same values.</li>
+ *   <li>Check the cursor chain from page 1 to page {@value #DEEP_PAGE} against an independent oracle:
+ *       the first {@value #CHAIN_ROWS} active rows read by one plain
+ *       {@code ORDER BY name, city, state, custid LIMIT}, with no keyset and no cursor. Page <i>k</i>
+ *       must hold exactly rows 12(<i>k</i> - 1) + 1 to 12<i>k</i> of that order, in order, and its
+ *       {@code nextCursor} must decode to the keys of its last row with {@code served} = 12<i>k</i>,
+ *       so a repeated, skipped or reordered page fails the setup before any measurement.</li>
+ *   <li>For each of eight operations, run {@value #WARMUP} warm-up calls (discarded; the first is
+ *       checked for content), then {@value #MEASURED} measured calls, sequentially on one thread, as
+ *       user {@code inq} (role {@code INQUIRY}) over HTTP Basic against the random-port server. A
+ *       sample spans sending the request to reading the whole body, so it includes the security filter
+ *       chain and its BCrypt check, the JSON rendering and the loopback transfer.</li>
  *   <li>Run {@code EXPLAIN (FORMAT JSON)} of the exact production statement
  *       ({@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}) for the no-filter first page,
  *       the page-{@value #DEEP_PAGE} keyset position and the three-letter name prefix, in a read-only
  *       transaction that first sets {@code plan_cache_mode = force_custom_plan}, as
  *       {@link CustomerSearchRepository#find(SearchCriteria, int)} does.</li>
- *   <li>Print a Markdown report and write it to {@value #REPORT_FILE} under {@code target}, then
+ *   <li>Print the Markdown report and write it to {@value #REPORT_FILE} under {@code target}, then
  *       assert every threshold with {@link SoftAssertions}, so a failing run still reports every
- *       number it measured and lists every violation.</li>
+ *       measured number and lists every violation.</li>
  * </ol>
  *
  * <p><b>Thresholds.</b> p95 (nearest rank) at most {@value #SEARCH_P95_MS} ms for each search
  * operation and at most {@value #GET_P95_MS} ms for get-by-id. Latency depends on the host, so the
- * hardware-independent evidence is the plan check: none of the three plans may contain a
+ * plan check is the hardware-independent evidence: none of the three plans may contain a
  * {@code Seq Scan} on {@code custmast}.
  *
- * <p><b>Running.</b> The class carries JUnit tag {@code benchmark}. The default Failsafe run excludes
- * that tag; {@code ./mvnw -B verify -Pbenchmark} runs this class and no other IT. The report feeds
+ * <p><b>Running.</b> The class carries JUnit tag {@code benchmark}, which the default Failsafe run
+ * excludes; {@code ./mvnw -B verify -Pbenchmark} runs this class and no other IT. The report feeds
  * {@code customer-master/docs/performance/search-benchmark.md}, which records only measured numbers.
  *
- * <p><b>Context and data.</b> The class uses the base context of {@link AbstractPostgresIT} unchanged:
- * no mock, no property override and no second container, so it adds no context variant. Its single
- * test owns the database for its whole run; {@code DatabaseCleaner} empties {@code custmast} before
- * each test method, which is why the load and every measurement sit in one test method. The rows are
- * generated lazily and streamed through COPY; none is held in memory.
+ * <p><b>Context and data.</b> The class uses the base context of {@link AbstractPostgresIT} unchanged
+ * (no mock, property override or second container), so it adds no context variant.
+ * {@code DatabaseCleaner} empties {@code custmast} before each test method, so the load and every
+ * measurement sit in one test. The rows are generated lazily and streamed through COPY; none is held
+ * in memory.
  */
 @Tag("benchmark")
 @DisplayName("Search at 1,000,000 customers meets its latency thresholds and uses no sequential scan")
 class SearchBenchmarkIT extends AbstractPostgresIT {
 
-    /** Seed of the generated data and of the get-by-id id draws. */
     private static final long SEED = 42L;
 
     /** Rows loaded: the 1,000,000 of the source readme's claim. */
@@ -127,7 +123,6 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     /** The look-ahead limit the search service passes for a 12-row page. */
     private static final int LIMIT = PAGE_SIZE + 1;
 
-    /** The deep page reached through the cursor chain. */
     private static final int DEEP_PAGE = 50;
 
     /** Rows of the list from the first row through the end of page {@value #DEEP_PAGE}. */
@@ -141,16 +136,13 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     private static final String CHAIN_ORDER_SQL = "SELECT custid, name, city, state FROM custmast"
             + " WHERE active = 'Y' ORDER BY name, city, state, custid LIMIT :rows";
 
-    /** The properties of the search cursor's JSON object, exactly. */
     private static final List<String> CURSOR_PROPERTIES = List.of("name", "city", "state", "custid", "served");
 
     /** The base64url alphabet without padding, the only characters a search cursor may hold. */
     private static final String BASE64URL_NO_PADDING = "[A-Za-z0-9_-]+";
 
-    /** Warm-up calls per operation, discarded. */
     private static final int WARMUP = 50;
 
-    /** Measured calls per operation. */
     private static final int MEASURED = 200;
 
     /** p95 threshold of every search operation, in milliseconds. */
@@ -159,25 +151,18 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     /** p95 threshold of get-by-id, in milliseconds. */
     private static final long GET_P95_MS = 50;
 
-    /** The bundled city/state/ZIP sample the generator uses by default. */
     private static final String CSZ = "classpath:generator/csz-sample.csv";
 
-    /** The state filter: the sample covers every state code. */
     private static final String STATE_FILTER = "CA";
 
-    /** Name of the report file written under the module's {@code target} directory. */
     private static final String REPORT_FILE = "search-benchmark-results.md";
 
-    /** The search route. */
     private static final String SEARCH = "/api/customers";
 
-    /** The relation whose sequential scan fails the plan check. */
     private static final String CUSTMAST = "custmast";
 
-    /** Nanoseconds per millisecond. */
     private static final double NANOS_PER_MS = 1_000_000.0;
 
-    /** Bytes per MiB. */
     private static final long MIB = 1024L * 1024L;
 
     @Autowired
@@ -339,25 +324,13 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * Pages from the first page to page {@value #DEEP_PAGE} through the API, following
-     * {@code nextCursor} {@value #DEEP_PAGE} - 1 times, and checks every page against an independent
-     * list order before anything is measured.
+     * Walks pages 1 to {@value #DEEP_PAGE} through the API following {@code nextCursor} and checks each
+     * page and cursor against {@link #expectedChainRows()}, the oracle of the class description, before
+     * anything is measured. The cursor of page {@value #DEEP_PAGE} - 1 requests the deep page, and its
+     * decoded position is the deep-page plan's keyset.
      *
-     * <p>The expected order is the first {@value #CHAIN_ROWS} active rows read by
-     * {@link #CHAIN_ORDER_SQL}, a plain {@code ORDER BY ... LIMIT} that uses no keyset and no cursor.
-     * Page <i>k</i> must hold exactly rows 12(<i>k</i> - 1) + 1 to 12<i>k</i> of it, in order (see
-     * {@link #searchPage(RestClient, String, int, List)}), and its {@code nextCursor} must decode to
-     * the keys of the page's last row with {@code served} = 12<i>k</i> (see
-     * {@link #decodeCursor(String, int, List)}). A page that repeats, overlaps, skips or reorders rows,
-     * or a cursor that does not advance, therefore fails the setup.
-     *
-     * <p>The cursor of page {@value #DEEP_PAGE} - 1 requests the deep page. Its decoded position,
-     * which is what the service passes to {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}
-     * for that request, is the keyset of the deep-page plan check; it must be the last row of page
-     * {@value #DEEP_PAGE} - 1 with {@code served} = 12 &middot; ({@value #DEEP_PAGE} - 1).
-     *
-     * @return the cursor that requests page {@value #DEEP_PAGE}, its decoded keyset position, the
-     *         boundary row it names and the ids page {@value #DEEP_PAGE} must hold
+     * @return the deep-page cursor, its keyset, the boundary row it names and the ids page
+     *         {@value #DEEP_PAGE} must hold
      */
     private DeepPage buildCursorChain() {
         List<KeyRow> expected = expectedChainRows();
@@ -433,14 +406,10 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * Decodes the {@code nextCursor} of page {@code number} and asserts that it names the end of that
-     * page: base64url without padding over a JSON object with exactly the properties
-     * {@link #CURSOR_PROPERTIES}, whose keys are those of row 12 &middot; {@code number} of the
-     * independent order and whose {@code served} is 12 &middot; {@code number}.
+     * Decodes the {@code nextCursor} that page {@code number} issued: base64url without padding over a
+     * JSON object with exactly {@link #CURSOR_PROPERTIES}, which must name row 12 &middot; {@code number}
+     * of {@code expected} with {@code served} = 12 &middot; {@code number}.
      *
-     * @param cursor   the cursor
-     * @param number   the 1-based number of the page that issued it
-     * @param expected the independent order of pages 1 to {@value #DEEP_PAGE}
      * @return the decoded position, as the service passes it to the repository
      */
     private SearchCriteria.Cursor decodeCursor(String cursor, int number, List<KeyRow> expected) {
@@ -480,12 +449,6 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         return position;
     }
 
-    /**
-     * Returns the {@code custId} of every item of a search page, in order.
-     *
-     * @param page the parsed page
-     * @return the ids
-     */
     private static List<String> custIds(JsonNode page) {
         List<String> ids = new ArrayList<>();
         for (JsonNode item : page.path("items")) {
@@ -494,12 +457,6 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         return ids;
     }
 
-    /**
-     * Returns the ids of rows of the independent order, in order.
-     *
-     * @param rows the rows
-     * @return their ids
-     */
     private static List<String> custIds(List<KeyRow> rows) {
         List<String> ids = new ArrayList<>(rows.size());
         for (KeyRow row : rows) {
@@ -598,14 +555,6 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
                         .containsExactlyElementsOf(custIds)));
     }
 
-    /**
-     * Returns a copy of {@code base} with one more template variable.
-     *
-     * @param base  the variables so far
-     * @param name  the new variable's name
-     * @param value its value
-     * @return an insertion-ordered copy holding both
-     */
     private static Map<String, Object> with(Map<String, Object> base, String name, Object value) {
         Map<String, Object> variables = new LinkedHashMap<>(base);
         variables.put(name, value);
@@ -663,23 +612,10 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
                 operation.thresholdMs());
     }
 
-    /**
-     * Sends one GET and reads its whole body.
-     *
-     * @param client the signed-in client
-     * @param call   the URI template and its values
-     * @return the response, whatever its status
-     */
     private static ResponseEntity<String> send(RestClient client, Call call) {
         return client.get().uri(call.template(), call.variables()).retrieve().toEntity(String.class);
     }
 
-    /**
-     * Fails the test unless the response is 200.
-     *
-     * @param operation the operation, for the message
-     * @param response  the response
-     */
     private static void requireOk(Operation operation, ResponseEntity<String> response) {
         assertThat(response.getStatusCode())
                 .as("%s (%s) answered %s: %s", operation.label(), operation.request(), response.getStatusCode(),
@@ -909,26 +845,11 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         return md.toString();
     }
 
-    /**
-     * Appends one two-column table row.
-     *
-     * @param md    the report
-     * @param item  the first cell
-     * @param value the second cell
-     */
     private static void row(StringBuilder md, String item, String value) {
         md.append("| ").append(cell(item)).append(" | ").append(cell(value)).append(" |")
                 .append(System.lineSeparator());
     }
 
-    /**
-     * Appends one row of the filter table.
-     *
-     * @param md    the report
-     * @param name  the filter
-     * @param value its value, or empty for none
-     * @param rows  the active rows it matches
-     */
     private static void filterRow(StringBuilder md, String name, String value, long rows) {
         md.append("| ").append(cell(name)).append(" | ").append(value.isEmpty() ? "-" : cell(value)).append(" | ")
                 .append(String.format(Locale.ROOT, "%,d", rows)).append(" |").append(System.lineSeparator());
@@ -947,22 +868,10 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         return text.replace("|", "\\|").replace('\n', ' ').replace('\r', ' ');
     }
 
-    /**
-     * Formats milliseconds with one decimal.
-     *
-     * @param millis the value
-     * @return for example {@code 12.3}
-     */
     private static String ms(double millis) {
         return String.format(Locale.ROOT, "%.1f", millis);
     }
 
-    /**
-     * Formats a byte count in MiB.
-     *
-     * @param bytes the count
-     * @return for example {@code 4,096 MiB}
-     */
     private static String mib(long bytes) {
         return String.format(Locale.ROOT, "%,d MiB", bytes / MIB);
     }
@@ -1002,123 +911,64 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * The figures of the load.
-     *
-     * @param first     the first loaded id
-     * @param last      the last loaded id
-     * @param cszRows   the CSZ rows the generator drew from
-     * @param loadMs    the duration of {@link CustomerLoader#load(CustomerLoader.Plan)}
-     * @param analyzeMs the duration of {@code ANALYZE custmast}
-     * @param tableSize {@code pg_size_pretty(pg_total_relation_size('custmast'))}
+     * The figures of the load. {@code loadMs} spans {@link CustomerLoader#load(CustomerLoader.Plan)}
+     * (TRUNCATE, COPY, sequence restart, commit); {@code tableSize} is
+     * {@code pg_size_pretty(pg_total_relation_size('custmast'))}, indexes included.
      */
     private record LoadStats(CustomerId first, CustomerId last, int cszRows, double loadMs, double analyzeMs,
             String tableSize) {
     }
 
     /**
-     * The chosen filter values and the active rows each matches.
-     *
-     * @param probe      the id the prefixes were chosen from
-     * @param name1      the one-letter name prefix
-     * @param name3      the three-letter name prefix
-     * @param city3      the three-letter city prefix
-     * @param activeRows all active rows
-     * @param name1Rows  active rows whose name starts with {@code name1}
-     * @param name3Rows  active rows whose name starts with {@code name3}
-     * @param city3Rows  active rows whose city starts with {@code city3}
-     * @param stateRows  active rows in state {@value #STATE_FILTER}
-     * @param allRows    all rows, active or not
+     * The chosen filter values and their match counts; every count but {@code allRows} counts active rows
+     * only.
      */
     private record Filters(String probe, String name1, String name3, String city3, long activeRows, long name1Rows,
             long name3Rows, long city3Rows, long stateRows, long allRows) {
     }
 
     /**
-     * The deep page of the checked cursor chain.
-     *
-     * @param cursor   the {@code nextCursor} of page {@value #DEEP_PAGE} - 1, which requests page
-     *                 {@value #DEEP_PAGE}
-     * @param keyset   that cursor decoded, the position the service passes to the repository and the
-     *                 keyset of the deep-page plan check; it names {@code boundary} with
-     *                 {@code served} = 12 &middot; ({@value #DEEP_PAGE} - 1)
-     * @param boundary the last row of page {@value #DEEP_PAGE} - 1 in the independent list order
-     * @param custIds  the ids page {@value #DEEP_PAGE} must hold, in order: rows
-     *                 12 &middot; ({@value #DEEP_PAGE} - 1) + 1 to {@value #CHAIN_ROWS} of that order
+     * The deep page of the checked cursor chain: {@code cursor} is page {@value #DEEP_PAGE} - 1's
+     * {@code nextCursor}, {@code keyset} its decoded form used by the plan check, {@code boundary} the row
+     * it names and {@code custIds} the ids page {@value #DEEP_PAGE} must hold, in order.
      */
     private record DeepPage(String cursor, SearchCriteria.Cursor keyset, KeyRow boundary, List<String> custIds) {
     }
 
     /**
-     * The sort keys of one row of the independent list order, as the search's JSON carries them.
-     *
-     * @param custId the id, trimmed
-     * @param name   the stored name
-     * @param city   the stored city
-     * @param state  the state code, trimmed
+     * The sort keys of one row of the independent list order, with {@code custId} and {@code state}
+     * trimmed as the search's JSON carries them.
      */
     private record KeyRow(String custId, String name, String city, String state) {
     }
 
-    /**
-     * One GET request: a URI template relative to the base URL and its values.
-     *
-     * @param template  the URI template
-     * @param variables its values, encoded by the client
-     */
+    /** One GET request: a URI template relative to the base URL and its values, which the client encodes. */
     private record Call(String template, Map<String, Object> variables) {
     }
 
     /**
-     * One measured operation.
-     *
-     * @param label       the name in the report
-     * @param request     the request as text, for the report
-     * @param thresholdMs the p95 threshold in milliseconds
-     * @param calls       supplies the request of each call
-     * @param check       the content check of the first warm-up response
+     * One measured operation; {@code calls} supplies the request of each call, and {@code check} runs on
+     * the first warm-up response only.
      */
     private record Operation(String label, String request, long thresholdMs, Supplier<Call> calls,
             BiConsumer<Call, JsonNode> check) {
     }
 
-    /**
-     * The latency of one operation.
-     *
-     * @param label       the operation
-     * @param request     the request as text
-     * @param calls       the measured calls
-     * @param p50Ms       the nearest-rank median, in milliseconds
-     * @param p95Ms       the nearest-rank 95th percentile, in milliseconds
-     * @param maxMs       the slowest call, in milliseconds
-     * @param thresholdMs the p95 threshold, in milliseconds
-     */
+    /** The latency of one operation's measured calls; the percentiles are nearest-rank, in milliseconds. */
     private record Result(String label, String request, int calls, double p50Ms, double p95Ms, double maxMs,
             long thresholdMs) {
 
-        /**
-         * Returns whether the p95 meets the threshold.
-         *
-         * @return {@code true} when {@code p95Ms <= thresholdMs}
-         */
         boolean passed() {
             return p95Ms <= thresholdMs;
         }
     }
 
     /**
-     * The plan check of one statement.
-     *
-     * @param label      the statement's name
-     * @param lines      one excerpt line per plan node, indented by depth
-     * @param violations the excerpt lines of every {@code Seq Scan} on {@code custmast}
+     * The plan check of one statement: {@code lines} holds one excerpt line per plan node, indented by
+     * depth, and {@code violations} the lines of every {@code Seq Scan} on {@code custmast}.
      */
     private record PlanCheck(String label, List<String> lines, List<String> violations) {
 
-        /**
-         * Returns whether the plan holds no sequential scan of {@code custmast}.
-         *
-         * @return {@code true} when there is no violation
-         */
         boolean passed() {
             return violations.isEmpty();
         }

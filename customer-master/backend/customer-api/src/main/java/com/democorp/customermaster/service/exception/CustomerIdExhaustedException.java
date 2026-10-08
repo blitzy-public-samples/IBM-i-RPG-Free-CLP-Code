@@ -13,17 +13,12 @@ package com.democorp.customermaster.service.exception;
  *
  * <p><b>Target behaviour.</b> Ids come from the PostgreSQL sequence
  * {@code custmast_id_seq}, declared {@code MAXVALUE 1679615 NO CYCLE}, the
- * ordinal of {@code 9999}. Calling {@code nextval} past {@code MAXVALUE} raises
- * SQLSTATE {@code 2200H} (sequence generator limit exceeded), and
- * {@code CustomerIdAllocator.next()} translates that error into this exception.
- * The same condition follows a generator load whose last id is {@code 9999},
- * because the load leaves the sequence exhausted. No id is reissued by
- * wrap-around.
- *
- * <p><b>HTTP mapping.</b> {@code ApiExceptionHandler} maps this exception,
- * through {@code ProblemFactory}, to {@code 503 Service Unavailable} with
- * catalog key {@code APP0503} ("No customer ids are left. Contact IT."). No
- * other class maps it.
+ * ordinal of {@code 9999}, so {@code nextval} past it raises SQLSTATE
+ * {@code 2200H} and no id is reissued by wrap-around. A generator load whose
+ * last id is {@code 9999} leaves the sequence exhausted as well.
+ * {@code repository.CustomerIdAllocator} translates {@code 2200H} into this
+ * exception, and {@code ApiExceptionHandler} maps it to HTTP 503
+ * {@code APP0503}.
  *
  * <p><b>What it carries.</b> The message is the catalog key {@code APP0503}
  * only. The exception holds no SQLSTATE, SQL text or id value. The optional
@@ -31,20 +26,9 @@ package com.democorp.customermaster.service.exception;
  * {@code 2200H}, is kept for server-side logging and never reaches a response
  * body.
  *
- * <p>This package imports nothing outside {@code java.*}:
- * {@code CustomerIdAllocator} in the repository layer throws this class, so a
+ * <p>This class imports nothing outside {@code java.*}:
+ * {@code CustomerIdAllocator} in the repository layer throws it, so a
  * dependency in the other direction would create a cycle.
- *
- * <pre>{@code
- * try {
- *     ordinal = jdbc.queryForObject("SELECT nextval('custmast_id_seq')", Map.of(), Integer.class);
- * } catch (DataAccessException e) {
- *     if (isSequenceLimitExceeded(e)) {          // SQLSTATE 2200H
- *         throw new CustomerIdExhaustedException(e);
- *     }
- *     throw e;
- * }
- * }</pre>
  */
 public final class CustomerIdExhaustedException extends RuntimeException {
 

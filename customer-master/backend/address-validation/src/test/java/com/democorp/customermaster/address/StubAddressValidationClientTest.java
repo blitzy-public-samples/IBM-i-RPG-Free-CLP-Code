@@ -24,54 +24,31 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 
 /**
- * Specifies {@link StubAddressValidationClient}, the deterministic, offline
- * {@link AddressValidationClient} that is the default for local runs, Docker Compose and
- * every test suite ({@code customer-master.address.client=stub}).
+ * Specifies {@link StubAddressValidationClient}, the offline default client
+ * ({@code customer-master.address.client=stub}) that stands in for the USPS Web Tools
+ * {@code Verify} call of USADRVAL [USPS_Address/USADRVAL.SQLRPGLE:74-137]. Its fixtures in
+ * {@code stub/usps-stub-fixtures.json} are fictitious stand-ins modelled on the eight harness
+ * calls of USADRVAL_T [USPS_Address/USADRVAL_T.RPGLE:25-79]; no real address appears here or
+ * in the fixture file. Every request and result component keeps its {@code USAdrValDS} width
+ * [Copy_Mbrs/USADRVALDS.RPGLE:4-9], 30, 30, 30, 2, 5 and 4, counted in code points.
  *
- * <p>The stub stands in for the USPS Web Tools {@code Verify} call made by USADRVAL
- * [USPS_Address/USADRVAL.SQLRPGLE:74-137]. Its fixtures in
- * {@code stub/usps-stub-fixtures.json} are fictitious stand-ins modelled on the eight
- * harness calls of USADRVAL_T [USPS_Address/USADRVAL_T.RPGLE:25-79]; no real address
- * appears here or in the fixture file. Every request and result component keeps its
- * {@code USAdrValDS} width [Copy_Mbrs/USADRVALDS.RPGLE:4-9]: 30, 30, 30, 2, 5 and 4.
- *
- * <ul>
- *   <li><b>Fixture hit.</b> The key is {@code (address2, city, state, zip5)} of the request
- *       as sent, each stripped and uppercased; {@code address1} and {@code zip4} are not
- *       part of it. A hit returns the fixture's standardized address, including its ZIP+4
- *       when it has one.</li>
- *   <li><b>{@code BADADDR}.</b> An address line containing {@code BADADDR} returns the
- *       Web Tools report {@code -2147219401} / {@code clsAMS} / {@code Address Not Found.}
- *       with a blank city, so the result is not standardized. It takes precedence over a
- *       fixture hit.</li>
- *   <li><b>Miss.</b> Anything else echoes the stripped, uppercased input with a blank
- *       {@code zip4} and no error.</li>
- * </ul>
- *
- * <p><b>Published fixtures.</b> F1 (the primary e2e fixture, ZIP+4 {@code 2210}) and F8
- * (the 30-character key cut from a 38-character street) are relied on by customer-api's
- * {@code AddressStandardizationServiceTest} and by the e2e spec
- * {@code add-with-address-standardization.spec.ts}; F4 and F7 cover lowercase input and the
- * no-ZIP+4 answer. {@link FixtureFile#publishedFixturesMatchTheFile()} pins the constants
- * below to the file, so a fixture edit that would break those consumers fails here first.
- *
- * <p>Plain JUnit 5 and AssertJ: no application context, no mocks, no network. The fixture
- * file is read through {@link JsonParserFactory}, as the stub itself reads it, because this
- * module carries no JSON library.
+ * <p><b>Published fixtures.</b> F1 (the primary e2e fixture, ZIP+4 {@code 2210}) is relied on
+ * by the e2e spec {@code add-with-address-standardization.spec.ts}, and F8 (the 30-character
+ * key cut from a 38-character street) by customer-api's
+ * {@code AddressStandardizationServiceTest}. {@link FixtureFile#publishedFixturesMatchTheFile()}
+ * pins the F1, F4, F7 and F8 constants to the file, so a fixture edit that would break those
+ * consumers fails here first. The file is read through {@link JsonParserFactory}, as the stub
+ * itself reads it, because this module carries no JSON library.
  */
 @DisplayName("StubAddressValidationClient: fixture hits, BADADDR error and uppercase echo")
 class StubAddressValidationClientTest {
 
-    /** Class-path location of the bundled fixture file. */
     private static final String FIXTURES = "stub/usps-stub-fixtures.json";
 
-    /** Web Tools error {@code Number} for an address it cannot find. */
     private static final int NOT_FOUND_NUMBER = -2147219401;
 
-    /** Web Tools error {@code Source} for an address it cannot find. */
     private static final String NOT_FOUND_SOURCE = "clsAMS";
 
-    /** Web Tools error {@code Description} for an address it cannot find. */
     private static final String NOT_FOUND_DESCRIPTION = "Address Not Found.";
 
     // ------------------------------------------------ F1: primary e2e fixture, with ZIP+4
@@ -146,10 +123,7 @@ class StubAddressValidationClientTest {
     private static final AddressValidationResult TEMPLATE_OUTPUT = AddressValidationResult.success(
             "", "12 SAMPLE RD", "OLD HAVEN", "CT", "06399", "0003");
 
-    /** The client under test, over the bundled fixture file. */
     private final StubAddressValidationClient client = new StubAddressValidationClient();
-
-    // ================================================================== fixture hits
 
     @Nested
     @DisplayName("Fixture hit")
@@ -239,8 +213,6 @@ class StubAddressValidationClientTest {
         }
     }
 
-    // ================================================================== BADADDR
-
     @Nested
     @DisplayName("BADADDR")
     class BadAddress {
@@ -281,8 +253,6 @@ class StubAddressValidationClientTest {
             assertThat(result.standardized()).isFalse();
         }
     }
-
-    // ================================================================== echo
 
     @Nested
     @DisplayName("Miss")
@@ -339,8 +309,6 @@ class StubAddressValidationClientTest {
         }
     }
 
-    // ================================================================== determinism
-
     @Nested
     @DisplayName("Determinism")
     class Determinism {
@@ -366,8 +334,6 @@ class StubAddressValidationClientTest {
             assertThat(other.validate(miss)).isEqualTo(firstMiss);
         }
     }
-
-    // ================================================================== fixture file
 
     @Nested
     @DisplayName("Fixture file")
@@ -583,9 +549,6 @@ class StubAddressValidationClientTest {
         }
     }
 
-    // ================================================================== helpers
-
-    /** Parses the bundled fixture file as the stub does. */
     private static List<Object> fixtureEntries() throws IOException {
         final String json = new ClassPathResource(FIXTURES).getContentAsString(StandardCharsets.UTF_8);
         return JsonParserFactory.getJsonParser().parseList(json);
@@ -615,7 +578,6 @@ class StubAddressValidationClientTest {
         return value == null ? "" : value.toString();
     }
 
-    /** Width in code points, as {@code USAdrValDS} fields are counted. */
     private static int width(String value) {
         return value.codePointCount(0, value.length());
     }

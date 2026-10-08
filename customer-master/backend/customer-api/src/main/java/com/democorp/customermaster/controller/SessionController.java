@@ -16,35 +16,20 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * {@code GET /api/session}: tells the browser who is signed in and which roles that user holds.
+ * {@code GET /api/session}: the signed-in username and the roles granted to that user.
  *
- * <p><b>What it replaces.</b> On the IBM i, the screen mode was a letter the caller asserted: the
- * search program received {@code pParmType} ({@code I} inquiry, {@code M} maintenance, {@code S}
- * selection) as its first parameter ({@code 5250_Subfile/PMTCUSTR.SQLRPGLE}, lines 76-79), trusting
- * "a tested menu or some program that enforced security" to pass the right one. The detail window
- * showed the job's user profile in its header through the DDS {@code USER} keyword
- * ({@code 5250_Subfile/MTNCUSTD.DSPF}, record {@code SH_HDR}). The browser now derives its Inquiry or
- * Maintenance mode from the roles returned here, and shows the username returned here in the screen
- * header; it never takes a mode from a URL or a request parameter. Selection is not a role: it is the
- * customer picker's context, open to any signed-in user, so it never appears in the response.
+ * <p>The browser derives its Inquiry or Maintenance mode and the screen header's username from this
+ * response, never from a URL or a request parameter. It replaces the caller-asserted mode letter
+ * {@code pParmType} ({@code 5250_Subfile/PMTCUSTR.SQLRPGLE}, lines 76-79) and the header's DDS
+ * {@code USER} keyword ({@code 5250_Subfile/MTNCUSTD.DSPF}, record {@code SH_HDR}).
  *
- * <p><b>Response.</b> {@code 200 {"username": "sales", "roles": ["MAINTENANCE"]}}. The roles are the
- * granted role names as {@link CurrentUser#roles()} reports them: without the {@code ROLE_} prefix and
- * without role-hierarchy expansion, so a maintenance user is {@code ["MAINTENANCE"]}, not
- * {@code ["MAINTENANCE", "INQUIRY"]}.
+ * <p><b>Roles.</b> The roles are as {@link CurrentUser#roles()} reports them: granted, not expanded
+ * through the role hierarchy, so a maintenance user is {@code ["MAINTENANCE"]}. Selection is not a
+ * role and never appears in the list.
  *
- * <p><b>Authorization lives elsewhere.</b> {@code SecurityConfig} requires the {@code INQUIRY} role,
- * which {@code MAINTENANCE} implies, before the request reaches this controller, and answers a request
- * without valid credentials with 401 APP0401 problem+json. This class therefore performs no checks of
- * its own and carries no method-security annotation; the 401 response below only documents the
- * filter chain's answer in the OpenAPI document.
- *
- * <p><b>Web contexts only.</b> The controller exists only in a servlet application context. The
- * test-data generator runs the same jar with no web server, and creates no controller.
- *
- * <p>The OpenAPI annotations feed the committed springdoc snapshot
- * ({@code customer-master/openapi/customer-master-api.yaml}) and the frontend types generated from it,
- * so the operation id, summary and response declarations must stay fixed.
+ * <p><b>Authorization.</b> The {@code INQUIRY} requirement and the 401 APP0401 answer belong to the
+ * filter chain of {@link com.democorp.customermaster.security.SecurityConfig SecurityConfig}. This
+ * class checks nothing, and its 401 declaration only documents that answer.
  */
 @RestController
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)

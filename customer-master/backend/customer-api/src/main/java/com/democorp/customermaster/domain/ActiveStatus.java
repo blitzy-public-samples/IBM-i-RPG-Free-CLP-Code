@@ -20,26 +20,9 @@ import java.util.Optional;
  * and fails, exactly as {@code ' Y'} failed the source comparison. Doing either step here as well would
  * hide a missing normalization in a caller.
  *
- * <p><b>Responsibilities kept elsewhere.</b> This type only names and validates the code:
- * <ul>
- *   <li>The DEM0501 key, its {@code Active Status} argument and the field error belong to
- *       {@code service/CustomerValidator} (rule 1 of the nine field rules) and the message catalog.</li>
- *   <li>Applying {@link #DEFAULT} to an {@code active} absent from an add or an ADD review happens in the
- *       service and DTO layer, before the rules run; a value that is present, even blank, is validated as
- *       given.</li>
- *   <li>{@code Customer.active} and the search row keep the stored code as a {@code String}; use
- *       {@link #code()} to write one and {@link #fromCode(String)} to read one.</li>
- * </ul>
- *
- * <pre>{@code
- * ActiveStatus.fromCode(TextNormalizer.field("y"));   // Optional[Y]
- * ActiveStatus.fromCode("N");                         // Optional[N]
- * ActiveStatus.fromCode(" Y");                        // Optional.empty (leading blank)
- * ActiveStatus.fromCode("X");                         // Optional.empty -> DEM0501 in the validator
- * ActiveStatus.DEFAULT.code();                        // "Y"
- * }</pre>
- *
- * <p>The type depends on the JDK alone and, like every enum, is immutable and thread-safe.
+ * <p>This type only names and validates the code; the DEM0501 field error belongs to
+ * {@code service/CustomerValidator}. It depends on the JDK alone and, like every enum, is immutable and
+ * thread-safe.
  */
 public enum ActiveStatus {
 
@@ -53,6 +36,10 @@ public enum ActiveStatus {
      * The status a new customer receives when the add request carries no {@code active} value, as MTNCUSTR
      * sets {@code ACTIVE = 'Y'} when the add screen opens and again when F5 clears it
      * [5250_Subfile/MTNCUSTR.SQLRPGLE:253-254,269-270], and as the column default {@code 'Y'} does.
+     *
+     * <p>{@code CustomerMaintenanceService} applies {@code Y} before the field rules run, and only to an
+     * {@code active} that is absent ({@code null}) from an add or an ADD review. A value that is present,
+     * even blank, is validated as given and can fail DEM0501.
      */
     public static final ActiveStatus DEFAULT = Y;
 

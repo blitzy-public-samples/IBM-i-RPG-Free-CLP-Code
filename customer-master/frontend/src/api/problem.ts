@@ -1,46 +1,11 @@
 /**
- * The browser half of the API's RFC 9457 error model: the `Problem` body, the
- * `ApiError` every failed call rejects with, and two small helpers.
- *
- * Part of the shared component "Error model (client transport)", with
- * `./client.ts`, the one fetch wrapper. `client.ts` parses every non-2xx
- * response into `new ApiError(status, problem)`; the feature that made the
- * call passes the error to `errors/useProblemPresenter.ts`, which shows the
- * problem's `detail` and highlights the fields its `errors` name.
- *
- * What it replaces. On the 5250 a failed edit sent a CUSTMSGF message id plus
- * its substitution data to the program message queue (SndMsgPgmQ over
- * QMHSNDPM, Service_Pgms/SRV_MSG.RPGLE), and an unexpected SQL condition ended
- * the program with an escape message carrying the SQLSTATE, the SQL text and
- * a dump (SQLProblem, Service_Pgms/SRV_SQL.SQLRPGLE). Here both arrive as data:
- * `code` is the CUSTMSGF id of 5250_Subfile/CRTMSGF.CLLE (DEM0000..DEM9999) or
- * one of the APP keys, `args` is the message data, `detail` the substituted
- * text, and no body ever carries SQL text, a SQLSTATE or a stack trace.
- *
- * Constraints:
- * - Types come only from the generated `./schema` (the OpenAPI snapshot), as
- *   type-only imports, so this module has no runtime dependency at all.
- * - Layer rule: nothing is imported from `components/`, `errors/`,
- *   `features/` or `auth/`. Nothing here renders, touches the DOM or keeps
- *   state.
- * - No message text. The bundle carries none; every text comes from the
- *   server, in `detail` or from `GET /api/messages`. Codes such as `DEM9999`
- *   are catalog keys, not texts.
- *
- * @example
- * ```ts
- * try {
- *   await request('/api/customers/review', { method: 'POST', body });
- * } catch (error) {
- *   if (isApiError(error) && error.status === 422) {
- *     const [first] = fieldErrors(error.problem); // first entry receives focus
- *   }
- * }
- * ```
+ * The browser half of the API's RFC 9457 error model, used with `./client.ts`:
+ * the `Problem` body, the `ApiError` a failed call rejects with, and three
+ * helpers. `code` is a catalog key (a CUSTMSGF id or an APP key); the bundle
+ * carries no message text.
  */
 import type { components } from './schema';
 
-/** The generated OpenAPI schema of an error body. */
 type ProblemSchema = components['schemas']['Problem'];
 
 /**
@@ -98,23 +63,14 @@ export type Problem = Omit<ProblemSchema, 'args'> & Partial<Pick<ProblemSchema, 
  * the request, a write included, is unknown. `message` is the problem's
  * `detail`, or its `code` when the detail is empty, so a stray rejection that
  * reaches a log or a test failure still names the catalog key.
- *
- * @example
- * ```ts
- * throw new ApiError(response.status, problem);
- * throw new ApiError(0, syntheticProblem(0)); // fetch itself rejected
- * ```
  */
 export class ApiError extends Error {
-  /** The HTTP status of the response; `0` when no response arrived. */
   readonly status: number;
-
-  /** The parsed problem+json body, or the synthetic DEM9999 stand-in. */
   readonly problem: Problem;
 
   /**
    * @param status the HTTP status of the response, or `0` when no HTTP
-   *   response was received and the server's outcome is unknown
+   *   response was received
    * @param problem the problem the response carried, or a synthetic one
    */
   constructor(status: number, problem: Problem) {
@@ -144,10 +100,10 @@ export function fieldErrors(problem: Problem): FieldError[] {
 }
 
 /**
- * The DEM9999 problem `client.ts` uses when a response carries no usable
- * problem+json body (an HTML error page from a proxy, plain text, unparsable
- * JSON) and, with status `0`, when no HTTP response was received; whether
- * the server received or processed the request is then unknown.
+ * The DEM9999 problem `client.ts` uses when an error response carries no
+ * usable problem+json body (an HTML error page from a proxy, plain text,
+ * unparsable JSON) or a 2xx body cannot be read as JSON, and, with status
+ * `0`, when no HTTP response was received.
  *
  * `title` and `detail` are empty because the bundle carries no message text:
  * `errors/useProblemPresenter.ts` shows the catalog text of `code` instead,

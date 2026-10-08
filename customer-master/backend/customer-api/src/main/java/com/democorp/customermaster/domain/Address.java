@@ -9,61 +9,32 @@ import org.springframework.data.relational.core.mapping.Column;
  * <p>Gives the four address fields one type. They are exactly the fields the USPS
  * variant's {@code Edit_Address} reads into its request and overwrites from the
  * standardized response [USPS_Address/MTNCUSTR.SQLRPGLE:471-499], over the CUSTMAST
- * columns of [5250_Subfile/Custmast2.sql:12-15]:
- *
- * <table>
- *   <caption>Source column, V3 column and component</caption>
- *   <tr><th>Component</th><th>Custmast2.sql</th><th>V3 column</th>
- *       <th>Edit_Address</th></tr>
- *   <tr><td>{@code addr}</td><td>{@code Addr CHAR(40)}</td>
- *       <td>{@code addr varchar(40)}</td>
- *       <td>sent as {@code AdrIn.Address2}; replaced by {@code AdrOut.Address2}</td></tr>
- *   <tr><td>{@code city}</td><td>{@code City CHAR(20)}</td>
- *       <td>{@code city varchar(20)}</td>
- *       <td>sent as {@code AdrIn.City}; replaced by {@code AdrOut.City}</td></tr>
- *   <tr><td>{@code state}</td><td>{@code State CHAR(2)}</td>
- *       <td>{@code state char(2)}, foreign key to {@code states}</td>
- *       <td>sent as {@code AdrIn.State}; replaced by {@code AdrOut.State}</td></tr>
- *   <tr><td>{@code zip}</td><td>{@code Zip CHAR(10)}</td>
- *       <td>{@code zip varchar(10)}</td>
- *       <td>first five characters sent as {@code AdrIn.Zip5}; replaced by
- *       {@code Zip5-Zip4}, or {@code Zip5} alone when Zip4 is blank</td></tr>
- * </table>
+ * columns of [5250_Subfile/Custmast2.sql:12-15].
  *
  * <p><b>Column names.</b> Every component names its V3 column explicitly with
  * {@link Column}, as every mapped type in this package does, so the mapping never
  * depends on the default {@code NamingStrategy}. {@code Customer} embeds this record
- * with {@code @Embedded.Empty}, whose prefix is empty, so the SQL Spring Data JDBC
- * generates reads and writes {@code addr}, {@code city}, {@code state} and {@code zip}:
- * the same names the handwritten SQL of {@code CustomerSearchRepository} and the
- * {@code COPY} column list of {@code CustomerCopyWriter} use.
+ * with an empty prefix, so the SQL Spring Data JDBC generates reads and writes
+ * {@code addr}, {@code city}, {@code state} and {@code zip}: the same names the
+ * handwritten SQL of {@code CustomerSearchRepository} and the {@code COPY} column list
+ * of {@code CustomerCopyWriter} use.
  *
  * <p><b>Values are taken as given.</b> The record validates and normalizes nothing,
- * and accepts {@code null} components:
- * <ul>
- *   <li>Values written through the API arrive already normalized by
- *       {@link TextNormalizer#field(String)} in {@code CustomerMaintenanceService},
- *       and values read from the database are the stored values.</li>
- *   <li>A draft built from a request may be incomplete until
- *       {@code CustomerValidator} runs, so an absent field stays {@code null} here
- *       and is reported by the field rules (DEM0502, DEM0503), not by this type.</li>
- *   <li>The Edit_Address mapping, which cuts the street to 30 characters, the city to
- *       20 and composes the ZIP, belongs to {@code AddressStandardizationService}.</li>
- * </ul>
+ * and accepts {@code null} components: an absent field of a draft stays {@code null}
+ * here and is reported by the field rules (DEM0502, DEM0503), not by this type.
+ * {@code CustomerMaintenanceService} normalizes values written through the API, and
+ * the Edit_Address mapping, which cuts the street to 30 characters, the city to 20 and
+ * composes the ZIP, belongs to {@code AddressStandardizationService}. Seed rows keep
+ * the source's mixed case and spacing, as V5 stores customer {@code AAAD}:
+ * <pre>{@code
+ * Address a = new Address("P.O. Box 103,  9218 Vivamus Avenue", "AUBURN", "ME",
+ *         "15762-0001");
+ * }</pre>
  *
  * <p><b>Persistent properties.</b> Only the four record components are mapped.
  * {@link #zip5()} is a derived value with no backing field, so Spring Data does not
  * treat it as a property, and its name does not follow the getter convention, so
- * Jackson does not serialize it either. No other derived accessor is declared.
- *
- * <p>Example, seed customer {@code AAAD} as stored by the V5 seed, whose street keeps
- * the source's mixed case:
- * <pre>{@code
- * Address a = new Address("P.O. Box 103,  9218 Vivamus Avenue", "AUBURN", "ME",
- *         "15762-0001");
- * a.zip5();                    // "15762"
- * a.withZip("06371").zip();    // "06371"; a is unchanged
- * }</pre>
+ * Jackson does not serialize it either.
  *
  * <p>Instances are immutable and therefore thread-safe.
  *

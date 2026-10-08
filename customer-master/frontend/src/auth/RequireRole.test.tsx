@@ -1,47 +1,15 @@
 /**
- * Tests of the client route guard and the mode it lets a screen derive:
- * `./RequireRole.tsx`, with the session of `./AuthProvider.tsx` and the
- * redirect target `./SignInPage.tsx`.
+ * Tests of `./RequireRole.tsx` with the real session of `./AuthProvider.tsx`
+ * and the real `./SignInPage.tsx`.
  *
- * What it replaces. PMTCUSTR takes its mode as the caller-asserted first
- * parameter `pParmType` (I, M or S) and leaves security to "a tested menu or
- * some program that enforced security" (5250_Subfile/PMTCUSTR.SQLRPGLE:76-79,
- * 230-231). The README gives the general user population Inquiry, Sales
- * Maintenance, and Selection to any in-house program that needs a customer id
- * (5250_Subfile/README.md:33-40). Here the identity is an HTTP Basic sign-in,
- * the mode comes only from the roles `GET /api/session` reports, MAINTENANCE
- * implies INQUIRY, and Selection is a picker context rather than a role.
- *
- * What is pinned down here:
- * - **Signed out.** A guarded path redirects to `/sign-in`, carrying the
- *   requested path as `state.from`; the guarded screen never renders.
- * - **Mode per role.** An INQUIRY session renders the screen in Inquiry mode,
- *   a MAINTENANCE session in Maintenance mode, and MAINTENANCE satisfies both
- *   gates. The mode ignores anything the URL says.
- * - **Role not satisfied.** The screen is replaced by the APP0403 catalog
- *   text as static content, with no toast; a session without a known role
- *   passes no gate, the default INQUIRY gate included.
- * - **Round trip.** Signing in on the real `SignInPage` returns to the
- *   guarded path in the mode the server reported, sending Basic credentials
- *   and `X-Requested-With`; bad credentials keep the page, clear the password
- *   and show APP0401 as the one alert, and a retry still returns to `from`.
- * - **Abandoned and superseded attempts.** A sign-in attempt whose page was
- *   left, or that a newer sign-in or a sign-out superseded, changes nothing
- *   when its answer finally arrives, success and 401 alike: the newer
- *   session, its route, its stored credentials and the empty alert region
- *   stay as they are.
- *
- * Harness. Every request is answered by the shared MSW server
- * (`../test/server`, started by `../test/setup.ts` with
- * `onUnhandledFrame: 'error'`), whose default handlers authenticate Basic
+ * Harness. The shared MSW server's default handlers authenticate Basic
  * credentials on every route, the public `/api/messages` included, against the
- * test base's demo `users`. The seeded sessions therefore use those users, so
- * the catalog request their stored credentials accompany is accepted, exactly
- * as the server accepts a signed-in user's credentials on a public route.
- * Each render builds its own `QueryClient`, and the stored credentials are
- * forgotten after every test, so no catalog, session or credential survives
- * from one test to the next. Screens are stood in for by probes, so these
- * tests depend on nothing under `features/`.
+ * test base's demo `users`. Seeded sessions therefore use those users, so the
+ * catalog request their stored credentials accompany is accepted, as the
+ * server accepts a signed-in user's credentials on a public route. Each render
+ * builds its own `QueryClient`, and the stored credentials are forgotten after
+ * every test, so nothing survives from one test to the next. Probes stand in
+ * for screens, so these tests depend on nothing under `features/`.
  */
 import { useEffect } from 'react';
 import type { ReactElement } from 'react';
@@ -63,29 +31,18 @@ import type { AuthContextValue, AuthSession, Role } from './AuthProvider';
 import { RequireRole } from './RequireRole';
 import { SignInPage } from './SignInPage';
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-/** APP0401 as the catalog serves it: the alert of a failed sign-in. */
 const SIGN_IN_REQUIRED = 'Sign in required.';
 
-/** APP0403 as the catalog serves it: the notice of a role not satisfied. */
 const NOT_AUTHORIZED = 'You are not authorized to perform this action.';
 
-/** The text {@link SignInProbe} renders, standing in for the sign-in page. */
 const SIGN_IN_ROUTE = 'Sign-in route';
 
-/** What {@link SignInProbe} shows when the navigation carried no `from`. */
 const NO_FROM = '(none)';
 
-/** The session endpoint the sign-in page authenticates against. */
 const SESSION_PATH = '/api/session';
 
-/** The name of {@link NavProbe}'s link: the user leaving for another guarded path. */
 const GO_TO_ADMIN = 'Go to admin';
 
-/** A demo user of the shared test base: the credentials its handlers accept. */
 type DemoUser = (typeof users)[number];
 
 /**
@@ -118,10 +75,6 @@ function seedSession(role: Role): AuthSession {
   return { username: user.username, roles: [...user.roles] };
 }
 
-// ---------------------------------------------------------------------------
-// Request recording
-// ---------------------------------------------------------------------------
-
 /** Every request that reached MSW in the current test, in order. */
 const requests: Request[] = [];
 
@@ -134,10 +87,6 @@ function recordRequest({ request }: { request: Request }): void {
 function recordedGets(path: string): Request[] {
   return requests.filter((request) => request.method === 'GET' && new URL(request.url).pathname === path);
 }
-
-// ---------------------------------------------------------------------------
-// Held session requests
-// ---------------------------------------------------------------------------
 
 /** A promise and the function that resolves it. */
 interface Deferred {
@@ -254,10 +203,6 @@ afterEach(async () => {
   setCredentials(null);
 });
 
-// ---------------------------------------------------------------------------
-// Probes
-// ---------------------------------------------------------------------------
-
 /**
  * The guarded screen's stand-in. It reads the mode from the session, as every
  * screen does, and shows it with the search page's header text per mode, plus
@@ -331,10 +276,6 @@ function AuthHandle({ onChange }: { onChange: (auth: AuthContextValue) => void }
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
 /** Options of {@link renderApp}. */
 interface RenderAppOptions {
   /** The first location, path and optional query string. */
@@ -384,10 +325,6 @@ async function renderApp({ path, session, gateRole, signInElement, beside }: Ren
   );
   await waitFor(() => expect(screen.getByTestId('catalog-ready')).toHaveTextContent('true'));
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe('RequireRole', () => {
   it('serves the APP0401 and APP0403 texts these tests assert from the catalog', () => {

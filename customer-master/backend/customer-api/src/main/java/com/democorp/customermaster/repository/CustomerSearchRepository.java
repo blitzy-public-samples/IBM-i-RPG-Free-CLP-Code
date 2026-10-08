@@ -21,79 +21,41 @@ import org.springframework.transaction.annotation.Transactional;
  * from fixed SQL fragments for the filters a {@link SearchCriteria} carries.
  *
  * <p><b>What it replaces.</b> PMTCUSTR's cursor {@code ItemCur}
- * [5250_Subfile/PMTCUSTR.SQLRPGLE:208-223]:
- * <pre>
- * select NAME, CITY, STATE, ZIP, ACTIVE, CUSTID from CUSTMAST
- * where NAME LIKE :wkName and CITY LIKE :wkCity
- *   and STATE between :wkStateLow and :wkStateHigh
- *   and ACTIVE between :wkActiveLow and :wkActiveHigh
- * order by NAME, CITY, STATE optimize for 13 rows for fetch only
- * </pre>
- * with the host variables {@code ProcessSearchCriteria} builds
- * [5250_Subfile/PMTCUSTR.SQLRPGLE:625-665]. The target keeps no open cursor between requests, so
- * each page is one statement that restarts after the last row served.
+ * [5250_Subfile/PMTCUSTR.SQLRPGLE:208-223], with the host variables {@code ProcessSearchCriteria}
+ * builds [5250_Subfile/PMTCUSTR.SQLRPGLE:625-665]. No cursor stays open between requests: each page
+ * is one statement that restarts after the last row served.
  *
- * <p><b>The statement.</b> Without a literal lead, one ordered {@code SELECT}:
- * <pre>
- * SELECT custid, name, city, state, left(zip, 5) AS zip5, active FROM custmast
- * [WHERE &lt;name&gt; AND &lt;city&gt; AND &lt;state&gt; AND &lt;active&gt; AND &lt;keyset&gt;]
- * ORDER BY name, city, state, custid LIMIT :limit
- * </pre>
- * When the name or city pattern has a literal lead (one that yields an index prefix; see "Name and
- * city patterns" below), the same select list and predicates, that lead's among them, form a
- * materialized candidate set, and the page is ordered and limited outside it:
- * <pre>
- * WITH candidates AS MATERIALIZED (
- *   SELECT custid, name, city, state, left(zip, 5) AS zip5, active FROM custmast
- *   WHERE &lt;name and/or city&gt; [AND &lt;state&gt; AND &lt;active&gt; AND &lt;keyset&gt;])
- * SELECT custid, name, city, state, zip5, active FROM candidates
- * ORDER BY name, city, state, custid LIMIT :limit
- * </pre>
- * Each bracketed predicate is added only when its input is present, so the planner never sees an
- * always-true optional branch that would defeat index use. {@code zip5} is the first five characters
- * of the ZIP, as the subfile field {@code SF_ZIP 5A} showed [5250_Subfile/PMTCUSTD.DSPF:71].
- * {@code custid} is the unique tiebreaker keyset pagination needs. {@code LIMIT} replaces
- * {@code OPTIMIZE FOR 13 ROWS}, which was only a hint, and the read-only transaction replaces
- * {@code FOR FETCH ONLY}. Every value is a bound parameter; no filter or cursor text is ever placed
- * in the SQL, so names such as {@code URNA \NUNC\ COMPANY} and {@code NIBH L'LOR COMPANY} match
- * literally and nothing a user types can alter the statement.
+ * <p><b>The statement.</b> Without a literal lead, one ordered {@code SELECT} from {@code custmast},
+ * its predicates joined by {@code AND} and closed by {@code ORDER BY name, city, state, custid
+ * LIMIT :limit}. When the name or city pattern has a literal lead (one that yields an index prefix;
+ * see "Name and city patterns" below), that {@code SELECT} with all its predicates becomes the
+ * materialized candidate set {@code WITH candidates AS MATERIALIZED (...)}, and the page is selected,
+ * ordered and limited outside it. Each predicate is added only when its input is present, so the
+ * planner never sees an always-true optional branch that would defeat index use. A state filter is
+ * an exact match where the source used a single-value {@code BETWEEN}; {@code active = 'Y'} applies
+ * unless inactive rows are included, and then nothing does, because the {@code custmast_active_ck}
+ * CHECK limits the column to {@code Y} and {@code N}. {@code zip5} is the first five characters of
+ * the ZIP, as the subfile field {@code SF_ZIP 5A} showed [5250_Subfile/PMTCUSTD.DSPF:71].
+ * {@code LIMIT} replaces {@code OPTIMIZE FOR 13 ROWS}, which was only a hint, and the read-only
+ * transaction replaces {@code FOR FETCH ONLY}. Every value is a bound parameter; no filter or cursor
+ * text is ever placed in the SQL, so names such as {@code URNA \NUNC\ COMPANY} and
+ * {@code NIBH L'LOR COMPANY} match literally and nothing a user types can alter the statement.
  *
- * <p><b>Why a literal lead is fenced.</b> {@code name} is the leading key of the {@code ORDER BY}
- * and of {@code custmast_search_keyset}. In one statement the planner can cost an ordered walk of
- * that index with the {@code LIKE} predicates as filters, assuming the matches are spread evenly
- * through the order so that 13 arrive early. A name lead's matches are instead clustered at the
- * lead's position in the leading key, so for a late lead such as {@code Z} the walk examines almost
- * the whole table before its first match. A city lead's matches arrive early in that walk only if
- * they are in fact spread evenly through the name order, so the walk's cost rests on the planner's
- * estimate rather than on the lead. {@code MATERIALIZED} stops the planner from pushing the
- * {@code ORDER BY} and {@code LIMIT} into the candidate scan: the candidate set is bounded by the
- * lead's matches, which {@code custmast_name} or {@code custmast_city} returns, the {@code rpad}
- * check (when issued) filters them, and a top-N sort keeps the page. Inside the fence the planner
- * still chooses the access path, for example the narrower of two leads, an index or bitmap scan, or
- * a {@code BitmapAnd} with the keyset position. Only a search with no literal lead in either
- * pattern keeps the single statement and the ordered walk (for a state filter,
- * {@code custmast_state} when the planner costs it lower): no filter, the state and active filters,
- * a keyset position alone, and patterns that start with a wildcard, which are evaluated over the
- * walk as the source scans.
- *
- * <table>
- *   <caption>Predicates, in the order they are added</caption>
- *   <tr><th>Input</th><th>Source rule</th><th>Fragment</th></tr>
- *   <tr><td>{@code name} (non-blank)</td><td>{@code NAME LIKE :wkName}, {@code NAME CHAR(40)}</td>
- *       <td>See "Name and city patterns" below; parameters {@code namePattern},
- *       {@code namePrefix}</td></tr>
- *   <tr><td>{@code city} (non-blank)</td><td>{@code CITY LIKE :wkCity}, {@code CITY CHAR(20)}</td>
- *       <td>The same construction; parameters {@code cityPattern}, {@code cityPrefix}</td></tr>
- *   <tr><td>{@code state} (non-blank)</td><td>{@code STATE between SC_STATE and SC_STATE}; blank
- *       meant {@code ' '..'ZZ'}</td><td>{@code state = CAST(:state AS char(2))}</td></tr>
- *   <tr><td>{@code includeInactive == false}</td><td>{@code ACTIVE between 'Y' and 'Y'}; with F9,
- *       {@code ' '..'Z'}</td><td>{@code active = 'Y'}; nothing when inactive rows are included,
- *       because the {@code custmast_active_ck} CHECK limits the column to {@code Y} and
- *       {@code N}</td></tr>
- *   <tr><td>{@code cursor} (not the first page)</td><td>The next fetch on the open cursor</td>
- *       <td>{@code (name, city, state, custid) > (:kName, :kCity, CAST(:kState AS char(2)),
- *       CAST(:kId AS char(4)))}</td></tr>
- * </table>
+ * <p><b>Why a literal lead is fenced.</b> {@code name} leads both the {@code ORDER BY} and
+ * {@code custmast_search_keyset}, so in one statement the planner can cost an ordered walk of that
+ * index with the {@code LIKE} predicates as filters, assuming the matches spread evenly through the
+ * order so that 13 arrive early. A name lead's matches instead cluster at the lead's position in the
+ * leading key, so for a late lead such as {@code Z} the walk examines almost the whole table before
+ * its first match; a city lead's matches arrive early only if they really are spread evenly through
+ * the name order, so the walk's cost rests on the planner's estimate rather than on the lead.
+ * {@code MATERIALIZED} keeps the {@code ORDER BY} and {@code LIMIT} out of the candidate scan: the
+ * candidate set is bounded by the lead's matches, which {@code custmast_name} or
+ * {@code custmast_city} returns, the {@code rpad} check (when issued) filters them, and a top-N sort
+ * keeps the page. Inside the fence the planner still chooses the access path, such as the narrower
+ * of two leads, an index or bitmap scan, or a {@code BitmapAnd} with the keyset position. Only a
+ * search with no literal lead in either pattern, such as one whose patterns start with a wildcard,
+ * keeps the single statement and the ordered walk ({@code custmast_state} for a state filter when
+ * the planner costs it lower), and is evaluated over that walk as the source scans.
  *
  * <p><b>Name and city patterns.</b> Db2 matches {@code LIKE} against the whole blank-padded
  * {@code CHAR} value [5250_Subfile/Custmast2.sql:11,13] and has no default escape character; the
@@ -102,11 +64,15 @@ import org.springframework.transaction.annotation.Transactional;
  * <ol>
  *   <li><b>Pattern.</b> The filter plus {@code %}, cut to {@value #FILTER_WIDTH} code points, as
  *       {@code wkName = %trim(SC_NAME) + '%'} assigns into a {@code varchar(13)}
- *       [5250_Subfile/PMTCUSTR.SQLRPGLE:201-202,633-634]. A full 13-character entry thus carries no
- *       wildcard and finds nothing against the padded value: a preserved source defect.</li>
+ *       [5250_Subfile/PMTCUSTR.SQLRPGLE:201-202,633-634]. A filter of 13 or more code points thus
+ *       loses the appended {@code %}. When no {@code %} of its own remains among the 13 kept, its 13
+ *       characters must match the whole padded value of 40 (city: 20) characters, so it finds
+ *       nothing, whatever {@code _} it holds: a preserved source defect. A {@code %} the user typed
+ *       stays a wildcard, so a filter that keeps its own {@code %} can still match, as the example
+ *       in step 5 does.</li>
  *   <li><b>Escape parity.</b> Every {@code \} is doubled after the cut, so PostgreSQL's escape is
  *       inert, as on Db2. User {@code %} and {@code _} stay wildcards, and a {@code _} can match a pad
- *       blank, as on Db2.</li>
+ *       blank, as on Db2: {@code AB_} finds {@code AB}.</li>
  *   <li><b>Match.</b> {@code rpad(name, 40) LIKE :namePattern} ({@code rpad(city, 20)} for the city)
  *       compares against the padded value exactly as Db2 does.</li>
  *   <li><b>Index path.</b> {@code name LIKE :namePrefix}: the pattern's literal lead (everything before
@@ -117,57 +83,19 @@ import org.springframework.transaction.annotation.Transactional;
  *   <li><b>Simplification.</b> When the pattern is exactly a non-empty literal lead plus one final
  *       {@code %}, and the lead does not end in a blank, padding cannot contribute to a match, so
  *       {@code name LIKE :namePattern} alone is issued. A lead that ends in a blank keeps
- *       {@code rpad}, because padding can complete it.</li>
+ *       {@code rpad}, because padding can complete it: {@code AB}, ten blanks and {@code %} finds
+ *       {@code AB} and not {@code ABX}.</li>
  * </ol>
  *
- * <table>
- *   <caption>Filters and the fragments they produce</caption>
- *   <tr><th>Filter</th><th>Pattern</th><th>Fragments</th><th>Result</th></tr>
- *   <tr><td>{@code ABC}</td><td>{@code ABC%}</td><td>{@code name LIKE :namePattern}</td>
- *       <td>Fenced: {@code custmast_name} serves the candidate set (index or bitmap scan, the
- *       planner's choice), then a top-N sort; no {@code rpad}</td></tr>
- *   <tr><td>{@code AB_}</td><td>{@code AB_%}</td>
- *       <td>{@code rpad(name, 40) LIKE 'AB_%'} and {@code name LIKE 'AB%'}</td>
- *       <td>Fenced on lead {@code AB}; finds {@code AB}: the {@code _} matches a pad
- *       blank</td></tr>
- *   <tr><td>{@code AB}, ten blanks, {@code %}</td><td>The same 13 characters</td>
- *       <td>{@code rpad} and prefix {@code AB%}</td><td>Fenced on lead {@code AB}; finds
- *       {@code AB}, not {@code ABX}</td></tr>
- *   <tr><td>{@code ABCDEFGHIJKLM}</td><td>{@code ABCDEFGHIJKLM}, no wildcard</td>
- *       <td>{@code rpad} and prefix {@code ABCDEFGHIJKLM%}</td><td>Fenced; finds nothing
- *       (preserved defect)</td></tr>
- *   <tr><td>{@code %ONE}</td><td>{@code %ONE%}</td><td>{@code rpad} only</td>
- *       <td>No literal lead, so no index aid; alone it is not fenced and is evaluated over the
- *       ordered walk, as the source scans</td></tr>
- *   <tr><td>{@code URNA \NUNC}</td><td>{@code URNA \\NUNC%}</td><td>{@code name LIKE :namePattern}</td>
- *       <td>Fenced; matches {@code URNA \NUNC\ COMPANY} literally</td></tr>
- * </table>
+ * <p><b>Planning.</b> The patterns are bind parameters; pgjdbc switches to server-prepared
+ * statements after repeated executions, and a cached generic plan cannot derive an index range from
+ * an unknown pattern, so {@link #find(SearchCriteria, int)} forces custom plans for its transaction.
  *
- * <p><b>Planning.</b> {@link #find(SearchCriteria, int)} runs in a read-only transaction that first
- * issues {@code SET LOCAL plan_cache_mode = force_custom_plan}. The patterns arrive as JDBC
- * parameters; pgjdbc switches to server-prepared statements after repeated executions, and a cached
- * generic plan cannot derive an index range from an unknown pattern. Forcing custom plans makes every
- * execution plan with the actual prefix, for this transaction only.
- *
- * <p><b>Locking.</b> The search takes no lock of its own. Behind a table lock on {@code custmast},
- * such as a generator load's {@code ACCESS EXCLUSIVE}, it waits until the holder commits, through
- * {@link LockWaitingReads}, which re-checks after every {@code customer-master.db.lock-timeout} so
- * the socket bound only ends a search on a database that stops answering.
- *
- * <p><b>Division of work.</b> {@code service/CustomerSearchService} normalizes the filters
- * ({@code TextNormalizer.filter}: trimmed, uppercased), rejects an invalid state filter (DEM0007),
- * decodes the opaque cursor, chooses {@code limit} ({@code size + 1} for the look-ahead row) and
- * applies the 9,999-row cap with {@code Cursor.served()}. This class ignores {@code served} and
- * {@code size}, raises no user-facing error, and reaches only {@code custmast}, unqualified, so the
- * schema comes from the connection ({@code DB_SCHEMA}).
- *
- * <p>Example, the second 12-row page of names starting with {@code NIBH}:
- * <pre>{@code
- * var cursor = new SearchCriteria.Cursor("NIBH L'LOR COMPANY", "AUBURN", "ME", "AAAD", 12);
- * var criteria = new SearchCriteria("NIBH", "", "", false, 12, cursor);
- * List<CustomerSummary> rows = repository.find(criteria, 13); // 12 rows plus the look-ahead row
- * SqlQuery query = repository.buildQuery(criteria, 13);       // the same statement, for EXPLAIN
- * }</pre>
+ * <p><b>Division of work.</b> {@code service/CustomerSearchService} normalizes the filters, rejects
+ * an invalid state filter (DEM0007), decodes the cursor, chooses {@code limit} ({@code size + 1})
+ * and applies the 9,999-row cap; this class ignores {@code served} and {@code size}, raises no
+ * user-facing error and reaches only {@code custmast}, unqualified, so the schema comes from the
+ * connection ({@code DB_SCHEMA}).
  *
  * <p>The class holds no mutable state and is thread-safe.
  */
@@ -217,31 +145,23 @@ public class CustomerSearchRepository {
     private static final String KEYSET_PREDICATE = "(name, city, state, custid) > "
             + "(:kName, :kCity, CAST(:kState AS char(2)), CAST(:kId AS char(4)))";
 
-    /** Joins the predicates. */
     private static final String AND = " AND ";
 
-    /** Starts the predicate list. */
     private static final String WHERE = " WHERE ";
 
     /** The source order plus the unique tiebreaker, and the page bound. */
     private static final String ORDER_AND_LIMIT = " ORDER BY name, city, state, custid LIMIT :limit";
 
-    /** Parameter of the state predicate. */
     private static final String PARAM_STATE = "state";
 
-    /** Keyset parameter: stored name of the last row served. */
     private static final String PARAM_KEY_NAME = "kName";
 
-    /** Keyset parameter: stored city of the last row served. */
     private static final String PARAM_KEY_CITY = "kCity";
 
-    /** Keyset parameter: stored state of the last row served. */
     private static final String PARAM_KEY_STATE = "kState";
 
-    /** Keyset parameter: stored id of the last row served. */
     private static final String PARAM_KEY_ID = "kId";
 
-    /** Parameter of the {@code LIMIT}. */
     private static final String PARAM_LIMIT = "limit";
 
     /** The source's wildcard appended to the trimmed filter. */

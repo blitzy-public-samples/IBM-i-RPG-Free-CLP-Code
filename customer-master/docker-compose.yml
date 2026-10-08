@@ -1,39 +1,13 @@
-# Customer Master: the whole stack from this folder in one command, with no manual step:
+# Customer Master stack. README.md has the commands and URLs; .env.example documents every
+# ${VAR:-default}, and the defaults are demo-only. The Flyway V5 seed replaces LOADCUST's
+# seed job, and the generator service replaces LOADCUST2/LOADCUSTR.
 #
-#   docker compose up --build                 (add -d --wait to return once all three are healthy)
+# A generator load replaces every customer row, the seed included. Start it with `run`, not
+# `up`: `up` would start it with no options and load the default 300 rows.
 #
-#   UI   http://localhost:8080   (FRONTEND_PORT) nginx serving the React SPA; /api is proxied to app
-#   API  http://localhost:8081   (API_PORT)      Swagger UI at /swagger-ui.html; curl and host tools
-#
-# Default services, started in health order (db -> app -> frontend):
-#   db        PostgreSQL 18.6. The named volume pgdata keeps the data between runs.
-#   app       customer-api. On boot Flyway creates schema DB_SCHEMA and applies V1-V4 from
-#             db/migration, then the V5 seed (300 customers) from db/seed; a second `up` finds
-#             nothing to apply. This is the seed path of LOADCUST (SBMJOB RUNSQLSTM over
-#             custmast.sql); V1-V4 stand in for Custmast2.sql, States.sql and CRTDTAARA.
-#   frontend  nginx with the built SPA.
-#
-# Profiled services, started only on request; plain `up` and `up --wait` never start them:
-#   generator (tools)  docker compose --profile tools run --rm generator [--count=N]
-#                        [--start-id=XXXX] [--csz-file=/data/csz.csv] [--seed=L]
-#             The random path of LOADCUST2 -> LOADCUSTR. The SBMJOB batch job becomes a
-#             synchronous one-shot process whose exit code reports the outcome (0 loaded,
-#             1 failed). The ALCOBJ ... WAIT(5) guard and its "Cannot allocate CUSTMAST" message
-#             live in the generator itself (LOCK TABLE under a 5 s lock timeout). A load
-#             replaces every customer row, the seed included. Use `run`, not `up`: `up` would
-#             start it with no options and load the default 300 rows.
-#   k6        (perf)   docker compose --profile perf run --rm k6      after a 1,000,000-row load
-#   e2e       (e2e)    docker compose --profile e2e run --rm e2e      against the seed rows
-#
-# Configuration: every value is a ${VAR:-default} interpolation. .env.example documents each
-# variable; a .env next to this file overrides them. The defaults are demo-only, and the USPS
-# credentials (the USPS_ID / USPS_PWD data areas of USADRVAL) have none. DB_NAME, DB_USER and
-# DB_PASSWORD also set the db service's POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD, which
-# PostgreSQL reads only when it initialises its cluster on an empty pgdata volume; the cluster
-# keeps that database, role and password, so a change to these three takes effect only after
-# `docker compose down -v`, which resets all data. DB_HOST, DB_PORT, DB_SCHEMA and
-# DB_LOCK_TIMEOUT are read by app and the generator on every start: a new DB_SCHEMA makes
-# Flyway create and migrate that schema, the seed included, when app next starts.
+# DB_NAME, DB_USER and DB_PASSWORD initialise the PostgreSQL cluster only on an empty pgdata
+# volume, so a change to them takes effect only after `docker compose down -v`, which resets
+# all data.
 
 # Datasource settings, shared by app and generator so both connect as the same role: the
 # role Flyway runs as owns custmast_id_seq, and the generator's ALTER SEQUENCE needs it.
@@ -54,24 +28,18 @@ x-demo-users: &demo-users
   CM_MAINTENANCE_USER: ${CM_MAINTENANCE_USER:-sales}
   CM_MAINTENANCE_PASSWORD: ${CM_MAINTENANCE_PASSWORD:-sales-demo}
 
-# One backend image, two uses: the API (default entrypoint) and the generator.
 x-app-build: &app-build
   context: ./backend
   dockerfile: Dockerfile
 
-# app and generator name the same image, so `up --build` refreshes the code the generator
-# runs too and `run generator` never starts a stale copy. The name carries the Compose
-# project (customer-master-app:local by default), so separate projects on one Docker host
-# never overwrite each other's build.
+# app and generator share one image, so `up --build` also refreshes the generator's code.
+# The project prefix keeps separate Compose projects on one Docker host from overwriting it.
 x-app-image: &app-image ${COMPOSE_PROJECT_NAME:-customer-master}-app:local
 
-# Memory budgets: every service has a mem_limit set by MEM_LIMIT_<SERVICE>, so PostgreSQL,
-# the JVMs and the test runners each stay inside a bounded share of a shared host. Each
-# default is at least 1.75 times the peak measured on the 1,000,000-row load, the k6 run
-# and the e2e run; .env.example lists each peak, and a .env overrides any default. The
-# backend image starts its JVM with no heap flags, so app and generator size their heap at
-# a quarter of their limit. CPU stays unlimited for db, app, generator and k6, whose load
-# time and latencies are the recorded performance evidence.
+# Each mem_limit (MEM_LIMIT_<SERVICE>) is at least 1.75 times the service's measured peak,
+# listed in .env.example. The JVMs run with no heap flags, so app and generator take a
+# quarter of their limit as heap. CPU stays unlimited for db, app, generator and k6, whose
+# load time and latencies are the recorded performance evidence.
 services:
   db:
     image: postgres:18.6
@@ -88,7 +56,6 @@ services:
     # setting for Compose.
     shm_size: 128mb
     mem_limit: ${MEM_LIMIT_DB:-3g}
-    # No host port: the gates query it with `docker compose exec db psql ...`.
     healthcheck:
       # $$ defers expansion to the container shell. TCP to 127.0.0.1 skips the socket-only
       # server the image runs while it initialises, so "ready" means the real server.
@@ -118,8 +85,11 @@ services:
       # USPS_USER_ID is empty. Set them in .env only.
       USPS_USER_ID: ${USPS_USER_ID:-}
       USPS_PASSWORD: ${USPS_PASSWORD:-}
+    # Loopback by default, because the demo users are publicly known. To share the port, set
+    # API_BIND_ADDRESS in .env (0.0.0.0 or one interface's IP) after overriding the demo users
+    # and DB_PASSWORD.
     ports:
-      - "${API_PORT:-8081}:8080"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8081}:8080"
     mem_limit: ${MEM_LIMIT_APP:-1g}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
@@ -135,23 +105,20 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    # Health order: nginx starts once app is healthy, so the first API call finds it ready.
-    # nginx looks app up again as requests arrive (frontend/nginx.conf), so an app that
-    # Compose recreates on a new address is reached with no restart here. No `restart: true`:
-    # it would only restart nginx on every app recreate and cut off API requests in flight.
+    # nginx looks app up again as requests arrive (frontend/nginx.conf), so an app recreated
+    # on a new address is reached with no restart here. No `restart: true`: it would only
+    # restart nginx on every app recreate and cut off API requests in flight.
     depends_on:
       app:
         condition: service_healthy
+    # Loopback by default, as for app; FRONTEND_BIND_ADDRESS opts in to sharing the UI.
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
-    # One CPU is ample for a static bundle and one proxy route, and the image sizes nginx's
-    # worker count from this limit; without one it starts a worker per host CPU (over a
-    # hundred on a large host). 1 is valid on every host, where a larger limit is refused on
-    # hosts with fewer CPUs.
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-8080}:80"
+    # The image sizes nginx's workers from this limit, or starts one per host CPU without it.
+    # One CPU is ample for static files and one proxy route, and 1 is valid on every host.
     cpus: 1
     mem_limit: ${MEM_LIMIT_FRONTEND:-32m}
     healthcheck:
-      # Healthy means nginx answers (/healthz) and the built index.html is served (/).
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz && wget -q -O /dev/null http://127.0.0.1/"]
       interval: 5s
       timeout: 5s
@@ -161,9 +128,8 @@ services:
     profiles: ["tools"]
     build: *app-build
     image: *app-image
-    # `docker compose run` appends its arguments (--count=..., --start-id=..., --csz-file=...,
-    # --seed=...) after this entrypoint, so there is no `command`. The generator profile has
-    # no web server and never migrates: it waits for app, which has applied Flyway.
+    # `docker compose run` appends its flags (--count=..., --seed=...) to this entrypoint, so
+    # there is no `command`. The generator never migrates; it waits for app, which runs Flyway.
     entrypoint: ["java", "-jar", "/app/app.jar", "--spring.profiles.active=generator"]
     depends_on:
       app:
@@ -172,7 +138,8 @@ services:
     # generator's non-web context binds no users and needs only the stub address default.
     environment:
       <<: *db-env
-      # Each option keeps its default here so a blank .env line never reaches Spring as "".
+      # COUNT and CSZ_FILE keep their default so a blank .env line never reaches Spring as "".
+      # START_ID and SEED default to empty on purpose: the automatic start id, a random seed.
       # A command-line flag still wins over its variable (application-generator.yml).
       GENERATOR_COUNT: ${GENERATOR_COUNT:-300}
       GENERATOR_START_ID: ${GENERATOR_START_ID:-}
@@ -191,7 +158,6 @@ services:
     # Root, because the image's own user (uid 12345) cannot write the summary into the bind
     # mount ./perf/results, which belongs to the checkout's owner.
     user: "0:0"
-    # k6 calls customer-api directly inside the network, not through nginx.
     depends_on:
       app:
         condition: service_healthy
@@ -203,7 +169,6 @@ services:
     volumes:
       - ./perf:/perf
     mem_limit: ${MEM_LIMIT_K6:-128m}
-    # The image's entrypoint is k6. The summary file is git-ignored.
     command: ["run", "--summary-export=/perf/results/search-1m-summary.json", "/perf/k6/search-1m.js"]
 
   e2e:
@@ -221,21 +186,17 @@ services:
       - /e2e/node_modules
     environment:
       <<: *demo-users
-      # nginx listens on port 80 inside the network (e2e/playwright.config.ts).
       BASE_URL: ${BASE_URL:-http://frontend}
       # Acceptance run: Playwright's forbidOnly rejects a stray test.only instead of
       # silently running a subset of the specs.
       CI: "true"
-    # Playwright's documented Docker settings for a stable Chromium.
     ipc: host
     init: true
-    # One CPU for the browser runner, which runs one Playwright worker
-    # (e2e/playwright.config.ts), so a test run never competes with the stack for every host
-    # CPU. 1 is valid on every host, where a larger limit is refused on hosts with fewer CPUs.
+    # One CPU for the one Playwright worker (e2e/playwright.config.ts), so a test run never
+    # takes every host CPU from the stack; 1 is valid on every host.
     cpus: 1
     mem_limit: ${MEM_LIMIT_E2E:-1536m}
     command: ["sh", "-c", "npm ci && npx playwright test"]
 
 volumes:
-  # Reused by every `up`; removed by `docker compose down -v`.
   pgdata: {}

@@ -17,54 +17,25 @@ import org.springframework.stereotype.Service;
  * The one state lookup of the application: state-code validation over an immutable cache, and the
  * filtered, re-sortable state list behind the State picker.
  *
- * <p><b>What it replaces.</b>
- * <ul>
- *   <li><b>StateVal</b> [Service_Pgms/StateVal.sqlrpgle:16-81], prototype
- *       [Copy_Mbrs/SRV_STE_P.RPGLE:2-5]. StateVal loaded every row of STATES once per activation group
- *       into a {@code static} array, wrote "StateVal: Loading States" to the job log, then uppercased the
- *       passed code and answered with {@code %lookup}. Here the array becomes an unmodifiable map loaded
- *       on first use and kept for the life of the process, the job-log line becomes one INFO line
- *       ({@code states.cache loaded count=<n>}), and the lookup becomes {@link #exists(String)}.
- *       StateVal's optional returned name has no caller and is not carried.</li>
- *   <li><b>MTNCUSTR {@code Edit_SD_STATE}</b> [5250_Subfile/MTNCUSTR.SQLRPGLE:488-500], which read
- *       STATES by the entered {@code SD_STATE} on every validation and sent DEM0503 when no row came
- *       back. The
- *       State rule in {@code CustomerValidator} (DEM0503) and the standardized-State check in
- *       {@code AddressStandardizationService} call {@link #exists(String)} instead, so after the
- *       cache's first load no validation queries the database; the {@code custmast_state_fk} foreign
- *       key is the storage-level backstop.</li>
- *   <li><b>PMTSTATER {@code ProcessSearchCriteria}</b> [5250_Subfile/PMTSTATER.SQLRPGLE:395-400], which
- *       built {@code DESCLike = '%%'} for a blank "Name Contains" filter and
- *       {@code '%' + %trim(SC_NAME) + '%'} otherwise, and opened {@code DataCur}
- *       [5250_Subfile/PMTSTATER.SQLRPGLE:150-162]. That becomes {@link #list(String, String)}, which
- *       builds the same pattern and runs {@link StateRepository#search(String, String)}.</li>
- * </ul>
+ * <p><b>Source.</b> StateVal [Service_Pgms/StateVal.sqlrpgle:16-81] becomes {@link #exists(String)};
+ * its optional returned name has no caller and is not carried. MTNCUSTR's {@code Edit_SD_STATE}
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:488-500], which read STATES on every validation, uses the same
+ * cached lookup, so after the first load no validation queries the database; the
+ * {@code custmast_state_fk} foreign key is the storage-level backstop. PMTSTATER's "Name Contains"
+ * list [5250_Subfile/PMTSTATER.SQLRPGLE:150-162,395-400] becomes {@link #list(String, String)}.
  *
- * <p><b>Consumers.</b> {@code CustomerValidator} and {@code AddressStandardizationService} call
- * {@link #exists(String)}; {@code StateController} calls {@link #list(String, String)} for
- * {@code GET /api/states}; the generator's {@code CszSource} calls {@link #exists(String)} or
- * {@link #all()} to drop CSZ rows whose state is not in STATES.
+ * <p><b>Cache.</b> An unmodifiable map of the 58 rows migration V2 inserts, loaded on first use,
+ * not at construction, so a context that never validates a state never queries STATES. No code
+ * path writes {@code states}, so the cache is never refreshed or evicted, as StateVal's static array
+ * never was. The load logs one INFO line, {@code states.cache loaded count=<n>}, in place of
+ * StateVal's job-log line. The cache holds reference data only, never anything about a caller. An
+ * empty STATES table fails the load and leaves the cache unloaded, so a later call retries (see
+ * {@link #all()}).
  *
- * <p><b>Cache lifetime.</b> The cache holds the 58 rows migration V2 inserts. No code path writes
- * {@code states}, so the cache is never refreshed or evicted, as StateVal's static array never was. It
- * is one of the two pieces of process-wide state the application keeps outside the database (the other
- * is {@code MessageCatalog}); it holds reference data only, never anything about a caller. It is loaded
- * on first use, not at construction, so a context that never validates a state, such as the generator's
- * before it reads its CSZ file, or a test that builds this bean, never touches the database for it.
- *
- * <p><b>Thread safety.</b> The cache reference is {@code volatile} and assigned once, under a private
- * lock, by double-checked locking, so concurrent first calls load the table exactly once and every
- * thread then reads the same fully built, unmodifiable map without locking. {@link #list(String, String)}
- * keeps no state at all.
- *
- * <p>Example:
- * <pre>{@code
- * stateService.exists("ca");                  // true: uppercased first, as StateVal did
- * stateService.exists(" C");                  // false: leading blanks are kept as typed
- * stateService.list("car", "name");           // [NC North Carolina, SC South Carolina]
- * stateService.list("", null);                // all 58 states, sorted by name
- * stateService.list("", "zip");               // InvalidSearchCriteriaException APP0400 on "sort"
- * }</pre>
+ * <p><b>Thread safety.</b> The cache reference is {@code volatile} and assigned once by
+ * double-checked locking, so concurrent first calls load the table exactly once and every thread
+ * then reads the same unmodifiable map without locking. {@link #list(String, String)} keeps no
+ * state.
  */
 @Service
 public class StateService {

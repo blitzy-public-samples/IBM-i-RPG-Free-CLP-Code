@@ -1,42 +1,9 @@
 /**
  * Specs for the shared component "Function keys and keyboard scope"
- * (AAP 0.4.4): `useFunctionKeys` and `ariaKeyShortcuts` from
- * `./useFunctionKeys`, dispatched by `KeyScopeProvider`.
- *
- * Each `describe` is one clause of the keyboard scope contract and each `it`
- * names the rule it checks, so a failure points straight at the clause:
- *
- * - **Command keys.** F1–F24 (the 5250 AID set of
- *   Copy_Mbrs/AIDBYTES.RPGLE:3-35), Enter, PageUp and PageDown are dispatched
- *   and prevented; Escape runs the F12 binding.
- * - **Topmost only.** With the search page, the detail dialog and the State
- *   picker stacked, only the picker receives keys, and an unbound function key
- *   goes to the picker's `onUnbound` alone.
- * - **Everything else passes through.** Tab, Shift+Tab, the arrow keys, Home,
- *   End, Backspace, Delete, printable characters and modifier chords are never
- *   prevented and never dispatched.
- * - **Enter target rule.** Enter is a command in a text input or on the
- *   scope's own container; on a button, checkbox, select or textarea it keeps
- *   its native action.
- * - **Lifecycle.** One listener and one scope under StrictMode, nothing left
- *   after unmount, and a clear error outside the provider.
- *
- * The three test scopes enable the keys of the screens they stand for: the
- * search screen `CA03 CF04 CA05 CA06 CA09 CA12` plus paging and Enter
- * [5250_Subfile/PMTCUSTD.DSPF:34-39], the detail window `CF04 CA05 CA12` plus
- * Enter [5250_Subfile/MTNCUSTD.DSPF:33-35] and the state window
- * `CF03 CF05 CF07 CF12` plus paging and Enter [5250_Subfile/PMTSTATED.DSPF:68-71].
- *
- * Stacking order: the provider orders scopes by registration time, and React
- * runs child effects before parent effects, so scopes mounted in one commit
- * would not register in visual order. As in the application, where the detail
- * dialog and the picker open on user actions, every stacked scope here is
- * mounted in its own `rerender` step ({@link mountStack}).
- *
- * No handler sets React state, and every event goes through Testing Library's
- * act-wrapped `fireEvent` or `userEvent`, so no spec produces an act()
- * warning. No spec makes a request; the MSW server from `src/test/setup.ts`
- * stays idle.
+ * (AAP 0.4.4): `useFunctionKeys` and `ariaKeyShortcuts`, dispatched by
+ * `KeyScopeProvider`. No handler sets React state and every event goes through
+ * act-wrapped `fireEvent` or `userEvent`, so no spec warns about act(); no spec
+ * makes a request, so the MSW server from `src/test/setup.ts` stays idle.
  */
 import { StrictMode, useRef } from 'react';
 import type { JSX, KeyboardEvent as ReactKeyboardEvent } from 'react';
@@ -50,25 +17,13 @@ import { KeyScopeProvider } from './KeyScopeProvider';
 import { ariaKeyShortcuts, useFunctionKeys } from './useFunctionKeys';
 import type { CommandKey, KeyBindings } from './useFunctionKeys';
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/** Props of the {@link Scope} test screen. */
 interface ScopeProps {
-  /** Scope name; prefixes every accessible name and every logged call. */
   name: string;
-  /** The keys the screen enables, passed to `useFunctionKeys` as they are. */
   bindings: KeyBindings;
-  /** The screen's answer to a function key it does not enable. */
   onUnbound: (k: CommandKey) => void;
-  /** Forwarded to `useFunctionKeys`; omitted means the hook's default `true`. */
   active?: boolean;
-  /** Renders a focusable container `div` and passes it as `containerRef`. */
   withContainer?: boolean;
-  /** The button's own click handler, for the native-Enter rule. */
   onButtonClick?: () => void;
-  /** The text input's own React keydown handler, for the one-handler rule. */
   onInputKeyDown?: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
 }
 
@@ -76,6 +31,8 @@ interface ScopeProps {
  * A minimal screen that registers one key scope and renders one control of
  * each kind the Enter rule distinguishes: a text input, a button, a checkbox,
  * a select, a textarea and, with `withContainer`, the scope's own container.
+ * `onButtonClick` observes the native-Enter rule and `onInputKeyDown` the
+ * one-handler rule.
  */
 function Scope({
   name,
@@ -105,7 +62,6 @@ function Scope({
   );
 }
 
-/** Renders the given scopes, bottom first, inside one provider. */
 function Stack({
   scopes,
   onBeforeCommand,
@@ -122,15 +78,17 @@ function Stack({
   );
 }
 
-/** A rendered stack plus a way to show a different set of scopes. */
 interface MountedStack extends RenderResult {
   /** Re-renders the provider with exactly `scopes`, keeping keyed scopes in place. */
   show(scopes: readonly ScopeProps[]): void;
 }
 
 /**
- * Mounts `scopes` one at a time, bottom first, so each registers after the
- * one beneath it, as a dialog opened by a user action does.
+ * Mounts `scopes` bottom first, each in its own `rerender` step. The provider
+ * orders scopes by registration time, and React runs child effects before
+ * parent effects, so scopes mounted in one commit would not register in visual
+ * order. As in the application, where the detail dialog and the picker open on
+ * user actions, each scope therefore registers after the one beneath it.
  */
 function mountStack(scopes: readonly ScopeProps[], onBeforeCommand?: (key: CommandKey) => void): MountedStack {
   const result = render(<Stack scopes={scopes.slice(0, 1)} onBeforeCommand={onBeforeCommand} />);
@@ -143,7 +101,6 @@ function mountStack(scopes: readonly ScopeProps[], onBeforeCommand?: (key: Comma
   return { ...result, show };
 }
 
-/** One test scope: its props and the mocks behind them. */
 interface ScopeFixture {
   readonly props: ScopeProps;
   readonly handlers: Readonly<Partial<Record<CommandKey, Mock<() => void>>>>;
@@ -151,9 +108,9 @@ interface ScopeFixture {
 }
 
 /**
- * Builds a scope binding `keys`, each to its own `vi.fn()`. Every binding
- * logs `'<name>:<key>'` and `onUnbound` logs `'<name>:unbound:<key>'` into the
- * shared `calls` log, so the order of calls across scopes is assertable.
+ * Every binding logs `'<name>:<key>'` and `onUnbound` logs
+ * `'<name>:unbound:<key>'` into the shared `calls` log, so the order of calls
+ * across scopes is assertable.
  */
 function scopeFixture(
   name: string,
@@ -173,7 +130,6 @@ function scopeFixture(
   return { props: { name, bindings: { ...handlers }, onUnbound, ...extra }, handlers, onUnbound };
 }
 
-/** The mock bound to `key` in `fixture`; fails the test when it binds none. */
 function mockFor(fixture: ScopeFixture, key: CommandKey): Mock<() => void> {
   const mock = fixture.handlers[key];
   if (mock === undefined) {
@@ -182,14 +138,12 @@ function mockFor(fixture: ScopeFixture, key: CommandKey): Mock<() => void> {
   return mock;
 }
 
-/** Every mock of `fixture`, bindings and `onUnbound` alike. */
 function allMocks(fixture: ScopeFixture): Mock[] {
   return [...Object.values(fixture.handlers), fixture.onUnbound].filter(
     (mock): mock is Mock => mock !== undefined,
   );
 }
 
-/** Asserts that no binding and no `onUnbound` of `fixture` has been called. */
 function expectUntouched(fixture: ScopeFixture): void {
   for (const mock of allMocks(fixture)) {
     expect(mock).not.toHaveBeenCalled();
@@ -205,7 +159,6 @@ function isPrevented(target: Element | Document, init: KeyboardEventInit): boole
   return !fireEvent.keyDown(target, init);
 }
 
-/** The text input of the scope named `name`. */
 function inputOf(name: string): HTMLElement {
   return screen.getByLabelText(`${name} input`);
 }
@@ -219,7 +172,6 @@ const DETAIL_KEYS: readonly CommandKey[] = ['F4', 'F5', 'F12', 'Enter'];
 /** The State picker's keys [5250_Subfile/PMTSTATED.DSPF:68-71], paging and Enter. */
 const PICKER_KEYS: readonly CommandKey[] = ['F3', 'F5', 'F7', 'F12', 'Enter', 'PageUp', 'PageDown'];
 
-/** Every command key the single-scope mapping spec binds and presses. */
 const MAPPED_KEYS: readonly CommandKey[] = [
   'F3',
   'F4',
@@ -233,13 +185,12 @@ const MAPPED_KEYS: readonly CommandKey[] = [
   'Enter',
 ];
 
-/** Every function key, F1–F24: a scope binding them all shows any dispatch a chord would cause. */
+/** F1–F24, the function-key AIDs of [Copy_Mbrs/AIDBYTES.RPGLE:3-35]; binding them all exposes any chord dispatch. */
 const ALL_FUNCTION_KEYS: readonly CommandKey[] = [
   'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
   'F13', 'F14', 'F15', 'F16', 'F17', 'F18', 'F19', 'F20', 'F21', 'F22', 'F23', 'F24',
 ];
 
-/** F1–F12, each pressed with Shift by the modifier-chord spec. */
 const SHIFT_CHORD_KEYS: readonly CommandKey[] = ALL_FUNCTION_KEYS.slice(0, 12);
 
 /**
@@ -267,10 +218,6 @@ let calls: string[];
 beforeEach(() => {
   calls = [];
 });
-
-// ---------------------------------------------------------------------------
-// Command keys on a single scope
-// ---------------------------------------------------------------------------
 
 describe('keyboard scope contract (AAP 0.4.4): command keys are dispatched and prevented', () => {
   it.each(MAPPED_KEYS)('a bound %s calls exactly its own binding once and is prevented', (key) => {
@@ -436,13 +383,7 @@ describe('keyboard scope contract (AAP 0.4.4): command keys are dispatched and p
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// Topmost scope only
-// ---------------------------------------------------------------------------
-
 describe('keyboard scope contract (AAP 0.4.4): only the topmost scope receives keys', () => {
-  /** Search page, detail dialog and State picker, mounted in that order. */
   function stackOfThree(): {
     search: ScopeFixture;
     detail: ScopeFixture;
@@ -605,11 +546,6 @@ describe('keyboard scope contract (AAP 0.4.4): only the topmost scope receives k
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// Everything else passes through
-// ---------------------------------------------------------------------------
-
 describe('keyboard scope contract (AAP 0.4.4): navigation, text and chords pass through', () => {
   /** Mounts the first `depth` of search, detail and picker; returns them all. */
   function stackOfDepth(depth: number): { fixtures: ScopeFixture[]; topName: string } {
@@ -707,10 +643,6 @@ describe('keyboard scope contract (AAP 0.4.4): navigation, text and chords pass 
     expectUntouched(fixture);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Enter target rule
-// ---------------------------------------------------------------------------
 
 describe('keyboard scope contract (AAP 0.4.4): Enter is a command only in a text input or the scope container', () => {
   it('Enter on a button keeps its native click and does not run the Enter binding', async () => {
@@ -842,11 +774,6 @@ describe('keyboard scope contract (AAP 0.4.4): Enter is a command only in a text
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
-
 describe('keyboard scope contract (AAP 0.4.4): one listener and scopes tied to mounting', () => {
   it('under StrictMode one F12 keydown runs its handler exactly once (one listener, one scope)', () => {
     const fixture = scopeFixture('screen', MAPPED_KEYS, calls);
@@ -913,10 +840,6 @@ describe('keyboard scope contract (AAP 0.4.4): one listener and scopes tied to m
   });
 });
 
-// ---------------------------------------------------------------------------
-// aria-keyshortcuts values
-// ---------------------------------------------------------------------------
-
 describe('ariaKeyShortcuts: the aria-keyshortcuts value of each command key', () => {
   it.each<[CommandKey, string]>([
     ['F3', 'F3'],
@@ -930,4 +853,3 @@ describe('ariaKeyShortcuts: the aria-keyshortcuts value of each command key', ()
     expect(ariaKeyShortcuts(key)).toBe(expected);
   });
 });
-

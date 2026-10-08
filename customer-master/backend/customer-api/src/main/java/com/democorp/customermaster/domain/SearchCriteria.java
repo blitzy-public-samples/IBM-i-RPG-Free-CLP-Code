@@ -12,53 +12,11 @@ import java.util.Objects;
  * kept fetching on PageDown. The target server keeps no cursor between requests,
  * so the position travels with the request as a {@link Cursor}.
  *
- * <table>
- *   <caption>Source rule and target meaning of each component</caption>
- *   <tr><th>Component</th><th>Source</th><th>Meaning here</th></tr>
- *   <tr><td>{@code name}</td><td>{@code wkName = %trim(SC_NAME) + '%'}, SC_NAME 13A
- *       [5250_Subfile/PMTCUSTD.DSPF:95]</td>
- *       <td>Trimmed, uppercased name prefix; {@code ""} means no filter</td></tr>
- *   <tr><td>{@code city}</td><td>{@code wkCity = %trim(SC_CITY) + '%'}, SC_CITY 13A
- *       [5250_Subfile/PMTCUSTD.DSPF:97]</td>
- *       <td>Trimmed, uppercased city prefix; {@code ""} means no filter</td></tr>
- *   <tr><td>{@code state}</td><td>Blank selects {@code ' '..'ZZ'}; otherwise
- *       {@code SC_STATE..SC_STATE}, SC_STATE 2A [5250_Subfile/PMTCUSTD.DSPF:98]</td>
- *       <td>Exact 2-character state; {@code ""} means all states</td></tr>
- *   <tr><td>{@code includeInactive}</td><td>F9 indicator {@code scIncActInc}:
- *       off selects {@code ACTIVE 'Y'..'Y'}, on selects {@code ' '..'Z'}</td>
- *       <td>{@code false} restricts the list to active customers</td></tr>
- *   <tr><td>{@code size}</td><td>SFLPAG 12 plus the look-ahead row
- *       [5250_Subfile/PMTCUSTR.SQLRPGLE:134,221]</td>
- *       <td>Rows this page may return (at least 1)</td></tr>
- *   <tr><td>{@code cursor}</td><td>The still-open {@code ItemCur}</td>
- *       <td>Keyset position after the last row served; {@code null} on the first page</td></tr>
- * </table>
- *
- * <p><b>Division of work.</b> This type carries values and enforces programming
- * invariants only. Each responsibility below stays with the class named:
- * <ul>
- *   <li>{@code service/CustomerSearchService} normalizes the filters with
- *       {@code TextNormalizer.filter}, rejects a state filter that is neither
- *       blank nor 2 characters (DEM0007), rejects over-long filters, an out-of-range
- *       page size and a malformed cursor (APP0400), encodes and decodes the opaque
- *       cursor, and applies the 9,999-row cap. It checks every user-supplied value
- *       before constructing this record, so the guards here never produce a
- *       user-facing error.</li>
- *   <li>{@code repository/CustomerSearchRepository} builds the LIKE patterns, with the
- *       {@code %} appended inside the 13-character limit, backslashes doubled and
- *       {@code rpad} padding parity, plus the state, active and keyset predicates.</li>
- * </ul>
- * No SQL, message text or serialization lives here.
- *
- * <p>Example, the second page of a search for names starting with {@code NIBH},
- * whose first page ended on seed customer {@code AAAD}:
- * <pre>{@code
- * var cursor = new SearchCriteria.Cursor("NIBH L'LOR COMPANY", "AUBURN", "ME", "AAAD", 12);
- * var criteria = new SearchCriteria("NIBH", "", "", false, 12, cursor);
- * criteria.hasName();   // true
- * criteria.hasCity();   // false
- * criteria.firstPage(); // false
- * }</pre>
+ * <p>The filters are normalized values, trimmed and uppercased by
+ * {@code TextNormalizer.filter}, and {@code ""} means no filter; the {@link Cursor} keys
+ * are raw stored values. This type carries values and enforces programming invariants
+ * only: {@code service/CustomerSearchService} validates every user-supplied value before
+ * constructing it, so the guards here never produce a user-facing error.
  *
  * @param name            normalized name prefix filter; {@code null} is stored as {@code ""}
  * @param city            normalized city prefix filter; {@code null} is stored as {@code ""}

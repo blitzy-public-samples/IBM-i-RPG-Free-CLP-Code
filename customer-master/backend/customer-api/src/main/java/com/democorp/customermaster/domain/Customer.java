@@ -26,39 +26,12 @@ import org.springframework.data.relational.core.mapping.Table;
  * {@code corp_phone}, {@code acct_mgr}, {@code acct_phone}, {@code chg_time} and
  * {@code chg_user}, while V3 keeps the source names in lowercase with no underscores. The
  * generated INSERT, SELECT and UPDATE therefore use exactly the names the handwritten SQL
- * of {@code CustomerSearchRepository}, {@code CustomerIdAllocator} and
- * {@code CustomerCopyWriter} uses. Fields are declared in V3 column order:
- *
- * <table>
- *   <caption>Property, V3 column and source column</caption>
- *   <tr><th>Property</th><th>V3 column</th><th>Custmast2.sql</th></tr>
- *   <tr><td>{@code custId}</td><td>{@code custid char(4)}, primary key</td>
- *       <td>{@code CustID CHAR(4)}</td></tr>
- *   <tr><td>{@code name}</td><td>{@code name varchar(40)}</td><td>{@code Name CHAR(40)}</td></tr>
- *   <tr><td>{@code address}</td><td>{@code addr}, {@code city}, {@code state},
- *       {@code zip}, through {@link Address}'s own columns</td>
- *       <td>{@code Addr}, {@code City}, {@code State}, {@code Zip}</td></tr>
- *   <tr><td>{@code corpPhone}</td><td>{@code corpphone varchar(20)}</td>
- *       <td>{@code CorpPhone CHAR(20)}</td></tr>
- *   <tr><td>{@code acctMgr}</td><td>{@code acctmgr varchar(40)}</td>
- *       <td>{@code AcctMgr CHAR(40)}</td></tr>
- *   <tr><td>{@code acctPhone}</td><td>{@code acctphone varchar(20)}</td>
- *       <td>{@code AcctPhone CHAR(20)}</td></tr>
- *   <tr><td>{@code active}</td><td>{@code active char(1)}, {@code Y} or {@code N}</td>
- *       <td>{@code Active CHAR(1)}</td></tr>
- *   <tr><td>{@code chgTime}</td><td>{@code chgtime timestamptz(6)}</td>
- *       <td>{@code ChgTime TIMESTAMP}</td></tr>
- *   <tr><td>{@code chgUser}</td><td>{@code chguser varchar(18)}</td>
- *       <td>{@code ChgUser varchar(18)}</td></tr>
- *   <tr><td>{@code rowVersion}</td><td>{@code row_version bigint}</td>
- *       <td>none; replaces the {@code CHGTIME = :Orig_CHGTIME} check</td></tr>
- * </table>
- *
- * <p>The {@link CustomerId} key is stored as {@code char(4)} through the reading and writing
- * converters of {@code repository/JdbcConfig}; this type holds no conversion code.
- * {@link Address} is embedded with an empty prefix and {@link Embedded.OnEmpty#USE_EMPTY},
- * the mapping {@code @Embedded.Empty} stands for, so its columns keep their own names and a
- * row always reads back with a non-null address.
+ * of {@code CustomerSearchRepository} and the {@code COPY} column list of
+ * {@code CustomerCopyWriter} use. The {@link CustomerId} key is stored as {@code char(4)}
+ * through the reading and writing converters of {@code repository/JdbcConfig}; this type
+ * holds no conversion code. {@link Address} is embedded with an empty prefix and
+ * {@link Embedded.OnEmpty#USE_EMPTY}, so its columns keep their own names and a row always
+ * reads back with a non-null address.
  *
  * <p><b>Newness and the row version.</b> {@code rowVersion} is the {@link Version} property
  * and is deliberately the wrapper {@link Long}, so Spring Data JDBC decides newness from it
@@ -66,14 +39,13 @@ import org.springframework.data.relational.core.mapping.Table;
  * <ul>
  *   <li>{@code rowVersion == null}: the aggregate is new. {@code save} issues an
  *       {@code INSERT} that includes the assigned {@code custid} and stores
- *       {@code row_version} 0, then returns a copy carrying version 0
- *       (through {@link #withRowVersion(Long)}).</li>
- *   <li>{@code rowVersion != null}: {@code save} issues
- *       {@code UPDATE custmast SET ..., row_version = :v + 1 WHERE custid = ? AND row_version = :v}
- *       and returns a copy carrying {@code v + 1}. When no row matches, Spring Data raises
- *       {@code OptimisticLockingFailureException}; {@code CustomerMaintenanceService}
- *       re-reads the row and answers 404 DEM0599 (absent) or 409 DEM1002 (changed), as
- *       {@code UpdateRecd} answers DEM1002 when its timestamp condition finds no row.</li>
+ *       {@code row_version} 0.</li>
+ *   <li>{@code rowVersion != null}: {@code save} issues the versioned
+ *       {@code UPDATE ... WHERE custid = ? AND row_version = ?}. When no row matches, Spring
+ *       Data raises {@code OptimisticLockingFailureException}, which
+ *       {@code CustomerMaintenanceService} turns into 404 DEM0599 (absent) or 409 DEM1002
+ *       (changed), as {@code UpdateRecd} answers DEM1002 when its timestamp condition finds
+ *       no row.</li>
  * </ul>
  * A primitive {@code long} would start new aggregates at 1 and treat version 0 as new, so it
  * must not be used. Nothing here implements {@code Persistable} or declares an
@@ -81,42 +53,18 @@ import org.springframework.data.relational.core.mapping.Table;
  *
  * <p><b>Values are taken as given.</b> This type normalizes and validates nothing, and
  * accepts {@code null} in every property, so a draft can describe an incomplete request
- * until the field rules report it. The responsibilities sit elsewhere:
- * <ul>
- *   <li>uppercasing and trailing-blank removal: {@link TextNormalizer#field(String)}, applied
- *       by {@code CustomerMaintenanceService};</li>
- *   <li>the nine field rules, including the {@code Y}/{@code N} check through
- *       {@link ActiveStatus}: {@code service/CustomerValidator};</li>
- *   <li>id allocation: {@code repository/CustomerIdAllocator};</li>
- *   <li>the change stamp ({@code chgtime} from the injected {@code Clock}, {@code chguser}
- *       from the authenticated principal, or {@code *SYSTEM*} in the generator):
- *       {@code CustomerMaintenanceService} and the generator, through
- *       {@link #withStamp(OffsetDateTime, String)}.</li>
- * </ul>
- * The one exception is the address: a {@code null} address is replaced by an
- * {@link Address} whose four components are {@code null}, which is what
- * {@link Embedded.OnEmpty#USE_EMPTY} reads for four {@code null} columns. {@link #address()} is
- * therefore never {@code null}, and an absent address reaches the field rules as blank
- * fields (DEM0502, DEM0503) instead of failing as a {@code NullPointerException}.
+ * until the field rules report it. Normalization and the change stamp are applied by
+ * {@code CustomerMaintenanceService}, or by the generator, which builds its rows normalized
+ * and stamped {@code *SYSTEM*}; the field rules by {@code service/CustomerValidator},
+ * and id allocation by {@code repository/CustomerIdAllocator}. The one exception is the
+ * address: a {@code null} address is replaced by an {@link Address} whose four components
+ * are {@code null}, which is what {@link Embedded.OnEmpty#USE_EMPTY} reads for four
+ * {@code null} columns. {@link #address()} is therefore never {@code null}, and an absent
+ * address reaches the field rules as blank fields (DEM0502, DEM0503) instead of failing as
+ * a {@code NullPointerException}.
  *
  * <p><b>Lifecycle.</b> The id never changes after the insert, and no delete exists:
  * customers are deactivated with {@code active = 'N'}.
- * <pre>{@code
- * // Add: draft from the request, then id and stamp, then save (version null -> INSERT).
- * Customer draft = Customer.draft("ACME INC", new Address("1 MAIN ST", "AUBURN", "ME", "04210"),
- *         "(207) 555-0100", "JANE DOE", "(207) 555-0101", "Y");
- * Customer added = repository.save(draft
- *         .withCustId(allocator.next())                 // EEEF on a fresh database
- *         .withStamp(OffsetDateTime.now(clock), "sales"));
- * added.rowVersion();                                    // 0
- *
- * // Edit: the same draft shape with the path id and the client's version (-> UPDATE).
- * Customer edited = repository.save(draft
- *         .withCustId(CustomerId.parse("EEEF"))
- *         .withRowVersion(0L)
- *         .withStamp(OffsetDateTime.now(clock), "sales"));
- * edited.rowVersion();                                   // 1
- * }</pre>
  *
  * <p><b>Logging.</b> {@link #toString()} names only the id and the row version, never
  * customer data, because Spring Data JDBC quotes it in the exception of a failed write. The
@@ -459,7 +407,7 @@ public final class Customer {
     }
 
     /**
-     * Compares all ten properties, the address by value.
+     * Compares every property, the address by value.
      *
      * @param other the object to compare with
      * @return {@code true} if {@code other} is a {@code Customer} with equal properties
@@ -485,7 +433,7 @@ public final class Customer {
     }
 
     /**
-     * Hashes all ten properties, consistent with {@link #equals(Object)}.
+     * Hashes every property, consistent with {@link #equals(Object)}.
      *
      * @return the hash code
      */

@@ -2,27 +2,14 @@
 <!--
   Customer Master backend: Maven parent POM and reactor aggregator.
 
-  This build replaces the IBM i binding directories that grouped the service
-  programs of the original application:
-    - UTIL_BND (SRV_MSG, SRV_STR), created by Service_Pgms/CRTBNDDIR.CLLE
-    - SRV_BASE36 (SRV_BASE36),     created by BASE36/CRTBNDDIR.CLLE
-    - ADRVAL_BND (USADRVAL),       created by USPS_Address/CRTBNDDIR.CLLE
-  Bind-time resolution becomes this Maven reactor (address-validation is a jar
-  that customer-api depends on) plus Spring dependency injection inside the
-  application. No library or object names of the source system are carried.
+  The IBM i binding directories UTIL_BND (SRV_MSG, SRV_STR;
+  Service_Pgms/CRTBNDDIR.CLLE), SRV_BASE36 (BASE36/CRTBNDDIR.CLLE) and
+  ADRVAL_BND (USADRVAL; USPS_Address/CRTBNDDIR.CLLE) become this reactor plus
+  Spring dependency injection.
 
-  Versions: everything except springdoc is managed by spring-boot-dependencies
-  3.5.16 through the parent below (Flyway, the PostgreSQL driver,
-  Testcontainers, JUnit, Surefire, Failsafe and the compiler plugin). Do not
-  pin any of them here; in particular Testcontainers must stay at the
-  Boot-managed 1.21.4 or later, the first 1.x line that negotiates the minimum
-  API version of Docker Engine 29.
-
-  Test split:
-    - Surefire (defaults: *Test, *Tests) runs unit tests in every build.
-    - Failsafe runs *IT classes. The default build excludes the JUnit tag
-      "benchmark"; the "benchmark" profile runs only that tag, so
-      `./mvnw -B verify -Pbenchmark` executes SearchBenchmarkIT and no other IT.
+  Every version except springdoc comes from spring-boot-dependencies 3.5.16 and
+  is not pinned in this reactor; Testcontainers must stay at the Boot-managed
+  1.21.4 or later, the first 1.x that negotiates Docker Engine 29's minimum API.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -73,7 +60,6 @@
     <failsafe.groups>!benchmark</failsafe.groups>
   </properties>
 
-  <!-- Declared in build order: customer-api depends on address-validation. -->
   <modules>
     <module>address-validation</module>
     <module>customer-api</module>
@@ -131,9 +117,8 @@
 
   <profiles>
     <!--
-      ./mvnw -B verify -Pbenchmark runs only the ITs tagged "benchmark"
-      (SearchBenchmarkIT, the 1,000,000-row search benchmark). Modules without
-      such a test, such as address-validation, run zero ITs and still pass.
+      Runs only the ITs tagged "benchmark" (see failsafe.groups above). A module
+      without one, such as address-validation, runs zero ITs and still passes.
     -->
     <profile>
       <id>benchmark</id>

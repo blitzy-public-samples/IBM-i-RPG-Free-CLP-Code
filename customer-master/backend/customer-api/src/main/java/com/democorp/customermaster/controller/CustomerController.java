@@ -41,75 +41,38 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code /api/customers}: the customer list, one customer, the review before a save, the add and the
  * update.
  *
- * <p><b>What it replaces.</b> Two called programs and their parameter lists:
+ * <p><b>Source parameters.</b> PMTCUSTR ({@code pParmType}, {@code pCustID};
+ * {@code 5250_Subfile/PMTCUSTR.SQLRPGLE}, lines 76-79) becomes the stateless page query
+ * {@code GET /api/customers}, whose position travels as the opaque {@code cursor}. MTNCUSTR's
+ * function code {@code pMaintain}, passed with {@code pID} ({@code 5250_Subfile/MTNCUSTR.SQLRPGLE},
+ * lines 45-48), becomes the HTTP method: {@code GET} displays, {@code POST /review} runs the Enter
+ * pass that ends in the DEM0000 or DEM0009 confirmation, {@code PUT} commits an edit and {@code POST}
+ * commits an add. Of PMTCUSTR's mode letters, only {@code I} and {@code M} become roles,
+ * {@code INQUIRY} for the two reads and {@code MAINTENANCE} for review, add and update;
+ * {@link com.democorp.customermaster.security.SecurityConfig SecurityConfig} enforces them, so this
+ * class performs no role check. {@code S} (Selection) is not a role but a browser context that
+ * reads through the same {@code GET}.
+ *
+ * <p><b>Layering.</b> The controller binds the request, delegates and maps the result to DTOs; the
+ * business rules are the services', and every failure propagates to {@link ApiExceptionHandler}.
+ *
+ * <p><b>Request binding.</b>
  * <ul>
- *   <li>PMTCUSTR took {@code pParmType} ({@code I} inquiry, {@code M} maintenance, {@code S}
- *       selection) and the return slot {@code pCustID} ({@code 5250_Subfile/PMTCUSTR.SQLRPGLE},
- *       lines 76-79), and kept its filters, its open cursor and the subfile as conversation state.
- *       {@code GET /api/customers} is the stateless page query its subfile loads became: the filters
- *       come with every request, and the position travels as the opaque {@code cursor}.</li>
- *   <li>MTNCUSTR took {@code pID} and the function code {@code pMaintain} ({@code D} display,
- *       {@code E} edit, {@code A} add; {@code 5250_Subfile/MTNCUSTR.SQLRPGLE}, lines 45-48, and the
- *       same in the USPS variant). The function code becomes the HTTP method: {@code GET} displays,
- *       {@code POST /review} runs the Enter pass that ends in the DEM0000 or DEM0009 confirmation,
- *       {@code PUT} commits an edit and {@code POST} commits an add.</li>
- * </ul>
- * The mode letters are not parameters any more: they are roles, enforced by
- * {@code security/SecurityConfig} before a request reaches this class ({@code INQUIRY} for the two
- * reads, {@code MAINTENANCE} for review, add and update), and Selection is a browser context that
- * reads through the same {@code GET}. This class therefore performs no role check.
- *
- * <table>
- *   <caption>Operations</caption>
- *   <tr><th>Request</th><th>Service call</th><th>Success</th></tr>
- *   <tr><td>{@code GET /api/customers?name=&city=&state=&includeInactive=&size=&cursor=}</td>
- *       <td>{@link CustomerSearchService#search}</td><td>200 {@link SearchResponse}</td></tr>
- *   <tr><td>{@code GET /api/customers/{custId}}</td>
- *       <td>{@link CustomerMaintenanceService#get}</td><td>200 {@link CustomerResponse}</td></tr>
- *   <tr><td>{@code POST /api/customers/review}</td>
- *       <td>{@link CustomerMaintenanceService#review}</td><td>200 {@link ReviewResponse}</td></tr>
- *   <tr><td>{@code POST /api/customers}</td>
- *       <td>{@link CustomerMaintenanceService#add}</td>
- *       <td>201 {@link CustomerResponse}, {@code Location: /api/customers/{custId}}</td></tr>
- *   <tr><td>{@code PUT /api/customers/{custId}}</td>
- *       <td>{@link CustomerMaintenanceService#update}</td><td>200 {@link CustomerResponse}</td></tr>
- * </table>
- *
- * <p><b>Layering.</b> The controller binds the request, delegates and maps the result to DTOs.
- * Normalization, the nine field rules, the {@code active} default on add, the change stamp, id
- * allocation, optimistic concurrency, the search filters, the cursor and the 9,999-row cap are the
- * services' rules; no repository is imported.
- *
- * <p><b>Errors.</b> Every failure propagates as an exception to {@link ApiExceptionHandler}, which
- * writes the {@code application/problem+json} body; nothing here builds an error response.
- * <ul>
- *   <li>The one request-shape check declared here, a {@code custId} path segment that is not 4
- *       characters of {@code [A-Z0-9]}, is checked by Spring's built-in method validation, which
- *       raises {@code HandlerMethodValidationException}: 400 APP0400. A lower-case id is rejected, not
- *       uppercased: ids are issued in upper case, and an API client must send them as issued.</li>
- *   <li>A {@code name} or {@code city} longer than 13 characters ({@code SC_NAME 13A},
- *       {@code SC_CITY 13A}, {@code 5250_Subfile/PMTCUSTD.DSPF}, lines 95-97) is rejected by
- *       {@link CustomerSearchService}, which counts code points: 400 APP0400 on the field. The two
- *       parameters only publish that width as the OpenAPI {@code maxLength}; a Bean Validation
- *       {@code @Size} here would count UTF-16 units and reject a 13-character entry that holds
- *       supplementary characters. Likewise {@code size} only publishes its range and default
- *       (minimum 1, maximum 100, default 12): the service applies the configured default and
- *       answers 400 APP0400 on {@code size} outside that range.</li>
- *   <li>Body limits ({@code @CodePointLength} per column, counting characters as the column does,
- *       {@code @NotNull version} on update, {@code @NotNull purpose} on review) are checked
- *       through {@link Valid}: 400 APP0400. On {@code PUT}, whose
- *       path variable is constrained too, those body errors arrive inside the same
- *       {@code HandlerMethodValidationException}.</li>
+ *   <li>The {@code custId} path {@code @Pattern} is checked by Spring's built-in method validation,
+ *       which raises {@code HandlerMethodValidationException}: 400 APP0400. A lower-case id is
+ *       rejected, not uppercased, because ids are issued in upper case.</li>
+ *   <li>The constraints the body DTOs declare are checked through {@link Valid}: 400 APP0400. On
+ *       {@code PUT}, whose path variable is constrained too, those body errors arrive inside the
+ *       same {@code HandlerMethodValidationException}.</li>
  *   <li>A {@code custId}, {@code chgTime}, {@code chgUser}, {@code rowVersion} or any other member
  *       the DTO does not declare is rejected by Jackson
  *       ({@code spring.jackson.deserialization.fail-on-unknown-properties}): 400 APP0400.</li>
- *   <li>{@code state} carries no constraint here, deliberately: any value other than blank or 2
- *       characters must reach {@link CustomerSearchService}, which answers 400 DEM0007 on field
- *       {@code state} as PMTCUSTR does [5250_Subfile/PMTCUSTR.SQLRPGLE:635-646]. A size limit here
- *       would turn that into APP0400.</li>
- *   <li>Business failures, DEM0501 to DEM0503, DEM9898, DEM0599, DEM1001, DEM1002, APP0502 and
- *       APP0503, are thrown by the services. DEM0002 and DEM0006 are not errors: they arrive as the
- *       search page's {@code notice}, and DEM0000 and DEM0009 as the review's.</li>
+ *   <li>{@code name}, {@code city}, {@code size} and {@code state} deliberately carry no constraint,
+ *       as their parameter comments say. {@link CustomerSearchService} counts the 13-character widths
+ *       of {@code name} and {@code city} ({@code 5250_Subfile/PMTCUSTD.DSPF}, lines 95-97) in code
+ *       points and answers 400 APP0400, as it does for a {@code size} outside 1 to 100, and a
+ *       {@code state} other than blank or 2 characters must reach it for 400 DEM0007 on field
+ *       {@code state}, as PMTCUSTR does [5250_Subfile/PMTCUSTR.SQLRPGLE:635-646].</li>
  * </ul>
  *
  * <p><b>No {@code @Validated}.</b> Spring Framework 6.2 validates constrained handler parameters
@@ -117,19 +80,8 @@ import org.springframework.web.bind.annotation.RestController;
  * to APP0400. {@code @Validated} would switch to AOP method validation, whose
  * {@code ConstraintViolationException} would bypass that mapping and surface as 500 DEM9999.
  *
- * <p><b>Web contexts only.</b> The controller exists only in a servlet application context; the
- * test-data generator runs the same jar with no web server and creates no controller.
- *
- * <p><b>OpenAPI.</b> The annotations feed the committed springdoc snapshot
- * ({@code customer-master/openapi/customer-master-api.yaml}, compared by {@code OpenApiSnapshotIT})
- * and the frontend types generated from it, so operation ids, summaries, parameter descriptions and
- * response declarations are fixed text. Each operation declares the statuses of its own outcomes;
- * the statuses every operation shares, the catch-all 500 DEM9999 and the framework's 405, 406 and,
- * with a request body, 415 APP0400, are added by {@link ProblemResponsesCustomizer} and are not
- * declared per operation. Every error response references the {@code Problem} schema, described by
- * {@code ProblemSchema}, which types {@code errors}, {@code current} and {@code stateAccepted}.
- *
- * <p>The controller holds only its two thread-safe services and is itself thread-safe.
+ * <p>The statuses every operation shares, 500 DEM9999, 405, 406 and, with a request body, 415, come
+ * from {@link ProblemResponsesCustomizer} and are not declared per operation.
  */
 @RestController
 @RequestMapping(CustomerController.BASE_PATH)

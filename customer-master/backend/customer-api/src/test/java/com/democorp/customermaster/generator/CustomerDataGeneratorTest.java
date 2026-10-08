@@ -40,15 +40,16 @@ import org.junit.jupiter.params.provider.CsvSource;
  * [5250_Subfile/LOADCUSTR.SQLRPGLE:131-207], with {@code genWord} and {@code genPhone} below it
  * [5250_Subfile/LOADCUSTR.SQLRPGLE:213-256]. Every random value comes from {@code Rand_Int}, which scales
  * Db2 {@code RANDOM()} (0 &le; r &le; 1) as {@code %int(rf * (p_High - p_Low) + p_Low)}, so its range is
- * inclusive and {@code p_High} is drawn only when r = 1 [Service_Pgms/SRV_RANDOM.SQLRPGLE:8-33]. Its bounds
- * are {@code int(10) value}, so a fractional argument truncates on entry [Copy_Mbrs/SRV_RAND_P.RPGLE:3-6].
- * Row ids follow BASE36ADD from {@code 1001} [5250_Subfile/LOADCUSTR.SQLRPGLE:133-137],
- * [BASE36/SRV_BASE36.RPGLE:29-55].
+ * inclusive and, in exact arithmetic, {@code p_High} is drawn only when r = 1
+ * [Service_Pgms/SRV_RANDOM.SQLRPGLE:8-33]. Its bounds are {@code int(10) value}, so a fractional argument
+ * truncates on entry [Copy_Mbrs/SRV_RAND_P.RPGLE:3-6]. Row ids follow BASE36ADD from {@code 1001}
+ * [5250_Subfile/LOADCUSTR.SQLRPGLE:133-137], [BASE36/SRV_BASE36.RPGLE:29-55].
  *
  * <p><b>How the tests reach every endpoint.</b> {@link NameGenerator} takes its unit source as a
- * {@link DoubleSupplier}, so constant suppliers {@code () -> 0.0}, {@code () -> 1.0} and
- * {@code () -> Math.nextDown(1.0)} put every {@code Rand_Int} call at {@code low}, {@code high} or
- * {@code high - 1}. The exact rows asserted at r = 0 and r = 1 were traced by hand through
+ * {@link DoubleSupplier}, so constant suppliers {@code () -> 0.0} and {@code () -> 1.0} put every
+ * {@code Rand_Int} call at {@code low} and {@code high}, and {@code () -> Math.nextDown(1.0)} puts each of
+ * the generator's own ranges at {@code high - 1} (see the floating-point caveat). The exact rows asserted
+ * at r = 0 and r = 1 were traced by hand through
  * LOADCUSTR lines 144-198 and SRV_RANDOM line 31; they are the specification, not a snapshot of the
  * implementation. Statistical rules (every 7th row inactive, every 4th row without a street number,
  * every 3rd account manager with initials) run over a seeded load of {@value #SEEDED_ROWS} rows,
@@ -69,7 +70,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 @DisplayName("CustomerDataGenerator and NameGenerator: LOADCUSTR row rules and Rand_Int arithmetic")
 final class CustomerDataGeneratorTest {
 
-    /** The change time given to every generator under test. */
     private static final OffsetDateTime LOAD_TIME = OffsetDateTime.of(2026, 10, 5, 12, 0, 0, 0, ZoneOffset.UTC);
 
     /** First CSZ row, drawn at r = 0; its ZIP 501 exercises the zero padding. */
@@ -78,10 +78,12 @@ final class CustomerDataGeneratorTest {
     /** Middle CSZ row, drawn for r &lt; 1 together with {@link #FIRST}. */
     private static final CszRow MIDDLE = new CszRow(10001, "STANDARD", "MIDTOWN", "NY");
 
-    /** Last CSZ row, drawn only at r = 1. */
+    /**
+     * Last CSZ row. In exact arithmetic it is drawn only at r = 1; in double, {@code Math.nextDown(1.0)}
+     * also rounds the three-row draw up to it (see the class caveat).
+     */
     private static final CszRow LAST = new CszRow(75001, "STANDARD", "LASTBURG", "TX");
 
-    /** Three distinguishable CSZ rows in file order. */
     private static final List<CszRow> THREE_ROWS = List.of(FIRST, MIDDLE, LAST);
 
     /** LOADCUSTR's first id, {@code varCUSTID = '1001'} [5250_Subfile/LOADCUSTR.SQLRPGLE:133]. */
@@ -90,16 +92,13 @@ final class CustomerDataGeneratorTest {
     /** Ordinal of {@code 1001}: digits 1, 0, 0, 1 are 27, 26, 26, 27 in BASE36ADD's alphabet. */
     private static final int START_ORDINAL = 27 * 36 * 36 * 36 + 26 * 36 * 36 + 26 * 36 + 27;
 
-    /** Fixed seed of the statistical tests. */
     private static final long SEED = 20_261_005L;
 
     /** Rows of a seeded load: 25 x lcm(3, 4, 7). */
     private static final int SEEDED_ROWS = 2_100;
 
-    /** Calls per seeded {@code genWord}/{@code genPhone} distribution test. */
     private static final int SEEDED_CALLS = 2_000;
 
-    /** The largest unit value below 1. */
     private static final double JUST_BELOW_ONE = Math.nextDown(1.0);
 
     /**
@@ -136,7 +135,6 @@ final class CustomerDataGeneratorTest {
     /** Account manager on the other rows: {@code genWord(3:6) genWord(5:9)}. */
     private static final Pattern ACCT_MGR_WORDS = Pattern.compile("^[A-Z]{4,6} [A-Z]{6,10}$");
 
-    /** Every generated word: uppercase letters of the two alphabets. */
     private static final Pattern WORD = Pattern.compile("^[A-Z]+$");
 
     /** Twelve Z letters: one {@code genWord(5, 11)} at r = 1. */
@@ -160,22 +158,10 @@ final class CustomerDataGeneratorTest {
             "STREET", "ST", "ROAD", "RD", "AVENUE", "AVE", "PLACE", "CIRCLE",
             "SQUARE", "HWY", "VISTA", "CALLE", "RANCH", "CRESCENT", "COURT", "WAY");
 
-    /**
-     * A name generator whose every draw is {@code r}.
-     *
-     * @param r the constant unit value
-     * @return the generator
-     */
     private static NameGenerator constant(double r) {
         return new NameGenerator(() -> r);
     }
 
-    /**
-     * A data generator over a constant unit value and the three-row CSZ list.
-     *
-     * @param r the constant unit value
-     * @return the generator
-     */
     private static CustomerDataGenerator constantRows(double r) {
         return new CustomerDataGenerator(constant(r), THREE_ROWS, LOAD_TIME);
     }
@@ -191,12 +177,6 @@ final class CustomerDataGeneratorTest {
                 .generate(START, SEEDED_ROWS));
     }
 
-    /**
-     * Collects every remaining element of an iterator.
-     *
-     * @param rows the iterator
-     * @return the elements in order
-     */
     private static List<Customer> drain(Iterator<Customer> rows) {
         List<Customer> out = new ArrayList<>();
         rows.forEachRemaining(out::add);
@@ -587,9 +567,11 @@ final class CustomerDataGeneratorTest {
         }
 
         /**
-         * For r &lt; 1 the top {@code Rand_Int} value is not drawn, so the longest length of (5, 11) (12) and
-         * of (5, 9) (10) appears only at r = 1, which the endpoint test covers; (4, 10) and (3, 6) reach their
-         * longest length one value below the top, at t = 9 and t = 5.
+         * In exact arithmetic the top {@code Rand_Int} value needs r = 1, so the longest length of (5, 11)
+         * (12) and of (5, 9) (10) appears only there, which the endpoint test covers. In double, (5, 11) also
+         * reaches 12 at {@code Math.nextDown(1.0)}, and (5, 9) reaches 10 at the two largest unit values
+         * below 1; these seeded calls draw none of those values, so the seeded sets exclude 12 and 10.
+         * (4, 10) and (3, 6) reach their longest length one value below the top, at t = 9 and t = 5.
          */
         @ParameterizedTest(name = "seeded genWord({0}, {1}) lengths are {2}")
         @CsvSource(textBlock = """
@@ -1015,12 +997,6 @@ final class CustomerDataGeneratorTest {
 
             private final List<Double> draws = new ArrayList<>();
 
-            /**
-             * Appends one draw.
-             *
-             * @param r the unit value
-             * @return this script
-             */
             RowScript draw(double r) {
                 draws.add(r);
                 return this;
@@ -1058,13 +1034,6 @@ final class CustomerDataGeneratorTest {
                 return new CustomerDataGenerator(names, THREE_ROWS, LOAD_TIME).row(rowNumber, START);
             }
 
-            /**
-             * Appends the same draw several times.
-             *
-             * @param r     the unit value
-             * @param count how many draws
-             * @return this script
-             */
             private RowScript repeat(double r, int count) {
                 for (int i = 0; i < count; i++) {
                     draws.add(r);
@@ -1205,7 +1174,9 @@ final class CustomerDataGeneratorTest {
 
         @Test
         void theLastCszRowIsNeverDrawnBelowROne() {
-            // Rand_Int(1 : %elem(csz_a)) yields rows 1..N-1 for r < 1 and row N only at r = 1.
+            // In exact arithmetic Rand_Int(1 : %elem(csz_a)) yields rows 1..N-1 for r < 1 and row N only at
+            // r = 1. With N = 3, double rounding also yields row 3 at Math.nextDown(1.0), which this seed's
+            // draws do not include.
             Set<String> cities = seededRows(THREE_ROWS).stream()
                     .map(row -> row.address().city())
                     .collect(Collectors.toSet());

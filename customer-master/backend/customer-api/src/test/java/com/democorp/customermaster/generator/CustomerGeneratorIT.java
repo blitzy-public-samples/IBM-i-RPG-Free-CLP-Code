@@ -43,23 +43,14 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  * allocator's sequence restart and the CSZ reader, together with the interactive add that must continue
  * after a load.
  *
- * <p><b>Source behaviour covered.</b>
- * <ul>
- *   <li>LOADCUSTR truncates CUSTMAST and numbers rows from {@code '1001'} through BASE36ADD
- *       [5250_Subfile/LOADCUSTR.SQLRPGLE:95-137]. The target loads the same ids, and the shared id
- *       sequence then continues after the last generated id, so an interactive add cannot collide with
- *       a loaded row.</li>
- *   <li>LOADCUST and LOADCUST2 refuse to run when {@code ALCOBJ ((CUSTMAST *FILE *EXCLRD)) WAIT(5)}
- *       fails, sending {@code 'Cannot allocate CUSTMAST'} [5250_Subfile/LOADCUST.CLLE:6-14],
- *       [5250_Subfile/LOADCUST2.CLLE:10-18]. The target waits 5 seconds for its
- *       {@code ACCESS EXCLUSIVE} lock, prints the same line and exits with status 1.</li>
- *   <li>CRTDTAARA's {@code EEEE} and AddRecd's increment-before-use make {@code EEEF} the first
- *       interactive id [5250_Subfile/CRTDTAARA.clle:1-9]; every test starts there
- *       ({@link DatabaseCleaner#FIRST_INTERACTIVE_ID}).</li>
- *   <li>BASE36ADD rolls {@code 9999} over to {@code AAAA} and leaves the limit to its caller
- *       [BASE36/SRV_BASE36.RPGLE:9-13]. The target checks capacity before any write, and a load that
- *       ends at {@code 9999} leaves the sequence exhausted, so the next add answers 503 APP0503.</li>
- * </ul>
+ * <p><b>Source.</b> LOADCUSTR truncates CUSTMAST and numbers rows from {@code '1001'} through BASE36ADD
+ * [5250_Subfile/LOADCUSTR.SQLRPGLE:95-137]. LOADCUST and LOADCUST2 send
+ * {@code 'Cannot allocate CUSTMAST'} when {@code ALCOBJ OBJ((CUSTMAST *FILE *EXCLRD)) WAIT(5)} fails
+ * [5250_Subfile/LOADCUST.CLLE:6-14], [5250_Subfile/LOADCUST2.CLLE:10-18]. CRTDTAARA's {@code EEEE} and
+ * AddRecd's increment-before-use make {@code EEEF} the first interactive id
+ * [5250_Subfile/CRTDTAARA.clle:1-9], where every test starts
+ * ({@link DatabaseCleaner#FIRST_INTERACTIVE_ID}). BASE36ADD rolls {@code 9999} over to {@code AAAA}
+ * and leaves the limit to its caller [BASE36/SRV_BASE36.RPGLE:9-13].
  *
  * <p><b>Load protocol.</b> One transaction holds the truncate, the {@code COPY} and the sequence
  * restart; a failure at any {@link LoadCheckpoints} boundary rolls all three back, including the
@@ -99,7 +90,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
     /** Ordinal of {@code 1001}, LOADCUSTR's first id. */
     private static final int LOADCUSTR_START_ORDINAL = 1_294_371;
 
-    /** First id of the {@link #preload()} rows. */
     private static final String PRELOAD_START = "B000";
 
     /** Number of {@link #preload()} rows: {@code B000}..{@code B004}. */
@@ -108,7 +98,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
     /** The id the next add receives after {@link #preload()}. */
     private static final String PRELOAD_NEXT_ID = "B005";
 
-    /** Seed of the {@link #preload()} run. */
     private static final long PRELOAD_SEED = 11L;
 
     /** The exception a stubbed checkpoint throws; its message reaches the outcome line. */
@@ -156,7 +145,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
     /** The sequence position, read from the sequence relation; {@code nextval} would move it. */
     private static final String SEQUENCE_SQL = "SELECT last_value, is_called FROM custmast_id_seq";
 
-    /** A valid {@code CustomerFields} body; {@code CA} exists in STATES, and no field is blank. */
     private static final String ADD_BODY = "{"
             + "\"name\":\"GENERATOR IT CUSTOMER\","
             + "\"addr\":\"1 LOAD STREET\","
@@ -176,7 +164,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
     @MockitoBean
     LoadCheckpoints loadCheckpoints;
 
-    /** The CSZ reader the runner uses; its STATES filter is the application's {@code StateService}. */
     @Autowired
     CszSource cszSource;
 
@@ -184,13 +171,8 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
     @Autowired
     CustomerLoader customerLoader;
 
-    /** The application clock, source of the load time. */
     @Autowired
     Clock clock;
-
-    // ---------------------------------------------------------------------------------------------
-    // Basic load
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("1,000 rows from 1001 as LOADCUSTR, stamped *SYSTEM*, analyzed; the next add continues after them")
@@ -249,10 +231,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
                 .isSubsetOf(TEST_CSZ_PLACES);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Failure before commit
-    // ---------------------------------------------------------------------------------------------
-
     @ParameterizedTest(name = "{0}")
     @EnumSource(FailingCheckpoint.class)
     @DisplayName("A failure at a checkpoint rolls back rows and sequence; the next add gets the pre-load id")
@@ -274,10 +252,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertAdded(addCustomer(), PRELOAD_NEXT_ID);
         assertThat(rowCount()).isEqualTo(PRELOAD_COUNT + 1);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Last-id loads: the exhausted branch
-    // ---------------------------------------------------------------------------------------------
 
     @ParameterizedTest(name = "--start-id={0} --count={1}")
     @CsvSource({"9999, 1", "9990, 10"})
@@ -329,10 +303,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertThat(rowCount()).isEqualTo(PRELOAD_COUNT + 1);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Capacity
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("Two rows from 9999 fail the capacity check before any write")
     void aLoadBeyond9999FailsTheCapacityCheckBeforeAnyWrite(CapturedOutput output) {
@@ -366,10 +336,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertThat(CustomerGeneratorRunner.fitsCapacity(CustomerId.parse("1001"), 385_246)).isFalse();
         assertThat(CustomerGeneratorRunner.fitsCapacity(CustomerId.parse("AAAA"), CustomerId.CAPACITY)).isTrue();
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Allocation guard
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("An add's ROW EXCLUSIVE guard blocks a load for 5 seconds, then 'Cannot allocate CUSTMAST'")
@@ -409,10 +375,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertThat(nextOrdinal()).isEqualTo(DatabaseCleaner.SEQUENCE_START);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // CSZ source
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("The test CSZ file: primary_city header accepted, 12 rows kept in file order")
     void readsTheTestCszFileWithItsPrimaryCityHeader() {
@@ -436,10 +398,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertThat(rows).extracting(CszSource.CszRow::city)
                 .doesNotContain("TESTINGTON CROSSROADS", "TEST NOWHERE");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Runs the generator once, as the {@code generator} profile would with the given bound options and
@@ -501,21 +459,10 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         return new Snapshot(rowCount(), checksum, nextOrdinal());
     }
 
-    /**
-     * Counts the customer rows.
-     *
-     * @return {@code count(*)} of {@code custmast}
-     */
     long rowCount() {
         return queryLong("SELECT count(*) FROM custmast");
     }
 
-    /**
-     * Runs a single-value query.
-     *
-     * @param sql a query returning one row with one integer column
-     * @return the value
-     */
     long queryLong(String sql) {
         return Objects.requireNonNull(jdbcTemplate.queryForObject(sql, Long.class));
     }
@@ -545,13 +492,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
         assertThat(response.getHeaders().getFirst(HttpHeaders.LOCATION)).endsWith("/api/customers/" + expectedId);
     }
 
-    /**
-     * Returns the standard output written after a mark.
-     *
-     * @param output the captured output
-     * @param mark   the length of {@code output.getOut()} taken before the run
-     * @return everything printed since the mark
-     */
     static String outputSince(CapturedOutput output, int mark) {
         return output.getOut().substring(mark);
     }
@@ -574,11 +514,6 @@ class CustomerGeneratorIT extends AbstractPostgresIT {
      */
     record SequencePosition(long lastValue, boolean isCalled) {
 
-        /**
-         * The ordinal the next {@code nextval} returns, or would return if it were not exhausted.
-         *
-         * @return {@code isCalled ? lastValue + 1 : lastValue}
-         */
         long next() {
             return isCalled ? lastValue + 1 : lastValue;
         }

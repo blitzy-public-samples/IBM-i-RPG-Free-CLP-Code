@@ -1,45 +1,8 @@
 /**
- * Tests of the shared client error presenter: `./useProblemPresenter.ts`
- * (`useProblemPresenter().present(error, options)`).
- *
- * What it replaces. On the 5250 a failed field edit sent its CUSTMSGF message
- * to the message subfile and set the field's reverse-image (`RI_`) and
- * position-cursor (`PC_`) indicators in the same step (`Edit_SD_ACTIVE`,
- * `Edit_SD_NAME`, ... in 5250_Subfile/MTNCUSTR.SQLRPGLE:444-464, attributes in
- * 5250_Subfile/MTNCUSTD.DSPF:61-123), and UpdateRecd's DEM1002 branch showed
- * its message and re-read the row for review (5250_Subfile/MTNCUSTR.SQLRPGLE:
- * 593-599). An unexpected SQL condition ended the program through SQLProblem
- * with the SQLSTATE and SQL text (Service_Pgms/SRV_SQL.SQLRPGLE:20-57). Here
- * `present` publishes one alert toast (the message), calls `setFieldErrors`
- * (the reverse image) and then `focusField` (the cursor), or hands a stale
- * update's stored record to `onConflict`; anything that is not an API problem
- * shows only the catalog's DEM9999 text.
- *
- * What is pinned down here (AAP 0.8.3, `errors/useProblemPresenter.test.tsx`):
- * - **422 with field callbacks.** The `errors` become field errors in server
- *   order, the first field is focused after the highlight, and exactly one
- *   alert toast carries `detail`.
- * - **422 without them.** The alert toast only; `focusField` alone does
- *   nothing.
- * - **409 DEM1002.** With `onConflict` and `current`: `onConflict(current)`
- *   and no toast. Without `onConflict`, or without `current`: the alert.
- * - **Alerts by status.** 401 APP0401, 403 APP0403, 404 DEM0599, 409 DEM1001
- *   and 500 DEM9999 each give exactly one alert with `detail`, and nothing
- *   internal (the 500's `errorId`) is shown.
- * - **Synthetic DEM9999.** A problem with an empty `detail`, a network
- *   failure, and a value that is not an `ApiError` all show the catalog text of
- *   DEM9999 as served by `GET /api/messages`, never the error's own message.
- * - **Stable `present`** once the catalog has loaded.
- *
- * Harness. The real providers are rendered in the order of `src/App.tsx`
- * (`QueryClientProvider` > `MessageCatalogProvider` > `ToastProvider`), so the
- * path under test is the real one: `present` -> `useToasts().publish` -> the
- * `role="alert"` live region of `ToastRegion`. The only request is the
- * catalog fetch, answered by the default MSW handler of `../test/handlers`
- * (started by `../test/setup.ts` with `onUnhandledFrame: 'error'`). Every
- * test waits for the catalog before it presents anything, and `console.error`
- * is watched so that a React `act` warning or an MSW unhandled-request error
- * fails the test that caused it.
+ * Tests of `useProblemPresenter().present(error, options)` along the real path
+ * `present` -> `useToasts().publish` -> the `role="alert"` region of
+ * `ToastRegion`. The only request is the catalog fetch, answered by the default
+ * MSW handler of `../test/handlers`.
  */
 import { useEffect } from 'react';
 import type { ReactElement } from 'react';
@@ -54,10 +17,7 @@ import { MessageCatalogProvider, useMessages } from '../messages/MessageCatalogP
 import { useProblemPresenter } from './useProblemPresenter';
 import type { PresentOptions, ProblemPresenter } from './useProblemPresenter';
 
-// ---------------------------------------------------------------------------
-// Catalog texts (AAP 0.7.3, corrections included), as `detail` carries them
-// ---------------------------------------------------------------------------
-
+// Catalog texts (AAP 0.7.3, corrections included), as `detail` carries them.
 const NAME_BLANK = 'Name: Must not be blank';
 const ADDRESS_NOT_FOUND = 'USPS: Address Not Found.';
 const RECORD_CHANGED = 'Someone else changed record. Review data.';
@@ -80,14 +40,8 @@ const REASON_PHRASES: Readonly<Record<number, string>> = {
   500: 'Internal Server Error',
 };
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/** The function under test. */
 type Present = ProblemPresenter['present'];
 
-/** Receives each `present` the probe is handed, as its effect runs. */
 type PresenterSink = (present: Present) => void;
 
 /**
@@ -104,11 +58,9 @@ function Probe({ onPresenter }: { onPresenter: PresenterSink }): ReactElement {
   return <span data-testid="catalog-ready">{String(ready)}</span>;
 }
 
-/** What {@link setup} returns. */
 interface Harness {
   /** Runs the latest `present` the probe was handed, inside `act`. */
   present(error: unknown, options?: PresentOptions): void;
-  /** Every `present` handed to the default sink, in order. */
   readonly presenters: readonly Present[];
   /** Re-renders the same tree over the same client, with `onPresenter` (the default sink unless given). */
   rerender(onPresenter?: PresenterSink): void;
@@ -157,11 +109,7 @@ async function setup(): Promise<Harness> {
   };
 }
 
-/**
- * An `ApiError` as `api/client.ts` builds it from a problem+json response:
- * the members the server always sends (`type`, `title`, `status`, `detail`,
- * `code`, `args`), the request path, and any case-specific member in `extra`.
- */
+/** An `ApiError` as `api/client.ts` builds it from a problem+json response; case-specific members go in `extra`. */
 function apiError(status: number, code: string, detail: string, extra: Partial<Problem> = {}): ApiError {
   return new ApiError(status, {
     type: `urn:customer-master:problem:${code}`,
@@ -175,10 +123,8 @@ function apiError(status: number, code: string, detail: string, extra: Partial<P
   });
 }
 
-/** The assertive live region: every problem `detail` lands here. */
 const alertRegion = (): HTMLElement => screen.getByRole('alert');
 
-/** The polite live region: information and confirmations only, never a problem. */
 const statusRegion = (): HTMLElement => screen.getByRole('status');
 
 /**
@@ -243,10 +189,6 @@ afterEach(() => {
   expect(consoleError).not.toHaveBeenCalled();
 });
 
-// ---------------------------------------------------------------------------
-// Field errors (the message plus the RI/PC indicators of the 5250 edit)
-// ---------------------------------------------------------------------------
-
 describe('useProblemPresenter: 422 field errors', () => {
   it('highlights the fields, focuses the first after the highlight, and shows one alert', async () => {
     const harness = await setup();
@@ -310,10 +252,7 @@ describe('useProblemPresenter: 422 field errors', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Stale update (UpdateRecd's DEM1002 branch: message plus re-read for review)
-// ---------------------------------------------------------------------------
-
+// A stale update: UpdateRecd's DEM1002 branch showed its message and re-read the row for review.
 describe('useProblemPresenter: 409 DEM1002', () => {
   it('hands current to onConflict and publishes no toast', async () => {
     const harness = await setup();
@@ -355,10 +294,6 @@ describe('useProblemPresenter: 409 DEM1002', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Problems without fields: one alert each
-// ---------------------------------------------------------------------------
-
 describe('useProblemPresenter: alerts by status', () => {
   it.each([
     { status: 401, code: 'APP0401', detail: SIGN_IN_REQUIRED, extra: {} },
@@ -387,10 +322,6 @@ describe('useProblemPresenter: alerts by status', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// Synthetic DEM9999 (the text comes from the catalog, never from the error)
-// ---------------------------------------------------------------------------
-
 describe('useProblemPresenter: synthetic DEM9999', () => {
   it.each([
     { label: 'a response without a problem body', error: () => new ApiError(500, syntheticProblem(500)), hidden: [] },
@@ -414,10 +345,7 @@ describe('useProblemPresenter: synthetic DEM9999', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// Referential stability (features list `present` in dependency arrays)
-// ---------------------------------------------------------------------------
-
+// Features list `present` in their dependency arrays, so it must stay referentially stable.
 describe('useProblemPresenter: stable present', () => {
   it('hands out the same present on re-render once the catalog has loaded', async () => {
     const harness = await setup();
@@ -425,11 +353,10 @@ describe('useProblemPresenter: stable present', () => {
     const handedOut = harness.presenters.length;
     expect(loaded).toBeDefined();
 
-    // Same sink: the effect re-runs only if `present` changed, which it must not.
+    // The same sink must not re-run the effect; a new sink forces it and must receive the same `present`.
     harness.rerender();
     expect(harness.presenters).toHaveLength(handedOut);
 
-    // A new sink forces the effect to run, so it reports the current `present`.
     const sink = vi.fn<PresenterSink>();
     harness.rerender(sink);
     expect(sink).toHaveBeenCalledOnce();
@@ -437,4 +364,3 @@ describe('useProblemPresenter: stable present', () => {
     expect(harness.presenters).toHaveLength(handedOut);
   });
 });
-

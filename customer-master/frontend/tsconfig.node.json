@@ -1,7 +1,4 @@
 {
-  // Tooling project for `tsc -b`, referenced by tsconfig.json. It type-checks
-  // only the files that run in Node during build and test (vite.config.ts);
-  // the browser app under src/ belongs to tsconfig.json.
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023"],
