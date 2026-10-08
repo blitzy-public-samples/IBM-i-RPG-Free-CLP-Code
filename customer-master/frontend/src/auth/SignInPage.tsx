@@ -21,14 +21,20 @@
  *   can never disagree about where the user lands.
  * - **Submit.** Enter in either field submits the form natively (no keyboard
  *   scope is registered, so `KeyScopeProvider` leaves Enter alone), as does
- *   the "Sign in" button. Earlier messages are cleared first, so a repeated
- *   failure shows exactly one alert.
+ *   the "Sign in" button. A submit while this form's attempt is in flight is
+ *   ignored. Earlier messages are cleared first, so a repeated failure shows
+ *   exactly one alert. The page navigates to `from` only when `signIn`
+ *   reports that this attempt stored its session.
  * - **Failure.** Every rejection (401 APP0401 "Sign in required." for bad
- *   credentials, a synthetic DEM9999 when the server is unreachable) goes to
- *   `useProblemPresenter().present(error)` unchanged, which publishes the
- *   problem's `detail` as the one alert in `ToastRegion`. This page holds no
- *   message text and inspects no status code. The password is cleared and
- *   receives focus, so the user can retype it straight away.
+ *   credentials, a synthetic DEM9999 when the server is unreachable) of an
+ *   attempt this page still owns goes to `useProblemPresenter().present(error)`
+ *   unchanged, which publishes the problem's `detail` as the one alert in
+ *   `ToastRegion`. This page holds no message text and inspects no status
+ *   code. The password is cleared and receives focus, so the user can retype
+ *   it straight away.
+ * - **Ownership.** Each submit is one attempt with its own `AbortController`.
+ *   Leaving the page aborts it, so an abandoned attempt never navigates,
+ *   presents or stores anything, and `AuthProvider` drops its answer.
  *
  * Constraints (identity and trust, error model):
  * - Credentials stay in memory: `AuthProvider` hands them to `api/client.ts`
@@ -163,10 +169,10 @@ export function SignInPage() {
   const [submitting, setSubmitting] = useState(false);
   const userRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
-  // Guards against a second submit while one is in flight. `submitting`
+  // The attempt this form owns, `null` while none is in flight. `submitting`
   // drives the rendering; this ref is read by the handler, where a state value
   // captured by the closure could still be stale for a quick second Enter.
-  const inFlightRef = useRef(false);
+  const attemptRef = useRef<AbortController | null>(null);
 
   const from = readFrom(location.state);
 
@@ -177,30 +183,49 @@ export function SignInPage() {
     userRef.current?.focus();
   }, []);
 
+  // Leaving the page abandons the attempt in flight. StrictMode's extra
+  // mount, unmount and remount aborts nothing: no attempt exists at mount.
+  useEffect(
+    () => () => {
+      attemptRef.current?.abort();
+    },
+    [],
+  );
+
   /**
    * Tries the typed credentials. Success navigates to {@link readFrom}'s
    * target, replacing `/sign-in` in the history so Back does not return here.
-   * Failure clears and focuses the password and presents the problem.
+   * Failure clears and focuses the password and presents the problem. An
+   * attempt superseded in `AuthProvider` or abandoned by leaving the page
+   * does neither.
    */
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (inFlightRef.current) {
+    if (attemptRef.current !== null) {
       return;
     }
-    inFlightRef.current = true;
+    const attempt = new AbortController();
+    attemptRef.current = attempt;
     clear();
     setSubmitting(true);
     try {
       // Passed exactly as typed: usernames are case-sensitive and never trimmed.
-      await signIn(username, password);
-      void navigate(from, { replace: true });
+      if (await signIn(username, password, attempt.signal)) {
+        void navigate(from, { replace: true });
+      }
     } catch (error) {
-      setPassword('');
-      passwordRef.current?.focus();
-      present(error);
+      if (!attempt.signal.aborted) {
+        setPassword('');
+        passwordRef.current?.focus();
+        present(error);
+      }
     } finally {
-      inFlightRef.current = false;
-      setSubmitting(false);
+      if (attemptRef.current === attempt) {
+        attemptRef.current = null;
+      }
+      if (!attempt.signal.aborted) {
+        setSubmitting(false);
+      }
     }
   }
 

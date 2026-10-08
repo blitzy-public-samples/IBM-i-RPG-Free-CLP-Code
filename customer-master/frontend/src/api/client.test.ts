@@ -16,8 +16,9 @@
  *   problem parsed from `application/problem+json`, or the synthetic DEM9999
  *   problem for any other body (an HTML page from a proxy) and, under status 0,
  *   for a request that never reached the server;
- * - a 401 calls the handler registered with `onUnauthorized` exactly once and
- *   still rejects with its `ApiError`;
+ * - a 401 calls the handler registered with `onUnauthorized` exactly once,
+ *   telling it whether the call carried per-call credentials (a sign-in
+ *   trial), and still rejects with its `ApiError`;
  * - nothing is rendered: no call changes the document.
  *
  * Every request is answered by MSW (`../test/server`, started by
@@ -102,7 +103,7 @@ async function rejectionOf(call: Promise<unknown>): Promise<ApiError> {
 const registrations: Array<() => void> = [];
 
 /** Registers `handler` for 401 responses and remembers its unregister function for `afterEach`. */
-function registerUnauthorized(handler: () => void): () => void {
+function registerUnauthorized(handler: Parameters<typeof onUnauthorized>[0]): () => void {
   const unregister = onUnauthorized(handler);
   registrations.push(unregister);
   return unregister;
@@ -515,6 +516,31 @@ describe('401 responses and onUnauthorized', () => {
     expect(error.status).toBe(401);
     expect(error.problem.code).toBe('APP0401');
     expect(onUnauth).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the handler whether the refused call carried per-call credentials, once per 401', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('get', '/api/session', () => problem(401, 'APP0401', { instance: '/api/session' }));
+
+    // Stored credentials the server no longer accepts.
+    setCredentials({ username: 'sales', password: 'changed-on-the-server' });
+    await rejectionOf(request('/api/session'));
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false });
+
+    // No credentials at all.
+    setCredentials(null);
+    await rejectionOf(request('/api/session'));
+    expect(onUnauth).toHaveBeenCalledTimes(2);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false });
+
+    // A sign-in trial: per-call credentials, refused while stored ones exist too.
+    setCredentials({ username: 'inquiry', password: 'inquiry-demo' });
+    const error = await rejectionOf(request('/api/session', { credentials: { username: 'sales', password: 'wrong' } }));
+    expect(error.status).toBe(401);
+    expect(onUnauth).toHaveBeenCalledTimes(3);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: true });
   });
 
   it('no longer calls a handler after its unregister function ran', async () => {

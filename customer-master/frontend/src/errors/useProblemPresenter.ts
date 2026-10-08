@@ -79,11 +79,16 @@ export type PresentOptions = {
 export type ProblemPresenter = {
   /**
    * Shows `error` to the user, routed by the rules of
-   * {@link useProblemPresenter}. Never throws, logs or re-throws.
+   * {@link useProblemPresenter}. The value presented never makes it throw:
+   * an `ApiError` or anything else ends as one alert toast or as the
+   * conflict hand-off, and is neither logged nor re-thrown.
    *
    * @param error the caught value: normally an `ApiError`; anything else is
    *   shown as DEM9999
    * @param options the owning feature's setters
+   * @throws whatever one of the caller's own callbacks (`onConflict`,
+   *   `setFieldErrors`, `focusField`) throws; it is not caught, so it reaches
+   *   the caller of `present` and a defect in the owning feature stays visible.
    */
   present: (error: unknown, options?: PresentOptions) => void;
 };
@@ -117,6 +122,9 @@ function hasText(value: unknown): value is string {
  * 4. **Fields.** When `setFieldErrors` is passed and the problem names fields,
  *    `setFieldErrors(errors)` in server order, then `focusField` with the first
  *    field. Without `setFieldErrors` the alert is all that is shown.
+ *
+ * The callbacks run inside that call and are not guarded: an exception one of
+ * them throws reaches the caller of `present`.
  *
  * A 401 or 403 that reaches `present` is an ordinary alert (APP0401, APP0403):
  * the transport has already handled sign-out. `stateAccepted` is not read

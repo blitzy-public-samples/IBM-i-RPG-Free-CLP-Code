@@ -28,16 +28,24 @@
  *   against `GET /api/session` and stores them in `api/client.ts` only once
  *   the call has succeeded. A failure rejects with the client's `ApiError`
  *   unchanged (401 APP0401 for a bad password), so `SignInPage` presents it.
+ *   Each attempt takes a generation, and so does each sign-out: only the
+ *   attempt still holding the current generation, with its signal not
+ *   aborted, stores its result or rejects. An attempt superseded by a newer
+ *   sign-in or by a sign-out, or abandoned by its page, resolves `false` and
+ *   stores nothing, whatever the server answered, so a late answer never
+ *   replaces a newer principal.
  * - **Sign-out.** {@link AuthContextValue.signOut} forgets the credentials,
  *   drops every cached server response except the public message catalog,
  *   and routes to `/sign-in`.
  * - **401 anywhere.** This provider is the only registrant of
- *   `onUnauthorized`. A 401 while signed in signs the user out exactly as
- *   sign-out does; a 401 while signed out belongs to a failed sign-in attempt
- *   and only makes sure no credentials are stored, without navigating, so
- *   `SignInPage` keeps its `from` location and shows the alert. A 403 is not
- *   handled here: it reaches the calling feature's `useProblemPresenter` as
- *   APP0403.
+ *   `onUnauthorized`. A refused sign-in trial (the client reports
+ *   `perCallCredentials`) refused nothing stored, so it changes neither the
+ *   session nor the stored credentials; `signIn` reports it to the attempt
+ *   that still owns it, or drops it. Any other 401 while signed in signs the
+ *   user out exactly as sign-out does; while signed out it only makes sure no
+ *   credentials are stored, without navigating, so `SignInPage` keeps its
+ *   `from` location. A 403 is not handled here: it reaches the calling
+ *   feature's `useProblemPresenter` as APP0403.
  *
  * Constraints:
  * - Credentials live in memory only, in `api/client.ts`'s module variable.
@@ -63,23 +71,27 @@
  * const { mode, username } = useAuth();
  * const title = mode === 'MAINTENANCE' ? 'Maintenance' : 'Inquiry';
  *
- * // The sign-in page tries the typed credentials; a 401 rejects unchanged.
+ * // The sign-in page tries the typed credentials under the signal of the
+ * // attempt it owns; a 401 rejects unchanged, and `false` means the attempt
+ * // was superseded or abandoned, so it neither navigates nor presents.
+ * const attempt = new AbortController();
  * try {
- *   await signIn(username, password);
- *   navigate(from, { replace: true });
+ *   if (await signIn(username, password, attempt.signal)) {
+ *     navigate(from, { replace: true });
+ *   }
  * } catch (error) {
  *   present(error); // "Sign in required." (APP0401)
  * }
  * ```
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Query } from '@tanstack/react-query';
 import { onUnauthorized, setCredentials } from '../api/client';
 import { sessionApi } from '../api/session';
-import type { Role as SessionRole } from '../api/session';
+import type { Role as SessionRole, SessionResponse } from '../api/session';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -123,11 +135,21 @@ export interface AuthContextValue {
   hasRole(r: Role): boolean;
   /**
    * Authenticates `username`/`password` with `GET /api/session` and, on
-   * success, stores the credentials and the reported session. Rejects with the
-   * client's `ApiError` unchanged (401 APP0401 for bad credentials, status 0
-   * when the server is unreachable); nothing is stored then.
+   * success, stores the credentials and the reported session.
+   *
+   * - Resolves `true` when this attempt stored its credentials and session.
+   * - Resolves `false`, storing nothing, when a newer `signIn`, a sign-out or
+   *   a 401 sign-out superseded the attempt, or `signal` was aborted (before
+   *   the call or while it was pending), whatever the server answered.
+   *   An already aborted `signal` sends no request.
+   * - Rejects with the client's `ApiError` unchanged (401 APP0401 for bad
+   *   credentials, status 0 when the server is unreachable) when the server
+   *   refused the attempt while it was still current; nothing is stored then.
+   *
+   * @param signal aborted by the caller that abandons the attempt, such as a
+   *   sign-in page that unmounts
    */
-  signIn(username: string, password: string): Promise<void>;
+  signIn(username: string, password: string, signal?: AbortSignal): Promise<boolean>;
   /** Forgets the credentials and cached server data, then routes to `/sign-in`. */
   signOut(): void;
 }
@@ -247,26 +269,53 @@ export function AuthProvider({ children, initialSession }: { children: ReactNode
   );
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  // Each signIn and each clearSession takes the next generation, and only the
+  // attempt still holding the current one may store its result. Read and
+  // written in callbacks only, never during render.
+  const generationRef = useRef(0);
 
   /**
    * Forgets the credentials and the session, then drops every cached server
    * response except the public catalog: in-flight queries are cancelled first
-   * so none can repopulate the cache with the previous user's data.
+   * so none can repopulate the cache with the previous user's data. Taking a
+   * generation first supersedes every pending sign-in attempt, so neither a
+   * sign-out nor a 401 sign-out can be undone by an older attempt's answer.
    */
   const clearSession = useCallback(() => {
+    generationRef.current += 1;
     setCredentials(null);
     setSession(null);
     void queryClient.cancelQueries({ predicate: isUserData });
     queryClient.removeQueries({ predicate: isUserData });
   }, [queryClient]);
 
-  const signIn = useCallback(async (username: string, password: string): Promise<void> => {
+  const signIn = useCallback(async (username: string, password: string, signal?: AbortSignal): Promise<boolean> => {
+    if (signal?.aborted) {
+      // Abandoned before it began: no request, and no generation taken, so a
+      // pending attempt that is still current stays current.
+      return false;
+    }
+    const generation = ++generationRef.current;
+    const isCurrent = () => generation === generationRef.current && signal?.aborted !== true;
     // The candidate credentials authenticate this one call only; they are
-    // stored after the server accepted them. A rejection (401 APP0401, a
-    // network failure) propagates unchanged and stores nothing.
-    const response = await sessionApi.get({ username, password });
+    // stored after the server accepted them, and only by the current attempt.
+    let response: SessionResponse;
+    try {
+      response = await sessionApi.get({ username, password });
+    } catch (error) {
+      // A rejection (401 APP0401, a network failure) reaches the attempt that
+      // still owns it unchanged; a superseded or abandoned one drops it.
+      if (isCurrent()) {
+        throw error;
+      }
+      return false;
+    }
+    if (!isCurrent()) {
+      return false;
+    }
     setCredentials({ username, password });
     setSession(toSession(response, username));
+    return true;
   }, []);
 
   const signOut = useCallback(() => {
@@ -280,15 +329,21 @@ export function AuthProvider({ children, initialSession }: { children: ReactNode
   const signedIn = session !== null;
   useEffect(
     () =>
-      onUnauthorized(() => {
+      onUnauthorized(({ perCallCredentials }) => {
+        if (perCallCredentials) {
+          // A refused sign-in trial refused nothing stored, so the session
+          // and the stored credentials stay; signIn reports the refusal to
+          // the attempt that still owns it, or drops it.
+          return;
+        }
         if (signedIn) {
           // The stored credentials stopped working (changed password, removed
           // user): sign out exactly as the user would.
           clearSession();
           void navigate(SIGN_IN_PATH, { replace: true });
         } else {
-          // A failed sign-in attempt: nothing is signed in, so stay on the
-          // sign-in page with its `from` location and let it show the alert.
+          // Nothing is signed in: only make sure no credentials are stored,
+          // and stay where the user is, so the sign-in page keeps its `from`.
           setCredentials(null);
         }
       }),

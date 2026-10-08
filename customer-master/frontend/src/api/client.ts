@@ -25,7 +25,9 @@
  *   that is not usable problem+json (an HTML page from a proxy, plain text,
  *   broken JSON) becomes the synthetic DEM9999 problem, and a request that
  *   never reached the server becomes `ApiError(0, DEM9999)`.
- * - On 401, calls the handler `AuthProvider` registered, then rejects.
+ * - On 401, calls the handler `AuthProvider` registered, telling it whether
+ *   the refused call carried its own per-call credentials (a sign-in trial)
+ *   or the stored ones ({@link UnauthorizedInfo}), then rejects.
  *
  * Constraints:
  * - Credentials live in memory only, in this module's variable, never in Web
@@ -85,6 +87,16 @@ export type RequestOptions = {
   credentials?: Credentials;
 };
 
+/**
+ * What the {@link onUnauthorized} handler learns about the refused call.
+ *
+ * - `perCallCredentials`: `true` when the call carried its own
+ *   `RequestOptions.credentials`, as a sign-in trial does, so the 401 refused
+ *   only those candidate credentials and nothing stored; `false` when it
+ *   carried the stored credentials or none at all.
+ */
+export type UnauthorizedInfo = { perCallCredentials: boolean };
+
 // ---------------------------------------------------------------------------
 // Module state: the in-memory credentials and the 401 hook
 // ---------------------------------------------------------------------------
@@ -93,7 +105,7 @@ export type RequestOptions = {
 let stored: Credentials | null = null;
 
 /** The handler `AuthProvider` registered for 401 responses, if any. */
-let unauthorizedHandler: (() => void) | null = null;
+let unauthorizedHandler: ((info: UnauthorizedInfo) => void) | null = null;
 
 /**
  * Stores the credentials every later call sends, or forgets them with `null`
@@ -109,13 +121,17 @@ export function setCredentials(c: Credentials | null): void {
  * rejects; `AuthProvider` clears the credentials and routes to `/sign-in`
  * there. The last registration wins.
  *
+ * The handler receives an {@link UnauthorizedInfo}: `perCallCredentials` is
+ * `true` for a refused sign-in trial, which refused nothing stored, so the
+ * handler can leave the signed-in session and the stored credentials alone.
+ *
  * The returned function unregisters `handler`, but only while it is still the
  * registered one, so a stale unregister (an unmounted provider, or React
  * StrictMode's second effect run) never removes a newer registration.
  *
  * @returns the unregister function, suitable as an effect cleanup
  */
-export function onUnauthorized(handler: () => void): () => void {
+export function onUnauthorized(handler: (info: UnauthorizedInfo) => void): () => void {
   unauthorizedHandler = handler;
   return () => {
     if (unauthorizedHandler === handler) {
@@ -150,7 +166,8 @@ const PROBLEM_TYPE_PREFIX = 'urn:customer-master:problem:';
  * - Resolves `undefined` for a 2xx response with an empty body (204).
  * - Rejects with `ApiError(status, problem)` for every non-2xx response, with
  *   the problem+json body or the synthetic DEM9999 one; on 401 the
- *   {@link onUnauthorized} handler runs first, exactly once.
+ *   {@link onUnauthorized} handler runs first, exactly once, with
+ *   `perCallCredentials` telling whether `options.credentials` was given.
  * - Rejects with `ApiError(0, DEM9999)` when no response arrives (offline,
  *   DNS, a refused or reset connection), and with `ApiError(status, DEM9999)`
  *   for a 2xx body that is not JSON. The 401 handler runs for neither.
@@ -204,7 +221,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   const error = new ApiError(response.status, await readProblem(response));
   if (response.status === 401) {
-    notifyUnauthorized();
+    notifyUnauthorized({ perCallCredentials: options.credentials !== undefined });
   }
   throw error;
 }
@@ -248,14 +265,14 @@ function basicToken({ username, password }: Credentials): string {
   return btoa(binary);
 }
 
-/** Calls the registered 401 handler, if any, once. */
-function notifyUnauthorized(): void {
+/** Calls the registered 401 handler, if any, once, passing `info` on. */
+function notifyUnauthorized(info: UnauthorizedInfo): void {
   const handler = unauthorizedHandler;
   if (handler === null) {
     return;
   }
   try {
-    handler();
+    handler(info);
   } catch {
     // Contained on purpose: the caller must receive the 401's ApiError, the
     // one rejection every feature presents, whatever the sign-out hook does.
