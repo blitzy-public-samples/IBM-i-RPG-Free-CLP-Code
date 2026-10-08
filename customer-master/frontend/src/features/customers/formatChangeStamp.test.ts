@@ -1,21 +1,11 @@
 /**
- * Specs for `formatChangeStamp`, the "Last Change … by …" text of the customer
- * detail form.
+ * Specs for `formatChangeStamp`, the change stamp of the customer detail form.
  *
- * Source behaviour (MTNCUSTR FillScreenFields, MTNCUSTD record fields
- * SD_CHGTIME and SD_CHGUSER under indicator 61): the stamp is shown only when
- * CHGUSER is neither `*SYSTEM*` nor blank, and its time part is
- * `varchar_format(CHGTIME, 'YYYY-Mon-DD') concat ' at ' concat
- * varchar_format(CHGTIME, 'HH24:MI:SS')`. The target shows
- * `YYYY-Mon-DD at HH:mm:ss by USER` in browser-local time, and `null` where
- * the 5250 screen kept the stamp non-display.
- *
- * Time-zone independence. The host running Vitest may sit in any zone, so the
- * expected text is never a hard-coded wall-clock string for an instant: it is
- * built by {@link expected} from the local `Date` getters, with a month table
- * and padding of its own rather than the unit's. Only inputs without a zone
- * (parsed as local time) and the pinned-zone block, which sets `TZ` itself,
- * assert literal strings.
+ * The host running Vitest may sit in any time zone, so the expected text is
+ * never a hard-coded wall-clock string for an instant: {@link expected} builds
+ * it from the local `Date` getters, with a month table and padding of its own
+ * rather than the unit's. Only inputs without a zone (parsed as local time)
+ * and the pinned-zone block, which sets `TZ` itself, assert literal strings.
  */
 import { describe, expect, it } from 'vitest';
 import { formatChangeStamp } from './formatChangeStamp';
@@ -40,10 +30,8 @@ const MONTH_ABBREVIATIONS = [
   'Dec',
 ];
 
-/** Shape every visible stamp has, whatever the zone: `YYYY-Mon-DD at HH:mm:ss by <user>`. */
 const STAMP_SHAPE = /^\d{4}-[A-Z][a-z]{2}-\d{2} at \d{2}:\d{2}:\d{2} by /;
 
-/** Two-digit zero padding for a value in 0..99, by slicing rather than `padStart`. */
 function twoDigits(value: number): string {
   return `0${value}`.slice(-2);
 }
@@ -65,7 +53,6 @@ function expected(iso: string, user: string): string {
   return `${year}-${month}-${day} at ${time} by ${user}`;
 }
 
-/** The month token of a visible stamp (`Oct` in `2026-Oct-05 at …`), or `undefined`. */
 function monthToken(stamp: string | null): string | undefined {
   return stamp?.match(/^\d{4}-([A-Za-z]+)-/)?.[1];
 }
@@ -220,7 +207,6 @@ describe('formatChangeStamp', () => {
     });
 
     it("keeps a user that merely contains '*SYSTEM*' visible", () => {
-      // Only the exact value hides the stamp; any other non-blank user shows it.
       expect(formatChangeStamp('2026-01-02T03:04:05', 'x*SYSTEM*')).toBe('2026-Jan-02 at 03:04:05 by x*SYSTEM*');
     });
   });

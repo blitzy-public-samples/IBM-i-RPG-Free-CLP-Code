@@ -1,49 +1,20 @@
 /**
- * ConflictCompareDialog: the DEM1002 "record changed" window.
+ * ConflictCompareDialog: the DEM1002 "record changed" window. It replaces the
+ * stale-update branch of MTNCUSTR's UpdateRecd
+ * (5250_Subfile/MTNCUSTR.SQLRPGLE:593-599), which sends DEM1002 to the
+ * message subfile, re-reads the record (ReadRecd) and redisplays it
+ * (FillScreenFields). Here a 409 DEM1002 response carries `current`.
  *
- * It replaces the stale-update branch of MTNCUSTR's UpdateRecd
- * (5250_Subfile/MTNCUSTR.SQLRPGLE:593-599). The source UPDATE is conditional
- * on the CHGTIME read earlier; when no row matches it sends DEM1002 to the
- * message subfile, re-reads the record (ReadRecd) and refills the screen with
- * it (FillScreenFields), so the user sees the current record and keys the
- * change again. Here the PUT is conditional on `version`, and a 409 DEM1002
- * response carries `current`, the customer as now stored. This window shows:
+ * The window shows the catalog DEM1002 text itself (CRTMSGF.CLLE:40, typo
+ * corrected), because `useProblemPresenter` publishes no DEM1002 toast when
+ * the detail dialog passes `onConflict`. The comparison has one row per
+ * customer field, with "Changed" as text so the mark is not colour alone. No
+ * request is sent here: the detail dialog owns the record, the draft and the
+ * version.
  *
- * - the DEM1002 text from the message catalog, "Someone else changed record.
- *   Review data." (CRTMSGF.CLLE:40 with its typo corrected), rendered in the
- *   window itself rather than as a toast: `useProblemPresenter` publishes no
- *   toast for DEM1002 when the detail dialog passes `onConflict`;
- * - a comparison table, one row per customer field in screen order: the
- *   user's values, the current record's values, and "Changed" on every row
- *   where the two differ, so the mark is text as well as colour;
- * - **Refresh**, the source outcome: the detail dialog loads `current` into
- *   the form and the user re-keys, exactly as FillScreenFields left it;
- * - **Re-apply my changes**: the fields the user edited are copied onto
- *   `current`, and the detail dialog runs the review again with `current`'s
- *   version, so the next save is conditional on the record just shown.
- *
- * Keys. The window registers its own key scope while open, on top of the
- * detail dialog's: F12, and Escape through it, runs Refresh, the outcome the
- * source gives a stale update. Enter is deliberately unbound, so Enter on a
- * focused button keeps its native click. Every other function key shows
- * DEM0003 "Key is not active now" and changes nothing.
- *
- * Responsibilities stop at the field-by-field comparison the UI needs: no
- * request is sent and no business rule is applied. The detail dialog owns the
- * record, the draft, the version and whether this window is open.
- *
- * Layer rule: imports come from `api/` (types), `components/`, `keyboard/`,
- * `messages/`, `auth/` and this folder only.
- *
- * @example
- * <ConflictCompareDialog
- *   open={conflict !== null}
- *   original={conflict.original}
- *   mine={conflict.mine}
- *   current={conflict.current}
- *   onRefresh={() => refreshFrom(conflict.current)}
- *   onReapply={(merged, version) => reviewAgain(merged, version)}
- * />
+ * Keys: F12, and Escape through it, runs Refresh, the source outcome. Enter is
+ * unbound, so a focused button keeps its native click. Other function keys
+ * show DEM0003.
  */
 import { useRef } from 'react';
 import type { CustomerFields, CustomerResponse } from '../../api/customers';
@@ -57,13 +28,9 @@ import { useMessages } from '../../messages/MessageCatalogProvider';
 import { CUSTOMER_FORM_FIELDS } from './CustomerForm';
 import type { CustomerFieldName } from './CustomerForm';
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /** Props of {@link ConflictCompareDialog}. */
 export interface ConflictCompareDialogProps {
-  /** Whether the window is shown. When false nothing is rendered and no key scope exists. */
+  /** Whether the window is shown. When false nothing is rendered. */
   open: boolean;
   /**
    * The nine fields of the record the user started editing from, the one
@@ -75,11 +42,7 @@ export interface ConflictCompareDialogProps {
   mine: CustomerFields;
   /** The customer as now stored: `problem.current` of the 409 DEM1002 response. */
   current: CustomerResponse;
-  /**
-   * Refresh: the detail dialog loads `current` into the form, discarding the
-   * user's entries (the source behaviour). Called by the Refresh button, by
-   * F12 and by Escape.
-   */
+  /** Refresh: the detail dialog loads `current` into the form, discarding the user's entries. */
   onRefresh: () => void;
   /**
    * Re-apply my changes: receives exactly the nine customer fields, `current`
@@ -96,9 +59,8 @@ export interface ConflictCompareDialogProps {
 }
 
 /**
- * The DEM1002 compare window. Renders nothing while `open` is false;
- * otherwise mounts the window body, whose key scope therefore exists only
- * while the window is shown and is removed with it.
+ * Mounts the window body only while `open`, so its key scope exists only
+ * while the window is shown.
  */
 export function ConflictCompareDialog(props: ConflictCompareDialogProps) {
   if (!props.open) {
@@ -106,10 +68,6 @@ export function ConflictCompareDialog(props: ConflictCompareDialogProps) {
   }
   return <ConflictCompareBody {...props} />;
 }
-
-// ---------------------------------------------------------------------------
-// Field comparison
-// ---------------------------------------------------------------------------
 
 /**
  * The text of one field as shown and compared. A `null` or absent member,
@@ -122,11 +80,10 @@ function fieldText(values: CustomerFields | CustomerResponse, field: CustomerFie
 }
 
 /**
- * `current` with each field the user edited (its value in `mine` differs
- * from its value in `original`) replaced by the user's value. Only the nine
- * customer fields are copied, so `custId`, `chgTime`, `chgUser` and `version`
- * of `current` never reach the result: the API rejects any other property in
- * a write body.
+ * `current` with each field the user edited replaced by the user's value.
+ * Only the nine customer fields are copied, so `custId`, `chgTime`, `chgUser`
+ * and `version` of `current` never reach the result: the API rejects any
+ * other property in a write body.
  */
 function mergeEdits(original: CustomerFields, mine: CustomerFields, current: CustomerResponse): CustomerFields {
   const merged: CustomerFields = {};
@@ -137,17 +94,11 @@ function mergeEdits(original: CustomerFields, mine: CustomerFields, current: Cus
   return merged;
 }
 
-// ---------------------------------------------------------------------------
-// Window body
-// ---------------------------------------------------------------------------
-
-/** Id prefix of the window's header; `Dialog` is named by its title and function line. */
 const HEADER_ID = 'conflict-compare';
 
 /** Id of the DEM1002 paragraph, which also describes the Refresh button. */
 const MESSAGE_ID = 'conflict-compare-message';
 
-/** The open window: header, DEM1002 text, comparison, actions and key legend. */
 function ConflictCompareBody({ original, mine, current, onRefresh, onReapply }: ConflictCompareDialogProps) {
   const { username } = useAuth();
   const { format } = useMessages();
@@ -158,9 +109,6 @@ function ConflictCompareBody({ original, mine, current, onRefresh, onReapply }: 
   const refreshButtonRef = useRef<HTMLButtonElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
-  // F12 (and Escape, which the provider delivers as F12) refreshes, the
-  // outcome UpdateRecd gives a stale update. Enter stays unbound so a focused
-  // button keeps its native click; any other function key is not active here.
   useFunctionKeys(
     { F12: onRefresh },
     {

@@ -43,7 +43,6 @@ import org.springframework.http.ResponseEntity;
  */
 class MessageCatalogIT extends AbstractPostgresIT {
 
-    /** The public endpoint that serves the whole catalog. */
     private static final String MESSAGES = "/api/messages";
 
     /** The number of keys: the 17 CUSTMSGF ids plus the five APP keys. */
@@ -55,7 +54,6 @@ class MessageCatalogIT extends AbstractPostgresIT {
      */
     private static final Map<String, String> EXPECTED = expectedTexts();
 
-    /** The application's single message catalog bean, the server's one source of texts. */
     @Autowired
     private MessageCatalog catalog;
 

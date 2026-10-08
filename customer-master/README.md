@@ -102,6 +102,7 @@ customer-master/
 
 - Docker Engine with Compose v2.
 - To run the suites outside containers: JDK 21 (the Maven Wrapper fetches Maven), Node.js 24.21.0, and Docker for the Testcontainers PostgreSQL used by the backend integration tests.
+  - The wrapper checks the Maven ZIP against the SHA-256 pinned in `backend/.mvn/wrapper/maven-wrapper.properties`, so on Linux and macOS its first download also needs `unzip` and `sha256sum` or `shasum`. Without `unzip` it fetches the `.tar.gz` instead, which fails that check. `mvnw.cmd` on Windows needs nothing extra.
 
 ### Start
 

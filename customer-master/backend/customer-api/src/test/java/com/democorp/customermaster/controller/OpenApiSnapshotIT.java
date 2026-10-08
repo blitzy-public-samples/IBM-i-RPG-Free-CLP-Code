@@ -69,13 +69,10 @@ class OpenApiSnapshotIT extends AbstractPostgresIT {
     /** The YAML form of the springdoc document ({@code springdoc.api-docs.path} plus {@code .yaml}). */
     private static final String API_DOCS_YAML = "/v3/api-docs.yaml";
 
-    /** System property naming the committed snapshot file. */
     private static final String SNAPSHOT_PATH_PROPERTY = "openapi.snapshot.path";
 
-    /** System property that switches the test from comparing to rewriting the snapshot. */
     private static final String SNAPSHOT_UPDATE_PROPERTY = "openapi.snapshot.update";
 
-    /** The snapshot location relative to the {@code customer-api} module directory. */
     private static final String DEFAULT_SNAPSHOT_PATH = "../../openapi/customer-master-api.yaml";
 
     /** The command that regenerates the snapshot, quoted in failure messages. */
@@ -90,18 +87,10 @@ class OpenApiSnapshotIT extends AbstractPostgresIT {
             "/api/session",
             "/api/states");
 
-    /** The springdoc server URL {@code CustomerMasterApplication} declares: same origin, no host or port. */
     private static final String SAME_ORIGIN_SERVER = "/";
 
-    /** A host-and-port prefix; its presence would tie the document to the random test port. */
     private static final String LOCALHOST_PORT = "localhost:";
 
-    /**
-     * Compares the live document with the committed snapshot or, with
-     * {@code -Dopenapi.snapshot.update=true}, rewrites the snapshot from the live document.
-     *
-     * @throws IOException if the snapshot cannot be read or written
-     */
     @Test
     void liveDocumentMatchesTheCommittedSnapshot() throws IOException {
         Path snapshot = snapshotPath();
@@ -126,10 +115,6 @@ class OpenApiSnapshotIT extends AbstractPostgresIT {
                 .isEqualTo(committed);
     }
 
-    /**
-     * Guards the content the snapshot may hold: every API resource path is described, the only server
-     * is the same-origin {@code /}, and no {@code localhost:} host and port appears anywhere.
-     */
     @Test
     void liveDocumentDescribesTheApiAndNoHostPort() {
         String live = fetchLiveDocument();
@@ -223,12 +208,6 @@ class OpenApiSnapshotIT extends AbstractPostgresIT {
         return "No line differs.";
     }
 
-    /**
-     * Resolves the snapshot file from {@value #SNAPSHOT_PATH_PROPERTY}, or from
-     * {@value #DEFAULT_SNAPSHOT_PATH} relative to the working directory when the property is absent.
-     *
-     * @return the absolute, normalized snapshot path
-     */
     private static Path snapshotPath() {
         return Path.of(System.getProperty(SNAPSHOT_PATH_PROPERTY, DEFAULT_SNAPSHOT_PATH))
                 .toAbsolutePath()

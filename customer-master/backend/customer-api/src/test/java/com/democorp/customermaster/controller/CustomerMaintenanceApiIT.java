@@ -94,10 +94,8 @@ import org.springframework.web.client.RestClient;
 @DisplayName("Customer display, review, add and update over HTTP")
 class CustomerMaintenanceApiIT extends AbstractPostgresIT {
 
-    /** The collection path, also the prefix of a customer's path. */
     private static final String CUSTOMERS = "/api/customers";
 
-    /** The review path. */
     private static final String REVIEW = "/api/customers/review";
 
     /** DEM0000, the edit confirmation [5250_Subfile/CRTMSGF.CLLE:12]. */
@@ -124,7 +122,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
     /** APP0502, the answer for an address-service fault. */
     private static final String ADDRESS_UNAVAILABLE = "Address service is unavailable. Try again later.";
 
-    /** The prefix of every APP0400 detail, "Request is not valid: {0}". */
     private static final String INVALID_REQUEST_PREFIX = "Request is not valid: ";
 
     /** The USPS description of the address-level error the stub also answers for {@code BADADDR}. */
@@ -167,10 +164,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         });
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Display: GET /api/customers/{custId}
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("GET returns the stored customer, uppercased, with the principal's stamp and version 0")
     void getFound() {
@@ -201,10 +194,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         // Ids are issued in upper case and must be sent as issued: a lower-case id is not uppercased.
         assertInvalidRequest(get(inquiry(), CUSTOMERS + "/abcd"));
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Review: POST /api/customers/review
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("review answers the normalized, standardized values with DEM0000 or DEM0009 and stores nothing")
@@ -311,10 +300,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         verifyNoInteractions(addressClient);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Add and update re-run the field rules
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("POST and PUT re-run the field rules: 422, nothing stored, no id consumed, row unchanged")
     void fieldRulesAlsoGuardPostAndPut() {
@@ -346,10 +331,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(count()).isEqualTo(1);
         verify(addressClient, never()).validate(any());
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Add: POST /api/customers
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("add allocates EEEF then EEEG, answers 201 with Location, and never standardizes")
@@ -404,10 +385,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         }
         assertThat(count()).isEqualTo(1);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // stateAccepted on review failures
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("a review failing at active, name or the State rule carries no stateAccepted")
@@ -471,10 +448,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(sent.getAllValues()).extracting(AddressValidationRequest::state).containsOnly("CA");
         assertThat(count()).isZero();
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Update: PUT /api/customers/{custId}
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("update increments version and stamps the authenticated principal")
@@ -542,10 +515,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(create(validFields()).path("custId").asText()).isEqualTo(DatabaseCleaner.FIRST_INTERACTIVE_ID);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Fixtures and helpers
-    // ---------------------------------------------------------------------------------------------
-
     /**
      * A valid draft in screen order, typed in lower case. Every street is at most 30 characters and every
      * ZIP 5 digits, so standardization by {@link #echoAddresses()} leaves the reviewed values equal to the
@@ -604,13 +573,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(customer.path("active").asText()).isEqualTo("Y");
     }
 
-    /**
-     * Asserts a review notice.
-     *
-     * @param notice  the {@code notice} member
-     * @param code    the expected catalog key
-     * @param message the expected catalog text
-     */
     private static void assertNotice(JsonNode notice, String code, String message) {
         assertThat(notice.path("code").asText()).isEqualTo(code);
         assertThat(notice.path("message").asText()).isEqualTo(message);
@@ -672,9 +634,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(error.path("message").asText()).isEqualTo(message);
     }
 
-    /**
-     * Returns the {@code field} of every {@code errors} entry, in order.
-     */
     private static List<String> errorFields(JsonNode problem) {
         List<String> fields = new ArrayList<>();
         for (JsonNode error : problem.path("errors")) {
@@ -704,9 +663,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         return json(response);
     }
 
-    /**
-     * Returns the number of {@code custmast} rows.
-     */
     private int count() {
         Integer rows = jdbcTemplate.queryForObject("select count(*) from custmast", Integer.class);
         assertThat(rows).isNotNull();
@@ -727,11 +683,6 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
                 .body(toJson(body)).retrieve().toEntity(String.class);
     }
 
-    /**
-     * Serializes a request body with the application's mapper.
-     *
-     * @throws IllegalStateException if the body cannot be serialized
-     */
     private String toJson(Map<String, Object> body) {
         try {
             return objectMapper.writeValueAsString(body);

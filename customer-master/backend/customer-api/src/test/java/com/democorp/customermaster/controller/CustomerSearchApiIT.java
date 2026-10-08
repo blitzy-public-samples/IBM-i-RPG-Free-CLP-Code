@@ -20,40 +20,31 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 /**
- * Specifies {@code GET /api/customers} over HTTP: the filters, order, paging and notices of PMTCUSTR's
- * search subfile, and the 400 answers for criteria the search cannot run with.
- *
- * <p><b>Behaviour under test</b> [5250_Subfile/PMTCUSTR.SQLRPGLE], [5250_Subfile/PMTCUSTD.DSPF]:
+ * Specifies {@code GET /api/customers} over HTTP against PMTCUSTR's search subfile
+ * [5250_Subfile/PMTCUSTR.SQLRPGLE], [5250_Subfile/PMTCUSTD.DSPF].
  * <ul>
- *   <li>{@code ProcessSearchCriteria} (lines 625-665): the name and city entries are trimmed
- *       ({@code %trim(SC_NAME) + '%'}) and match as prefixes; a blank State selects every state; a State
- *       whose trimmed length is not 2 sends DEM0007 "State selection field is invalid." and runs no
- *       search; only active customers are listed unless F9 ({@code includeInactive}) is on.</li>
+ *   <li>{@code ProcessSearchCriteria} (lines 625-665): name and city match as trimmed prefixes; a blank
+ *       State selects every state, and a State whose trimmed length is not 2 sends DEM0007 and runs no
+ *       search; inactive customers are excluded unless F9 ({@code includeInactive}) is on.</li>
  *   <li>{@code ItemCur} (lines 208-223): {@code ORDER BY NAME, CITY, STATE}, with {@code custid} as the
- *       target's unique tiebreaker for keyset paging.</li>
- *   <li>{@code SflFirstPage} (lines 532-545): an empty first page sends DEM0002 "No records match the
- *       selection criteria", which travels as the page's {@code notice}.</li>
- *   <li>PMTCUSTD (lines 95-98): {@code SC_NAME 13A}, {@code SC_CITY 13A}, {@code SC_STATE 2A}; the API
- *       rejects a longer name or city with 400 APP0400.</li>
- *   <li>The 5250 screen uppercases keyed text (no {@code CHECK(LC)}), so lower-case filters and lower-case
- *       written fields meet as upper case.</li>
+ *       target's keyset tiebreaker.</li>
+ *   <li>{@code SflFirstPage} (lines 532-545): an empty first page's DEM0002 travels as the page's
+ *       {@code notice}.</li>
+ *   <li>PMTCUSTD (lines 95-98): {@code SC_NAME} and {@code SC_CITY} are 13 wide, {@code SC_STATE} 2; a
+ *       longer name or city is 400 APP0400.</li>
+ *   <li>The 5250 screen uppercases keyed text (no {@code CHECK(LC)}), so lower-case filters and written
+ *       fields meet as upper case.</li>
  * </ul>
- * Pattern padding parity, {@code EXPLAIN} plans and the 9,999-row cap are specified by
- * {@code repository/CustomerSearchRepositoryIT}, not here.
  *
- * <p><b>Contract.</b> 200 {@code {items: [{custId, name, city, state, zip5, active}], nextCursor,
- * limitReached, notice}}, every member present and {@code null} where it does not apply; 400
- * {@code application/problem+json} {@code APP0400} "Request is not valid: {0}" for a cursor, size,
- * length or type fault, and {@code DEM0007} for the State filter, each with {@code errors[0]} on the
- * query parameter at fault.
+ * <p>Padding parity, {@code EXPLAIN} plans and the 9,999-row cap belong to
+ * {@code repository/CustomerSearchRepositoryIT}. Every page member is present, {@code null} where it
+ * does not apply; a rejected query is 400 {@code application/problem+json} with {@code errors[0]} on
+ * the query parameter at fault.
  *
- * <p><b>Data.</b> Test databases hold no seed rows. Every test starts from the fixture
- * {@link #createFixture()} adds through {@code POST /api/customers} as the maintenance user, after the
- * base class has emptied {@code custmast}: five active customers and one inactive one. Searches run as
- * the inquiry user, because {@code INQUIRY} suffices for the list.
- *
- * <p>The base context variant of {@link AbstractPostgresIT}: no mocked bean, no import, no property
- * override.
+ * <p>Test databases hold no seed rows: after the base class empties {@code custmast},
+ * {@link #createFixture()} adds five active customers and one inactive one through {@code POST} as the
+ * maintenance user. Searches run as the inquiry user, because {@code INQUIRY} suffices. The base context
+ * variant of {@link AbstractPostgresIT}: no mocked bean, import or property override.
  */
 @DisplayName("GET /api/customers: PMTCUSTR's search filters, order, paging and notices over HTTP")
 class CustomerSearchApiIT extends AbstractPostgresIT {
@@ -67,19 +58,16 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
     /** The members of one list item, in the order they are serialized. */
     private static final List<String> ITEM_MEMBERS = List.of("custId", "name", "city", "state", "zip5", "active");
 
-    /** The catalog key of the empty-first-page notice. */
     private static final String DEM0002 = "DEM0002";
 
     /** DEM0002's catalog text [5250_Subfile/CRTMSGF.CLLE:14-15]. */
     private static final String DEM0002_TEXT = "No records match the selection criteria";
 
-    /** The catalog key of the State filter rule. */
     private static final String DEM0007 = "DEM0007";
 
     /** DEM0007's catalog text, with the source typo "in invalid" corrected [5250_Subfile/CRTMSGF.CLLE:24-25]. */
     private static final String DEM0007_TEXT = "State selection field is invalid.";
 
-    /** The catalog key of a request the API rejects before searching. */
     private static final String APP0400 = "APP0400";
 
     /** APP0400's catalog text up to its {@code {0}}. */
@@ -88,22 +76,16 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
     /** The {@code type} prefix of every problem; the catalog key follows it. */
     private static final String PROBLEM_TYPE_PREFIX = "urn:customer-master:problem:";
 
-    /** Format of an issued customer id. */
     private static final String CUST_ID_FORMAT = "[A-Z0-9]{4}";
 
-    /** "acme tools", Springfield IL 62701, active: the first customer added. */
     private String acmeTools;
 
-    /** "acme parts", Springfield CA 06371-1234, active. */
     private String acmeParts;
 
-    /** "beta works", Boston MA 02101, active. */
     private String betaWorks;
 
-    /** "acme old", Springfield IL 62702, inactive. */
     private String acmeOld;
 
-    /** The first "dup co", Akron OH 44301, active. */
     private String dupFirst;
 
     /** The second "dup co", identical to the first in name, city and state, so only its id orders it. */
@@ -122,10 +104,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         dupFirst = create("dup co", "akron", "OH", "44301", "Y");
         dupSecond = create("dup co", "akron", "OH", "44301", "Y");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Filters, order and the page shape
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("no parameters: the active rows in name, city, state, custid order, with the full page shape")
@@ -207,10 +185,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         assertEmptyWithDem0002(page(search("name", "ZZZ")));
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Paging
-    // ---------------------------------------------------------------------------------------------
-
     @Test
     @DisplayName("nextCursor pages through the list without duplicates or gaps, filters resent each page")
     void cursorPaging() {
@@ -242,10 +216,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         assertThat(ids(second)).as("the filter still applies after the cursor").containsExactly(acmeTools);
         assertBottomWithoutNotice(second);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Rejected criteria
-    // ---------------------------------------------------------------------------------------------
 
     @Test
     @DisplayName("a state that is neither blank nor 2 characters: 400 DEM0007 on field state, no search")
@@ -309,10 +279,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
     void typeMismatch() {
         assertApp0400(search("includeInactive", "maybe"), "includeInactive", "includeInactive has an invalid value");
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------------------------
 
     /**
      * Adds one customer through {@code POST /api/customers} as the maintenance user, with fixed filler
@@ -460,17 +426,14 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         return cursor.textValue();
     }
 
-    /** Returns the {@code custId} of every item, in order. */
     private static List<String> ids(JsonNode page) {
         return column(page, "custId");
     }
 
-    /** Returns the {@code name} of every item, in order. */
     private static List<String> names(JsonNode page) {
         return column(page, "name");
     }
 
-    /** Returns one member of every item, in order. */
     private static List<String> column(JsonNode page, String member) {
         List<String> values = new ArrayList<>();
         page.get("items").forEach(item -> values.add(item.path(member).asText()));
@@ -488,7 +451,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         return rows;
     }
 
-    /** Returns the member names of an object, in serialization order. */
     private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
@@ -500,13 +462,6 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(text.getBytes(StandardCharsets.UTF_8));
     }
 
-    /**
-     * Writes a request body with the application's mapper.
-     *
-     * @param body the body
-     * @return the JSON text
-     * @throws IllegalStateException if the body cannot be serialized
-     */
     private String toJson(Object body) {
         try {
             return objectMapper.writeValueAsString(body);

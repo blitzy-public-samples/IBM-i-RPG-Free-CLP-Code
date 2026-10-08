@@ -90,13 +90,10 @@ class ErrorModelIT extends AbstractPostgresIT {
     /** The id used on every customer path; any valid id would do, because the services are mocked. */
     private static final String CUST_ID = "EEEF";
 
-    /** The path of one customer. */
     private static final String CUSTOMER_PATH = "/api/customers/" + CUST_ID;
 
-    /** The collection path of search and add. */
     private static final String CUSTOMERS_PATH = "/api/customers";
 
-    /** A route no controller, resource handler or filter serves. */
     private static final String UNKNOWN_ROUTE = "/api/does-not-exist";
 
     /** The members {@code ProblemFactory.create} writes for every problem, and no others. */
@@ -109,11 +106,9 @@ class ErrorModelIT extends AbstractPostgresIT {
     /** Members that would expose internals: Boot's {@code trace} and {@code exception}, a raw message. */
     private static final List<String> INTERNAL_MEMBERS = List.of("trace", "exception", "message");
 
-    /** A canonical lower-case UUID, the form of every {@code errorId}. */
     private static final Pattern UUID_FORM =
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
 
-    /** A console log line at level ERROR in Spring Boot's default pattern. */
     private static final Pattern ERROR_LINE = Pattern.compile("^\\S+\\s+ERROR\\s.*");
 
     /** Mocked so a search can throw a persistence failure without a database fault. */
@@ -385,42 +380,20 @@ class ErrorModelIT extends AbstractPostgresIT {
         return errorId;
     }
 
-    /**
-     * Asserts that a problem holds none of the members that would expose internals.
-     *
-     * @param problem the parsed problem body
-     */
     private static void assertNoInternalMembers(JsonNode problem) {
         assertThat(memberNames(problem)).doesNotContainAnyElementsOf(INTERNAL_MEMBERS);
     }
 
-    /**
-     * Asserts that a problem holds none of Spring Boot's own error-format members.
-     *
-     * @param problem the parsed problem body
-     */
     private static void assertNoBootErrorMembers(JsonNode problem) {
         assertThat(memberNames(problem)).doesNotContainAnyElementsOf(BOOT_ERROR_MEMBERS);
     }
 
-    /**
-     * Returns the top-level member names of a JSON object.
-     *
-     * @param node the parsed body
-     * @return the member names in document order; empty when the node is not an object
-     */
     private static List<String> memberNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
     }
 
-    /**
-     * Returns the captured console lines at level ERROR.
-     *
-     * @param output the captured console output
-     * @return the lines whose level field is {@code ERROR}
-     */
     private static List<String> errorLines(CapturedOutput output) {
         return output.getAll().lines().filter(line -> ERROR_LINE.matcher(line).matches()).toList();
     }
@@ -436,7 +409,6 @@ class ErrorModelIT extends AbstractPostgresIT {
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     static class ThrowingFilterConfig {
 
-        /** Path prefix of the throwing filter. */
         static final String PATH = "/test-only/filter-failure";
 
         /**

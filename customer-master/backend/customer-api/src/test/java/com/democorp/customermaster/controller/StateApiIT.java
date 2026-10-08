@@ -52,28 +52,22 @@ import org.springframework.http.ResponseEntity;
 @DisplayName("GET /api/states: the State prompt list, filtered by name fragment and sorted by name or code")
 class StateApiIT extends AbstractPostgresIT {
 
-    /** The endpoint under test. */
     private static final String STATES_PATH = "/api/states";
 
-    /** Query parameter of the "Name Contains" filter. */
     private static final String NAME_CONTAINS = "nameContains";
 
-    /** Query parameter of the sort order. */
     private static final String SORT = "sort";
 
     /** Catalog key of a request the API cannot evaluate: "Request is not valid: {0}". */
     private static final String APP0400 = "APP0400";
 
-    /** The fixed lead of every APP0400 {@code detail}, from the catalog text. */
     private static final String APP0400_DETAIL_PREFIX = "Request is not valid: ";
 
     /** The {@code type} of an APP0400 problem, by the error model's {@code urn:customer-master:problem:<code>}. */
     private static final String APP0400_TYPE = "urn:customer-master:problem:" + APP0400;
 
-    /** The code member of each list element; with {@link #NAME_MEMBER}, its only members. */
     private static final String STATE_MEMBER = "state";
 
-    /** The name member of each list element; with {@link #STATE_MEMBER}, its only members. */
     private static final String NAME_MEMBER = "name";
 
     /** The 58 rows of STATES, in the order {@code 5250_Subfile/States.sql} inserts them (lines 23-80). */
@@ -151,10 +145,6 @@ class StateApiIT extends AbstractPostgresIT {
     private static final List<StateRow> CAROLINAS =
             List.of(row("NC", "North Carolina"), row("SC", "South Carolina"));
 
-    /**
-     * No parameters: all 58 states, sorted by name, each element exactly {@code {state, name}} with the
-     * name in its stored mixed case.
-     */
     @Test
     @DisplayName("no parameters: all 58 states sorted by name, each {state, name} in stored case")
     void loadsAll58SortedByName() {
@@ -273,7 +263,6 @@ class StateApiIT extends AbstractPostgresIT {
                 .containsExactly("VI", "VA", "WV");
     }
 
-    /** A sort other than {@code name} or {@code code} is 400 {@code APP0400} on the field {@code sort}. */
     @Test
     @DisplayName("sort=zip: 400 problem+json APP0400 on sort")
     void unknownSortRejected() {
@@ -371,15 +360,6 @@ class StateApiIT extends AbstractPostgresIT {
         assertThat(errors.get(0).path("code").asText()).isEqualTo(APP0400);
     }
 
-    /**
-     * Builds an insertion-ordered parameter map from name and value pairs.
-     *
-     * @param firstName   the first parameter name
-     * @param firstValue  its value
-     * @param secondName  the second parameter name
-     * @param secondValue its value
-     * @return the two parameters, in this order
-     */
     private static Map<String, String> params(String firstName, String firstValue, String secondName,
             String secondValue) {
         Map<String, String> query = new LinkedHashMap<>();
@@ -388,23 +368,10 @@ class StateApiIT extends AbstractPostgresIT {
         return query;
     }
 
-    /**
-     * Builds the expected row of one state.
-     *
-     * @param state the 2-character code
-     * @param name  the name as stored
-     * @return the row
-     */
     private static StateRow row(String state, String name) {
         return new StateRow(state, name);
     }
 
-    /**
-     * One element of the response, as the {@code (state, name)} pair compared with the source rows.
-     *
-     * @param state the 2-character code
-     * @param name  the name as stored
-     */
     private record StateRow(String state, String name) {
     }
 }

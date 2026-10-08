@@ -1,37 +1,25 @@
 // Change-stamp text for the customer detail form ("Last Change … by …").
 //
-// Replaces MTNCUSTR's FillScreenFields, which shows the stamp only when CHGUSER
-// is neither '*SYSTEM*' nor blank, and builds the time part in SQL:
+// MTNCUSTR's FillScreenFields shows the stamp only when CHGUSER is neither
+// '*SYSTEM*' nor blank, and builds its time with varchar_format 'YYYY-Mon-DD'
+// concat ' at ' concat 'HH24:MI:SS' (5250_Subfile/MTNCUSTR.SQLRPGLE:355-358);
+// otherwise MTNCUSTD hides it under indicator 61 with DSPATR(ND). Here a
+// hidden stamp is `null`.
 //
-//   varchar_format(:CHGTIME, 'YYYY-Mon-DD') concat ' at ' concat
-//   varchar_format(:CHGTIME, 'HH24:MI:SS')
-//
-// Otherwise indicator 61 stays off and MTNCUSTD hides "Last Change",
-// SD_CHGTIME, "by" and SD_CHGUSER with DSPATR(ND). Here a hidden stamp is
-// `null`, and the caller renders nothing for it.
-//
-// Differences from the 5250 screen, both intentional:
-// - The time is shown in the browser's local time zone. The server stores and
-//   sends `chgTime` as an instant (timestamptz, ISO-8601), where Db2 stored the
-//   job's local time with no zone.
-// - The full user is shown, up to the 18 characters of `chguser varchar(18)`,
-//   where the DDS field SD_CHGUSER held 15.
-//
-// The text is assembled from the local Date getters and a fixed English month
-// table, never from toLocaleString or Intl, so it reads the same in every
-// browser locale, as varchar_format's 'Mon' token always yields an English
-// three-letter month.
-//
-// Example:
-//   formatChangeStamp('2026-10-05T14:03:09Z', 'sales')
-//     → '2026-Oct-05 at 14:03:09 by sales' in a UTC browser
-//   formatChangeStamp('2026-10-05T14:03:09Z', '*SYSTEM*') → null
-//   formatChangeStamp(null, 'sales') → null
+// Intentional differences from the 5250 screen:
+// - Browser-local time: the server sends `chgTime` as an instant, where Db2
+//   stored the job's local time with no zone.
+// - The full user, up to the 18 characters of `chguser varchar(18)`, where
+//   SD_CHGUSER held 15.
 
 /** Users whose rows carry no visible stamp: seed and generator loads stamp '*SYSTEM*'. */
 const SYSTEM_USER = '*SYSTEM*';
 
-/** English three-letter month names, as Db2 varchar_format's 'Mon' token yields. */
+/**
+ * Fixed English month table. The stamp is built from it and the local Date
+ * getters, never toLocaleString or Intl, so it reads the same in every browser
+ * locale, as varchar_format's 'Mon' always yields an English three-letter month.
+ */
 const MONTHS = [
   'Jan',
   'Feb',
@@ -47,7 +35,6 @@ const MONTHS = [
   'Dec',
 ] as const;
 
-/** Zero-pads a non-negative integer to `width` digits. */
 function pad(value: number, width: number): string {
   return String(value).padStart(width, '0');
 }

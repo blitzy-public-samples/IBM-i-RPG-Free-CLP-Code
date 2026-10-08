@@ -57,7 +57,6 @@ import org.springframework.web.client.RestClient;
 @DisplayName("Optimistic concurrency: stale version DEM1002 and row lock DEM1001")
 class OptimisticConcurrencyIT extends AbstractPostgresIT {
 
-    /** The collection path. */
     private static final String CUSTOMERS = "/api/customers";
 
     /** The catalog text of DEM1002, with the source typos corrected. */
@@ -69,7 +68,6 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
     /** The {@code type} prefix of every problem. */
     private static final String PROBLEM_TYPE_PREFIX = "urn:customer-master:problem:";
 
-    /** Format of an allocated customer id. */
     private static final String CUST_ID_FORMAT = "[A-Z0-9]{4}";
 
     /** The test profile's {@code customer-master.db.lock-timeout}, less a margin for timer granularity. */
@@ -78,31 +76,22 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
     /** Longest acceptable answer to a blocked update; far beyond the 1-second lock timeout. */
     private static final Duration MAX_LOCK_WAIT = Duration.ofSeconds(15);
 
-    /** The name every test customer is created with, as sent. */
     private static final String CREATED_NAME = "concurrency co";
 
-    /** The street line as sent; every request in this class sends the same value. */
     private static final String ADDR = "5 elm st";
 
-    /** The city as sent. */
     private static final String CITY = "dayton";
 
-    /** The state as sent; already upper case. */
     private static final String STATE = "OH";
 
-    /** The ZIP as sent. */
     private static final String ZIP = "45402";
 
-    /** The corporate phone as sent. */
     private static final String CORP_PHONE = "(937) 555-0100";
 
-    /** The account manager as sent. */
     private static final String ACCT_MGR = "sam roe";
 
-    /** The account manager phone as sent. */
     private static final String ACCT_PHONE = "(937) 555-0101";
 
-    /** The active flag as sent. */
     private static final String ACTIVE = "Y";
 
     @Test
@@ -110,14 +99,12 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
     void staleVersionGivesDem1002WithCurrent() {
         String id = create();
 
-        // Two editors read the same row at version 0.
         CustomerResponse readByFirst = get(maintenance(), id);
         CustomerResponse readBySecond = get(maintenance2(), id);
         assertThat(readByFirst.version()).isZero();
         assertThat(readBySecond.version()).isZero();
         assertThat(readBySecond).isEqualTo(readByFirst);
 
-        // The first editor saves.
         ResponseEntity<String> firstSave = put(maintenance(), id, "first client name", 0);
         assertThat(firstSave.getStatusCode()).isEqualTo(HttpStatus.OK);
         CustomerResponse saved = customer(firstSave);
@@ -155,12 +142,10 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
         // the application's mapper rejects any member CustomerResponse does not declare.
         assertThat(toCustomer(currentNode)).isEqualTo(saved);
 
-        // The stale write changed nothing.
         CustomerResponse afterStale = get(maintenance2(), id);
         assertThat(afterStale.name()).isEqualTo("FIRST CLIENT NAME");
         assertThat(afterStale).isEqualTo(saved);
 
-        // Re-apply the second editor's change on current.version.
         ResponseEntity<String> reapplied = put(maintenance2(), id, "second client name",
                 currentNode.path("version").asLong());
         assertThat(reapplied.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -221,12 +206,10 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
         // The wait ended with the configured lock timeout, not earlier and not by hanging.
         assertThat(elapsed).isGreaterThanOrEqualTo(MIN_LOCK_WAIT).isLessThan(MAX_LOCK_WAIT);
 
-        // The blocked attempt changed nothing.
         CustomerResponse unchanged = get(maintenance(), id);
         assertThat(unchanged.name()).isEqualTo("CONCURRENCY CO");
         assertThat(unchanged.version()).isZero();
 
-        // With the lock released, the same edit at the same version succeeds at once.
         ResponseEntity<String> unblocked = put(maintenance(), id, "unblocked name", 0);
         assertThat(unblocked.getStatusCode()).isEqualTo(HttpStatus.OK);
         CustomerResponse saved = customer(unblocked);
@@ -294,12 +277,6 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
         return customer(response);
     }
 
-    /**
-     * Parses a customer body.
-     *
-     * @param response a 200 or 201 response
-     * @return the body as a {@link CustomerResponse}
-     */
     private CustomerResponse customer(ResponseEntity<String> response) {
         return toCustomer(json(response));
     }
@@ -320,12 +297,6 @@ class OptimisticConcurrencyIT extends AbstractPostgresIT {
         }
     }
 
-    /**
-     * Serializes a request body with the application's mapper.
-     *
-     * @param body the body
-     * @return the JSON text
-     */
     private String toJson(Object body) {
         try {
             return objectMapper.writeValueAsString(body);
