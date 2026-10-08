@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Customer Master</title>
+    <!--
+      Page shell of the Customer Master SPA. Vite rewrites the module script
+      to the hashed bundle under /assets/ at build time; nginx serves this file
+      for every client route, and the Compose healthcheck fetches it at /.
+
+      Deliberately minimal and self-contained:
+      - Nothing loaded from another origin: no CDN script, font or stylesheet.
+      - The icon is the empty data: URL below, which the browser never fetches.
+        The app ships no public/ folder and so no favicon file; without any
+        icon link the browser requests /favicon.ico on its own, and the Vite
+        dev and preview servers answer that with a 404 and a console error.
+        Do not point it at a file unless that file is added to the build.
+      - No inline script or style; styles come from src/styles via
+        src/main.tsx.
+      - No visible text beyond the title, hence no skip link here: React
+        renders every screen, each opening with its own <main> landmark and no
+        navigation block before it to bypass, and message texts come only
+        from GET /api/messages.
+    -->
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
