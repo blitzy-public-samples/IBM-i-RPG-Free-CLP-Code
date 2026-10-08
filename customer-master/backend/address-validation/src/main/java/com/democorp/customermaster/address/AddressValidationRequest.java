@@ -9,28 +9,12 @@ package com.democorp.customermaster.address;
  * {@code USAdrVal} [USPS_Address/USADRVAL.SQLRPGLE:49-52] and which was
  * concatenated into the Web Tools {@code AddressValidateRequest} document
  * [USPS_Address/USADRVAL.SQLRPGLE:84-89]. The components keep the template's
- * names, order and {@code char(n)} widths:
- *
- * <table>
- *   <caption>Components, USPS meaning and maximum width</caption>
- *   <tr><th>Component</th><th>USPS Web Tools element</th><th>Meaning</th><th>Width</th></tr>
- *   <tr><td>{@code address1}</td><td>{@code Address1}</td>
- *       <td>Secondary line (suite, apartment, unit)</td><td>{@value #ADDRESS1_WIDTH}</td></tr>
- *   <tr><td>{@code address2}</td><td>{@code Address2}</td>
- *       <td>Street line (number and street)</td><td>{@value #ADDRESS2_WIDTH}</td></tr>
- *   <tr><td>{@code city}</td><td>{@code City}</td><td>City</td><td>{@value #CITY_WIDTH}</td></tr>
- *   <tr><td>{@code state}</td><td>{@code State}</td><td>Two-letter state code</td>
- *       <td>{@value #STATE_WIDTH}</td></tr>
- *   <tr><td>{@code zip5}</td><td>{@code Zip5}</td><td>Five-digit ZIP code</td>
- *       <td>{@value #ZIP5_WIDTH}</td></tr>
- *   <tr><td>{@code zip4}</td><td>{@code Zip4}</td><td>ZIP+4 extension</td>
- *       <td>{@value #ZIP4_WIDTH}</td></tr>
- * </table>
+ * names, order and {@code char(n)} widths, the {@code *_WIDTH} constants.
  *
  * <p>Web Tools names the lines the opposite way round from everyday usage:
- * {@code Address2} is the street and {@code Address1} the secondary line. That quirk
- * stays inside this module and the customer-api mapping that builds the request; it
- * never reaches the customer model.
+ * {@code Address2} is the street and {@code Address1} the secondary line (suite,
+ * apartment, unit). That quirk stays inside this module and the customer-api mapping that
+ * builds the request; it never reaches the customer model.
  *
  * <p><b>Width contract.</b> A {@code char(n)} host variable can never hold more than
  * {@code n} characters, so the source could never send more. The compact constructor
@@ -46,36 +30,15 @@ package com.democorp.customermaster.address;
  * is changed. The width check runs on the value as supplied, with no strip and no
  * case change. Stripping is the job of {@code UspsXmlCodec} when it writes the request
  * document, and uppercasing happens only in {@code StubAddressValidationClient}'s
- * fixture lookup and echo.
- *
- * <p><b>Privacy.</b> The exception message names the component and its width only,
+ * fixture lookup and echo. The exception message names the component and its width only,
  * never the rejected value, because the value is customer address data.
  *
- * <p>Example, the request Edit_Address builds for a street longer than 30 characters
- * (the caller has already cut it):
- * <pre>{@code
- * String street = "1234 NORTH EXTRAORDINARILY LONG AVE";        // 35 characters
- * var request = new AddressValidationRequest(
- *         "",                                                // address1: blank
- *         street.substring(0, AddressValidationRequest.ADDRESS2_WIDTH),
- *         "ANYTOWN", "CA", "90210", "");                     // zip4: blank
- *
- * new AddressValidationRequest(null, street, null, null, null, null);
- * // throws IllegalArgumentException("address2 exceeds 30 characters")
- * }</pre>
- *
- * @param address1 secondary address line (suite, apartment); at most
- *                 {@value #ADDRESS1_WIDTH} characters; {@code null} is stored as {@code ""}
- * @param address2 street line; at most {@value #ADDRESS2_WIDTH} characters;
- *                 {@code null} is stored as {@code ""}
- * @param city     city; at most {@value #CITY_WIDTH} characters; {@code null} is stored
- *                 as {@code ""}
- * @param state    state code; at most {@value #STATE_WIDTH} characters; {@code null} is
- *                 stored as {@code ""}
- * @param zip5     five-digit ZIP code; at most {@value #ZIP5_WIDTH} characters;
- *                 {@code null} is stored as {@code ""}
- * @param zip4     ZIP+4 extension; at most {@value #ZIP4_WIDTH} characters; {@code null}
- *                 is stored as {@code ""}
+ * @param address1 secondary address line; at most {@value #ADDRESS1_WIDTH} characters
+ * @param address2 street line; at most {@value #ADDRESS2_WIDTH} characters
+ * @param city     city; at most {@value #CITY_WIDTH} characters
+ * @param state    state code; at most {@value #STATE_WIDTH} characters
+ * @param zip5     five-digit ZIP code; at most {@value #ZIP5_WIDTH} characters
+ * @param zip4     ZIP+4 extension; at most {@value #ZIP4_WIDTH} characters
  */
 public record AddressValidationRequest(
         String address1,

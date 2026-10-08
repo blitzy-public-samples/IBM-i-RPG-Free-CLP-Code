@@ -5,6 +5,7 @@ import com.democorp.customermaster.address.AddressValidationClient;
 import com.democorp.customermaster.address.AddressValidationProperties;
 import com.democorp.customermaster.address.AddressValidationRequest;
 import com.democorp.customermaster.address.AddressValidationResult;
+import com.democorp.customermaster.address.UspsTextRedactor;
 import com.democorp.customermaster.domain.Address;
 import com.democorp.customermaster.domain.TextNormalizer;
 import com.democorp.customermaster.service.exception.CustomerValidationException;
@@ -25,22 +26,12 @@ import org.springframework.stereotype.Service;
  * {@code Address1} the secondary line; the quirk stays inside {@link #standardize(Address)} and
  * never reaches the {@link Address} model, the API or the UI.
  *
- * <p><b>The mapping</b>, as {@code Edit_Address} performs it:
- * <ul>
- *   <li><b>Request.</b> {@code clear AdrIn} leaves {@code address1} blank; the street goes to
- *       {@code address2}, city, state and the first five characters of the ZIP to {@code city},
- *       {@code state} and {@code zip5}; {@code zip4} stays blank. Every value is uppercased and
- *       trimmed, then cut to its {@code USAdrValDS} width [Copy_Mbrs/USADRVALDS.RPGLE:3-13].</li>
- *   <li><b>Success</b> (the result has a non-blank City, the source's own test
- *       [USPS_Address/MTNCUSTR.SQLRPGLE:480]). The returned values overwrite the address: street
- *       from {@code Address2}, city cut to the 20-character column, state, and ZIP composed as
- *       {@code Zip5-Zip4} when a ZIP+4 came back, otherwise {@code Zip5}. The returned state must
- *       then exist in STATES, because the {@code custmast_state_fk} foreign key requires it; this
- *       standardized-State check is distinct from the State field rule.</li>
- *   <li><b>Address error</b> (no City). DEM9898 "USPS: &lt;description&gt;" on {@code addr},
- *       {@code city}, {@code state} and {@code zip}, {@code addr} first: the source puts the cursor
- *       on ADDR and reverse image on all four fields [USPS_Address/MTNCUSTR.SQLRPGLE:491-498].</li>
- * </ul>
+ * <p><b>Mapping.</b> {@code toRequest} builds the request within the
+ * {@link AddressValidationRequest} widths, {@code fromResult} overwrites the address when
+ * {@link AddressValidationResult#standardized()} is true, and {@code addressNotStandardized} builds
+ * the DEM9898 failure on the four address fields [USPS_Address/MTNCUSTR.SQLRPGLE:491-498]. A
+ * standardized state must then exist in STATES, because the {@code custmast_state_fk} foreign key
+ * requires it; this standardized-State check is distinct from the State field rule.
  *
  * <p><b>When it runs.</b> Only {@code CustomerMaintenanceService.review} calls this service, after
  * the nine field rules have passed, so the user confirms the standardized values before saving.
@@ -53,20 +44,12 @@ import org.springframework.stereotype.Service;
  * {@code @Transactional}: the outbound address call must never run while a connection or lock is
  * held. The only data it reads is the {@link StateService} cache.
  *
- * <p><b>Service faults.</b> An {@link AddressServiceUnavailableException} from the client (transport
- * failure, non-2xx status, oversize body, or a response that breaks the response rules) is not
+ * <p><b>Service faults.</b> An {@link AddressServiceUnavailableException} from the client is not
  * caught here. It propagates unchanged and becomes 502 APP0502 with no {@code errors}; it is never
  * turned into DEM9898 or a 500.
  *
  * <p><b>Privacy.</b> Nothing this class logs contains an address value, a USPS response value, a
  * URL or a credential.
- *
- * <p>Example:
- * <pre>{@code
- * Result r = service.standardize(new Address("12 MAIN STREET", "OLD LYME", "CT", "06371"));
- * r.standardized();      // true when the service returned a city
- * r.address().zip();     // "06371-1234" when USPS returned ZIP+4 1234, otherwise "06371"
- * }</pre>
  *
  * <p>Thread safety: the service is stateless after construction and safe for concurrent use.
  */
@@ -97,6 +80,7 @@ public class AddressStandardizationService {
     private final AddressValidationProperties properties;
     private final ObjectProvider<AddressValidationClient> clients;
     private final StateService stateService;
+    private final UspsTextRedactor redactor;
 
     /**
      * The outcome of {@link #standardize(Address)}.
@@ -121,8 +105,10 @@ public class AddressStandardizationService {
     /**
      * Creates the service.
      *
-     * @param properties   the bound {@code customer-master.address.*} settings; only
-     *                     {@link AddressValidationProperties#enabled()} is read here
+     * @param properties   the bound {@code customer-master.address.*} settings:
+     *                     {@link AddressValidationProperties#enabled()} decides whether the client
+     *                     is called, and {@link AddressValidationProperties#usps()} configures the
+     *                     redactor of the DEM9898 description
      * @param clients      provider of the one {@link AddressValidationClient} bean, the stub by
      *                     default or the Web Tools client when {@code client=usps}; it is resolved
      *                     only when standardization is enabled, so a context without a client
@@ -137,6 +123,7 @@ public class AddressStandardizationService {
         this.properties = Objects.requireNonNull(properties, "properties");
         this.clients = Objects.requireNonNull(clients, "clients");
         this.stateService = Objects.requireNonNull(stateService, "stateService");
+        this.redactor = new UspsTextRedactor(properties.usps());
     }
 
     /**
@@ -228,9 +215,15 @@ public class AddressStandardizationService {
     /**
      * Builds the DEM9898 failure: the USPS description is the message argument, and the four
      * address fields are highlighted with {@code addr} first.
+     *
+     * <p>The argument is the description as the shared {@link UspsTextRedactor} returns it: each
+     * echo of the request it recognizes and each configured credential in every form it masks are
+     * replaced by their markers, and all other text is kept as the service sent it. Neither the
+     * DEM9898 detail nor the four field messages can therefore carry a credential in those forms;
+     * {@code result} itself is left raw.
      */
-    private static CustomerValidationException addressNotStandardized(AddressValidationResult result) {
-        String description = result.errorDescription() == null ? "" : result.errorDescription();
+    private CustomerValidationException addressNotStandardized(AddressValidationResult result) {
+        String description = redactor.redact(result.errorDescription());
         List<FieldError> errors = ADDRESS_FIELDS.stream()
                 .map(field -> new FieldError(field, ADDRESS_NOT_STANDARDIZED))
                 .toList();

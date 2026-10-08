@@ -32,24 +32,13 @@ import org.xml.sax.SAXParseException;
  * {@code AddressValidateResponse} document, applying the source's response tests.
  *
  * <p>Replaces the XML handling inside {@code USAdrVal}
- * [USPS_Address/USADRVAL.SQLRPGLE:74-136]:
- * <ul>
- *   <li><b>Request</b> [74-93]. The source concatenates the document as a string and
- *       passes it through {@code url_encode} after {@code ?API=Verify&XML=}. Values are
- *       inserted without escaping, so an {@code &} or {@code <} in an address produced a
- *       malformed request. {@link #requestDocument requestDocument} writes the same
- *       elements, attributes and order with a StAX {@link XMLStreamWriter}, which
- *       escapes them; {@link #requestQuery requestQuery} adds the query prefix and URL
- *       encoding.</li>
- *   <li><b>Response</b> [98-136]. The source reads {@code AddressValidateResponse/Address}
- *       through XMLTABLE with {@code Address1}, {@code Address2} and {@code City}
- *       {@code char(30)}, {@code State char(2)}, {@code Zip5 char(5)} and
- *       {@code Zip4 char(4)}, each {@code default ' '}; treats a non-blank City as success
- *       [118-121]; otherwise reads {@code AddressValidateResponse/Address/Error} with
- *       {@code Number integer}, {@code Source char(30)} and {@code Description
- *       varchar(512)}, which have no defaults. {@link #parse parse} reads the same paths
- *       from a hardened DOM.</li>
- * </ul>
+ * [USPS_Address/USADRVAL.SQLRPGLE:74-136]. The source concatenated the request document
+ * without escaping [74-93], so an {@code &} or {@code <} in an address produced a
+ * malformed request; {@link #requestDocument requestDocument} writes the same elements,
+ * attributes and order with a StAX {@link XMLStreamWriter}, which escapes them, and
+ * {@link #requestQuery requestQuery} adds the query prefix and URL encoding. The source
+ * read the response through XMLTABLE [98-136]; {@link #parse parse} reads the same paths
+ * from a hardened DOM.
  *
  * <p><b>Response rules.</b> After the HTTP call and after each XMLTABLE the source tests
  * {@code SQLSTATE <> '00000'} and ends the program through SQLProblem
@@ -66,7 +55,8 @@ import org.xml.sax.SAXParseException;
  *   <li>one of {@code Address1}, {@code Address2}, {@code City}, {@code State},
  *       {@code Zip5} and {@code Zip4} occurs more than once, or is longer than
  *       30, 30, 30, 2, 5 or 4 characters;</li>
- *   <li>a non-blank {@code City} is a success, whatever else the row holds;</li>
+ *   <li>a non-blank {@code City} is a success, whatever else the row holds
+ *       [118-121];</li>
  *   <li>with a blank {@code City}, the {@code Address} holds no {@code Error} child, or
  *       more than one;</li>
  *   <li>that {@code Error} lacks {@code Number}, {@code Source} or {@code Description},
@@ -94,24 +84,12 @@ import org.xml.sax.SAXParseException;
  * {@link SAXParseException} can quote the document it failed on. For the log line of a
  * fault or of an address-level error, {@link #serviceError serviceError} reads the
  * {@code Number} and {@code Description} of the body's USPS {@code Error} element with
- * the same hardened parser; the client masks the configured credentials in them and
- * escapes them before logging, and never puts them in an exception message.
+ * the same hardened parser; the client turns them into a log-safe projection before
+ * logging and never puts them in an exception message.
  *
  * <p><b>Threading.</b> The class holds no mutable state. JAXP factories, builders and
  * writers are not thread-safe, so each call creates its own; one instance can be shared
  * by any number of threads.
- *
- * <p>The class carries no Spring stereotype annotation: its package lies under
- * customer-api's component-scan root, and the client that uses it is created only by the
- * module's auto-configuration.
- *
- * <p>Example:
- * <pre>{@code
- * var codec = new UspsXmlCodec();
- * var request = new AddressValidationRequest("", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "");
- * String query = codec.requestQuery(request, userId, password);   // never log this
- * AddressValidationResult result = codec.parse(responseBytes);    // or throws the fault
- * }</pre>
  */
 public final class UspsXmlCodec {
 
@@ -155,7 +133,6 @@ public final class UspsXmlCodec {
 
     /** Creates a codec. It holds no state, so one instance can be shared. */
     public UspsXmlCodec() {
-        // No state: every call builds its own JAXP objects.
     }
 
     /**
@@ -240,10 +217,10 @@ public final class UspsXmlCodec {
      * apostrophe, a tab and a line break as they are, so the password {@code p'&q} travels
      * as {@code p'&amp;q}.
      *
-     * <p>{@link UspsWebToolsAddressValidationClient} derives the request-wire form of each
-     * credential it masks from this method, so its mask follows the escaping the request
-     * document actually applies instead of a second, hand-written escaping rule that could
-     * drift from it.
+     * <p>{@link UspsTextRedactor} derives the request-wire form of each credential it
+     * masks from this method, so its mask follows the escaping the request document
+     * actually applies instead of a second, hand-written escaping rule that could drift
+     * from it.
      *
      * <p>The result is as secret as its input: callers must never log it.
      *
@@ -354,8 +331,10 @@ public final class UspsXmlCodec {
     /**
      * Reads the {@code Number} and {@code Description} of the USPS {@code Error} element a
      * body holds, for the log line of a fault {@link #parse parse} reported or of an
-     * address-level error it returned, whose {@code Number} is logged as sent. Logging
-     * only: the values are not validated, and no result or exception is built from them.
+     * address-level error it returned. The {@code Number} is kept as text, not parsed, so
+     * the client can project what the service sent: an error code logs as sent, anything
+     * undocumented as markers. Logging only: the values are not validated, and no result
+     * or exception is built from them.
      *
      * <p>The {@code Error} read is:
      * <ul>
@@ -572,7 +551,7 @@ public final class UspsXmlCodec {
     /**
      * The texts of a USPS {@code Error} element, as {@link #serviceError serviceError}
      * reads them for a log line. Neither is validated, and either can echo the request, its
-     * URL and credentials included, so callers redact, mask and escape them before logging.
+     * URL and credentials included, so the client logs only its log-safe projection of them.
      *
      * @param number      the {@code Number} text, stripped; {@code null} when the element is absent
      * @param description the {@code Description} text, stripped; {@code null} when the element is absent

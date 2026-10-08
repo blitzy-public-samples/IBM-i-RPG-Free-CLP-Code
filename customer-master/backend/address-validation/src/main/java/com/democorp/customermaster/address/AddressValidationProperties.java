@@ -11,51 +11,29 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /**
  * Typed settings of the address-validation module, bound from {@value #PREFIX}.
  *
- * <p>This record replaces three things the IBM i address service relied on:
- * <ul>
- *   <li>the data areas that held the USPS Web Tools user id and password, read and
- *       trimmed on every call, now {@link Usps#userId()} and {@link Usps#password()};</li>
- *   <li>the endpoint URL hard-coded in the HTTP call, now {@link Usps#baseUrl()};</li>
- *   <li>the bind-time choice of the address service program through its binding
- *       directory, now {@link #client()}, which {@link AddressValidationAutoConfiguration}
- *       reads to register exactly one {@link AddressValidationClient} bean.</li>
- * </ul>
+ * <p>Replaces the data areas that held the USPS Web Tools user id and password, now
+ * {@link Usps#userId()} and {@link Usps#password()}; the endpoint URL hard-coded in the
+ * HTTP call, now {@link Usps#baseUrl()}; and the bind-time choice of the address service
+ * program, now {@link #client()}.
  *
- * <h2>Properties</h2>
- * <table>
- *   <caption>Properties, the environment variables customer-api maps onto them, and defaults</caption>
- *   <tr><th>Property</th><th>Environment variable</th><th>Default</th></tr>
- *   <tr><td>{@code customer-master.address.enabled}</td><td>{@code ADDRESS_VALIDATION_ENABLED}</td><td>{@code true}</td></tr>
- *   <tr><td>{@code customer-master.address.client}</td><td>{@code ADDRESS_VALIDATION_CLIENT}</td><td>{@code stub}</td></tr>
- *   <tr><td>{@code customer-master.address.usps.base-url}</td><td>{@code USPS_BASE_URL}</td><td>{@value #DEFAULT_BASE_URL}</td></tr>
- *   <tr><td>{@code customer-master.address.usps.user-id}</td><td>{@code USPS_USER_ID}</td><td>empty</td></tr>
- *   <tr><td>{@code customer-master.address.usps.password}</td><td>{@code USPS_PASSWORD}</td><td>empty</td></tr>
- *   <tr><td>{@code customer-master.address.usps.connect-timeout}</td><td>{@code USPS_CONNECT_TIMEOUT}</td><td>{@code 5s}</td></tr>
- *   <tr><td>{@code customer-master.address.usps.read-timeout}</td><td>{@code USPS_READ_TIMEOUT}</td><td>{@code 10s}</td></tr>
- * </table>
- * The environment variables reach these properties through {@code ${ENV:default}}
- * placeholders in customer-api's {@code application.yml}. The defaults declared here
- * equal those placeholder defaults, so the module behaves the same when it is used
- * without that file, as in its own tests. The user id and the password deliberately
- * have no default: no credential is ever carried in source or configuration files.
+ * <p><b>Defaults.</b> {@code enabled} ({@code ADDRESS_VALIDATION_ENABLED}) defaults to
+ * {@code true} and {@code client} ({@code ADDRESS_VALIDATION_CLIENT}) to {@code stub};
+ * {@link Usps} lists the {@code usps.*} settings, their variables and defaults. The
+ * environment variables reach these properties through {@code ${ENV:default}} placeholders
+ * in customer-api's {@code application.yml}, whose defaults equal the ones declared here,
+ * so the module behaves the same without that file, as in its own tests. The user id and
+ * the password deliberately have no default: no credential is ever carried in source or
+ * configuration files.
  *
- * <h2>Registration</h2>
- * The record carries no stereotype annotation and is not found by any properties
- * scan. {@link AddressValidationAutoConfiguration} is its only registrar, through
- * {@code @EnableConfigurationProperties(AddressValidationProperties.class)}, so it is
- * bound and validated only in a context that contains the auto-configuration.
+ * <p><b>Registration.</b> {@link AddressValidationAutoConfiguration} is the only registrar,
+ * so the record is bound and validated only in a context that contains it.
  *
  * <h2>Validation (fail fast)</h2>
- * Binding uses this record's {@link ConstructorBinding} constructor, which reads
- * {@code client} as text, and the canonical constructors, whose compact forms validate
- * the values. Any exception they throw aborts application startup:
+ * The {@link ConstructorBinding} constructor and the compact canonical constructors
+ * validate the values, and any exception they throw aborts application startup:
  * <ul>
- *   <li>a {@code client} value other than {@code stub} or {@code usps} in any letter
- *       case, exactly as written, raises {@link IllegalArgumentException}. This covers
- *       an unknown value such as {@code foo}, an empty value, and a value with
- *       surrounding blanks or separators such as {@code " stub "} or {@code us-ps}:
- *       {@code @ConditionalOnProperty} compares the same text ignoring letter case only,
- *       so such a value would otherwise select no client bean;</li>
+ *   <li>a {@code client} text the {@linkplain Client selector rule} rejects, an empty one
+ *       included, raises {@link IllegalArgumentException};</li>
  *   <li>{@code client=usps} with a blank {@code usps.user-id} raises
  *       {@link IllegalStateException};</li>
  *   <li>a timeout that is zero or negative, a base URL that is not an absolute
@@ -64,22 +42,14 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * </ul>
  * Bean Validation is not used, because this library keeps no validator on its classpath.
  *
- * <h2>Before setting {@code client=usps}</h2>
- * USPS retired the Web Tools APIs, including the {@code AddressValidateRequest}
- * endpoint at {@value #DEFAULT_BASE_URL}, on 2026-01-25. The real client implements
- * the XML contract the original service documented and keeps the base URL
- * configurable, but it cannot be assumed to reach a live endpoint. Complete the
- * pre-enablement checks in {@code customer-master/docs/developer-guide.md} (endpoint,
- * registration and licensing, contract differences, credential exposure in the query
- * string, the success test) before switching the client from the default stub.
+ * <p>USPS retired the Web Tools endpoint at {@value #DEFAULT_BASE_URL} on 2026-01-25.
+ * Complete the pre-enablement checks in {@code customer-master/docs/developer-guide.md}
+ * before setting {@code client=usps}.
  *
- * @param enabled whether customer-api standardizes addresses during review. When
- *                {@code false}, customer-api skips standardization entirely and the
- *                maintenance flow is exactly the field-rule flow without address
- *                standardization; the client bean is still registered.
- * @param client  which {@link AddressValidationClient} implementation is registered;
- *                bound from {@code stub} or {@code usps} in any letter case
- *                ({@code stub}, {@code STUB}, {@code usps}), exactly as written
+ * @param enabled whether customer-api standardizes addresses during review; when
+ *                {@code false} it skips standardization and the client bean is still
+ *                registered
+ * @param client  which {@link AddressValidationClient} implementation is registered
  * @param usps    settings of the USPS Web Tools client; always present, populated
  *                with its defaults when no {@code usps.*} property is set
  */
@@ -132,17 +102,13 @@ public record AddressValidationProperties(
 
     /**
      * Binds the settings from configuration; Spring Boot uses this constructor, not the
-     * canonical one. {@code client} arrives as the configured text and is accepted only
-     * when it equals {@code stub} or {@code usps} ignoring letter case, exactly as
-     * written: the comparison {@link AddressValidationAutoConfiguration}'s
-     * {@code @ConditionalOnProperty} conditions apply to the same text. A value that
-     * binds therefore always selects exactly one client bean, and any other value fails
-     * startup instead of leaving the context without a client. The parsed values then
-     * pass the checks of the canonical constructor.
+     * canonical one. {@code client} arrives as the configured text and is parsed by the
+     * {@linkplain Client selector rule}; the parsed values then pass the checks of the
+     * canonical constructor.
      *
      * @param enabled whether customer-api standardizes addresses during review
-     * @param client  {@code stub} or {@code usps} in any letter case, with no surrounding
-     *                blanks or separators; {@code stub} when the property is absent
+     * @param client  the selector text the {@linkplain Client selector rule} accepts;
+     *                {@code stub} when the property is absent
      * @param usps    settings of the USPS Web Tools client; populated with its defaults
      *                when no {@code usps.*} property is set
      * @throws IllegalArgumentException when {@code client} is any other text, including
@@ -182,13 +148,17 @@ public record AddressValidationProperties(
 
     /**
      * The {@link AddressValidationClient} implementations the auto-configuration can
-     * register. The binding constructor selects a value only when the configured text
-     * equals {@code stub} or {@code usps} ignoring letter case, exactly as written (no
-     * surrounding blanks, no separators, not empty), which is the comparison
-     * {@code @ConditionalOnProperty} applies, so a value that binds always selects
-     * exactly one bean. Spring Boot's lenient enum conversion is deliberately not used:
-     * it trims the text and drops separators, so it would accept values such as
-     * {@code " stub "} or {@code us-ps} that select no bean.
+     * register.
+     *
+     * <p><b>Selector rule.</b> The binding constructor accepts the configured text only
+     * when it equals {@code stub} or {@code usps} ignoring letter case, exactly as written:
+     * no surrounding blanks, no separators, not empty. That is the comparison
+     * {@code @ConditionalOnProperty(havingValue = ...)} applies to the same text, so a
+     * value that binds always selects exactly one client bean, and any other value fails
+     * startup with a message that names the property, never the value. Spring Boot's
+     * lenient enum conversion is deliberately not used: it trims the text and drops
+     * separators, so it would accept values such as {@code " stub "} or {@code us-ps} that
+     * select no bean.
      */
     public enum Client {
 

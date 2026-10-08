@@ -1,77 +1,24 @@
 /**
- * The one fetch wrapper between the SPA and the Customer Master API.
+ * The one fetch wrapper between the SPA and the Customer Master API. Every
+ * typed call in `./customers.ts`, `./states.ts`, `./session.ts` and
+ * `./messages.ts` goes through {@link request}; `auth/AuthProvider.tsx` stores
+ * the signed-in credentials with {@link setCredentials} and registers its
+ * sign-out with {@link onUnauthorized}.
  *
- * Part of the shared component "Error model (client transport)", with
- * `./problem.ts`. Every typed call in `./customers.ts`, `./states.ts`,
- * `./session.ts` and `./messages.ts` goes through {@link request}, and
- * `auth/AuthProvider.tsx` stores the signed-in credentials here with
- * {@link setCredentials} and registers its sign-out with
- * {@link onUnauthorized}.
- *
- * What it replaces. On the 5250, PMTCUSTR called MTNCUSTR and PMTSTATER as
- * programs and passed the customer id, the function code and the state as
- * parameters (5250_Subfile/PMTCUSTR.SQLRPGLE:83-90); a failure came back as a
- * message on the program message queue (SndMsgPgmQ, Service_Pgms/SRV_MSG.RPGLE)
- * or as SQLProblem's escape message (Service_Pgms/SRV_SQL.SQLRPGLE). Here each
- * call is one stateless HTTP request, and each failure is an RFC 9457
- * problem+json body parsed into an {@link ApiError}.
- *
- * What this module does, and nothing else:
- * - Sends `X-Requested-With: XMLHttpRequest` on every call, so the API answers
- *   a 401 without `WWW-Authenticate` and the browser never opens its native
+ * - Every call sends `X-Requested-With: XMLHttpRequest`, so the API answers a
+ *   401 without `WWW-Authenticate` and the browser never opens its native
  *   sign-in prompt, plus `Authorization: Basic …` whenever credentials are
- *   known. It never adds a role, a mode, an id or a change stamp to a request.
- * - Parses every non-2xx response into `ApiError {status, problem}`; a body
- *   that is not usable problem+json (an HTML page from a proxy, plain text,
- *   broken JSON) becomes the synthetic DEM9999 problem, and a call for which
- *   no HTTP response arrived becomes `ApiError(0, DEM9999)`. Status 0 leaves
- *   the outcome unknown: the server may have received, and a write may have
- *   committed, the request whose answer was lost. Nothing is retried.
- * - On 401, calls the handler `AuthProvider` registered, telling it whether
- *   the refused call carried its own per-call credentials (a sign-in trial)
- *   or the stored ones ({@link UnauthorizedInfo}), then rejects.
- * - Aborts a read on request: a GET whose `RequestOptions.signal` abandons
- *   it before its answer arrived, or while a 2xx body is read, rejects with
- *   the signal's reason, not an `ApiError`, so an abandoned read is never
- *   presented. A non-2xx answer that did arrive always rejects with its
- *   `ApiError`, even when the signal aborts while its body is read or inside
- *   the 401 handler. The browser stops waiting and frees the connection,
- *   which does not mean the server stopped: it may still finish the request.
- *   Writes are never cancelled; a POST or PUT carrying a signal is refused
- *   before anything is sent.
- *
- * Constraints:
- * - Credentials live in memory only, in this module's variable, never in Web
- *   Storage, IndexedDB or any other browser store, so a reload signs the user
- *   out and nothing outlives the tab. The API sets no session and the server
- *   keeps no per-caller state between requests.
+ *   known. No role, mode, id or change stamp is ever added.
+ * - Credentials live in this module's memory only, never in Web Storage,
+ *   IndexedDB or any other browser store, so a reload signs the user out.
  * - Paths are relative and start with `/api/`, so every call stays on the
- *   page's own origin: nginx forwards `/api` to the `app` service in Compose
- *   and the Vite proxy does so in development. There is no absolute host, no
- *   CORS and no `credentials: 'include'`.
- * - Layer rule: nothing is imported from `components/`, `errors/`,
- *   `features/` or `auth/`. Nothing here renders, touches the DOM, logs or
- *   keeps form or dialog state; the calling feature passes a rejection to
- *   `errors/useProblemPresenter.ts`, which shows it.
- *
- * @example
- * ```ts
- * // A typed call in ./customers.ts:
- * const page = await request<SearchResponse>('/api/customers', {
- *   query: { name: 'NIBH', includeInactive: false, size: 12, cursor: undefined },
- * });
- *
- * // Sign-in, in AuthProvider: try the typed credentials before storing them.
- * const session = await request<SessionResponse>('/api/session', { credentials });
- * setCredentials(credentials);
- * ```
+ *   page's own origin: no absolute host, no CORS, no `credentials: 'include'`.
+ * - Nothing here renders, touches the DOM, logs or keeps form or dialog
+ *   state, and nothing is imported from `components/`, `errors/`, `features/`
+ *   or `auth/`; the calling feature presents a rejection.
  */
 import { ApiError, syntheticProblem } from './problem';
 import type { FieldError, Problem } from './problem';
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /** HTTP Basic credentials as the user typed them on the sign-in page. */
 export type Credentials = { username: string; password: string };
@@ -90,14 +37,11 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT';
  *   `active` on an add stays absent and the server defaults it to `Y`.
  * - `credentials`: used for this call instead of the stored ones, as the
  *   sign-in page does to try credentials before they are stored.
- * - `signal`: aborts a read whose result nobody needs any more, such as a
+ * - `signal`: abandons a read whose result nobody needs any more, such as a
  *   query that a newer search replaced, a reset cleared or an unmounted
- *   owner left behind. The browser stops waiting and frees the connection;
- *   the server may still finish the request. Only a read abandoned before
- *   its answer arrived, or while a 2xx body is read, rejects with the
- *   signal's reason; a non-2xx answer that arrived keeps its `ApiError`.
- *   GET only: a write is never cancelled, so a `signal` with `POST` or `PUT`
- *   is refused.
+ *   owner left behind; {@link request} says how such a call rejects. GET
+ *   only: a write is never cancelled, so a `signal` with `POST` or `PUT` is
+ *   refused.
  */
 export type RequestOptions = {
   method?: HttpMethod;
@@ -114,26 +58,34 @@ export type RequestOptions = {
  *   `RequestOptions.credentials`, as a sign-in trial does, so the 401 refused
  *   only those candidate credentials and nothing stored; `false` when it
  *   carried the stored credentials or none at all.
+ * - `superseded`: `true` when {@link setCredentials} ran after the call was
+ *   sent, so the 401 refused an identity, or the absence of one, that is no
+ *   longer the stored state, and says nothing about the current credentials.
  */
-export type UnauthorizedInfo = { perCallCredentials: boolean };
-
-// ---------------------------------------------------------------------------
-// Module state: the in-memory credentials and the 401 hook
-// ---------------------------------------------------------------------------
+export type UnauthorizedInfo = { perCallCredentials: boolean; superseded: boolean };
 
 /** The signed-in user's credentials; `null` before sign-in and after sign-out. */
 let stored: Credentials | null = null;
+
+/**
+ * Counts every {@link setCredentials} call. A call records it when it reads
+ * the stored credentials, so a 401 can tell whether it answers the stored
+ * state still in place or one that a sign-out or a new sign-in replaced.
+ */
+let credentialEpoch = 0;
 
 /** The handler `AuthProvider` registered for 401 responses, if any. */
 let unauthorizedHandler: ((info: UnauthorizedInfo) => void) | null = null;
 
 /**
  * Stores the credentials every later call sends, or forgets them with `null`
- * (sign-out). They are kept in this module's memory only. A copy is kept, so
- * a caller that later changes its object does not change what is sent.
+ * (sign-out). A copy is kept, so a caller that later changes its object does
+ * not change what is sent. Every call, storing or clearing, supersedes the
+ * calls already sent, whose 401 then reports `superseded`.
  */
 export function setCredentials(c: Credentials | null): void {
   stored = c === null ? null : { username: c.username, password: c.password };
+  credentialEpoch += 1;
 }
 
 /**
@@ -141,9 +93,10 @@ export function setCredentials(c: Credentials | null): void {
  * rejects; `AuthProvider` clears the credentials and routes to `/sign-in`
  * there. The last registration wins.
  *
- * The handler receives an {@link UnauthorizedInfo}: `perCallCredentials` is
- * `true` for a refused sign-in trial, which refused nothing stored, so the
- * handler can leave the signed-in session and the stored credentials alone.
+ * The handler receives an {@link UnauthorizedInfo}. When either of its
+ * members is `true`, the 401 refused a sign-in trial or an earlier identity,
+ * never the credentials stored now, so the handler can leave the signed-in
+ * session and the stored credentials alone.
  *
  * The returned function unregisters `handler`, but only while it is still the
  * registered one, so a stale unregister (an unmounted provider, or React
@@ -160,25 +113,13 @@ export function onUnauthorized(handler: (info: UnauthorizedInfo) => void): () =>
   };
 }
 
-// ---------------------------------------------------------------------------
-// Wire constants
-// ---------------------------------------------------------------------------
-
-/** Every API path starts with this prefix; it keeps each call on the page's origin. */
 const API_PREFIX = '/api/';
 
-/** The media type of every API error body (RFC 9457). */
 const PROBLEM_JSON = 'application/problem+json';
 
-/** Success bodies are JSON and error bodies problem+json. */
 const ACCEPT = `application/json, ${PROBLEM_JSON}`;
 
-/** The problem `type` URN prefix the API uses, completed with the problem's code. */
 const PROBLEM_TYPE_PREFIX = 'urn:customer-master:problem:';
-
-// ---------------------------------------------------------------------------
-// The request
-// ---------------------------------------------------------------------------
 
 /**
  * Sends one API call and resolves with its parsed JSON body.
@@ -187,7 +128,8 @@ const PROBLEM_TYPE_PREFIX = 'urn:customer-master:problem:';
  * - Rejects with `ApiError(status, problem)` for every non-2xx response, with
  *   the problem+json body or the synthetic DEM9999 one; on 401 the
  *   {@link onUnauthorized} handler runs first, exactly once, with
- *   `perCallCredentials` telling whether `options.credentials` was given.
+ *   `perCallCredentials` telling whether `options.credentials` was given and
+ *   `superseded` whether {@link setCredentials} ran since the call was sent.
  * - Rejects with `ApiError(0, DEM9999)` when no HTTP response arrives
  *   (offline, DNS, a refused or reset connection, a response lost after the
  *   server answered): whether the server received or executed the request is
@@ -201,7 +143,9 @@ const PROBLEM_TYPE_PREFIX = 'urn:customer-master:problem:';
  *   so no presenter shows it. A non-2xx answer that arrived always rejects
  *   with its `ApiError`, even when the signal aborts while its body is read
  *   (the synthetic DEM9999 then, as the body is lost) or inside the 401
- *   handler. The 401 handler runs only when a 401 answer had arrived.
+ *   handler. The 401 handler runs only when a 401 answer had arrived. An
+ *   abort frees the browser's connection; the server may still finish the
+ *   request.
  *
  * `T` is the caller's declared response type, taken from the generated
  * `./schema`; the body is not validated against it.
@@ -234,6 +178,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   // The public `GET /api/messages` is fetched before sign-in, so with no
   // credentials at all the header is left out rather than sent empty.
   const credentials = options.credentials ?? stored;
+  const dispatchEpoch = credentialEpoch;
   if (credentials !== null) {
     headers.Authorization = `Basic ${basicToken(credentials)}`;
   }
@@ -255,13 +200,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       // ApiError, so nothing is presented and nobody is signed out.
       throw signal.reason;
     }
-    // The exchange failed before a usable response or status arrived:
-    // offline, DNS, a refused or reset connection, or a response lost after
-    // the server answered. Whether the server received or executed the
-    // request is unknown, and a POST or PUT may have committed, so no caller
-    // may read status 0 as "nothing was written"; nothing here retries.
-    // Without a status no authentication decision was received either, so
-    // the 401 handler does not run.
+    // No status arrived, so the server's outcome is unknown (a POST or PUT
+    // may have committed) and no authentication decision was received: the
+    // 401 handler does not run, and nothing here retries.
     throw new ApiError(0, syntheticProblem(0));
   }
 
@@ -278,14 +219,13 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   if (response.status === 401) {
     // The server's authentication decision did arrive, so it stands even
     // when the caller abandoned the call while its body was being read.
-    notifyUnauthorized({ perCallCredentials: options.credentials !== undefined });
+    notifyUnauthorized({
+      perCallCredentials: options.credentials !== undefined,
+      superseded: dispatchEpoch !== credentialEpoch,
+    });
   }
   throw error;
 }
-
-// ---------------------------------------------------------------------------
-// Request helpers
-// ---------------------------------------------------------------------------
 
 /**
  * `path` with the defined `query` values appended in insertion order, encoded
@@ -322,7 +262,6 @@ function basicToken({ username, password }: Credentials): string {
   return btoa(binary);
 }
 
-/** Calls the registered 401 handler, if any, once, passing `info` on. */
 function notifyUnauthorized(info: UnauthorizedInfo): void {
   const handler = unauthorizedHandler;
   if (handler === null) {
@@ -335,10 +274,6 @@ function notifyUnauthorized(info: UnauthorizedInfo): void {
     // one rejection every feature presents, whatever the sign-out hook does.
   }
 }
-
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
 
 /**
  * The JSON body of a 2xx response, or `undefined` when it is empty. A body

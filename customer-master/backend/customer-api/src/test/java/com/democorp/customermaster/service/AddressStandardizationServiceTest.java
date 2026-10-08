@@ -18,6 +18,7 @@ import com.democorp.customermaster.address.AddressValidationResult;
 import com.democorp.customermaster.address.StubAddressValidationClient;
 import com.democorp.customermaster.address.UspsWebToolsAddressValidationClient;
 import com.democorp.customermaster.domain.Address;
+import com.democorp.customermaster.messages.MessageCatalog;
 import com.democorp.customermaster.service.exception.CustomerValidationException;
 import com.democorp.customermaster.service.exception.CustomerValidationException.FieldError;
 import com.sun.net.httpserver.HttpExchange;
@@ -27,8 +28,10 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -104,18 +107,13 @@ final class AddressStandardizationServiceTest {
         stateService = mock(StateService.class);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Fixture helpers
-    // ---------------------------------------------------------------------------------------------
-
-    /** Wraps one client in the {@link ObjectProvider} the service resolves it through. */
     private static ObjectProvider<AddressValidationClient> provider(AddressValidationClient c) {
         return new StaticListableBeanFactory(Map.of("c", c)).getBeanProvider(AddressValidationClient.class);
     }
 
     /**
-     * Builds the module settings. The password is always empty: no credential, real or fake, is needed
-     * by any case here.
+     * Builds the module settings with an empty password: the cases built on it need no password. The
+     * DEM9898 redaction case builds its own settings with fictitious credentials.
      */
     private static AddressValidationProperties props(
             boolean enabled, Client clientType, String baseUrl, String userId) {
@@ -128,18 +126,15 @@ final class AddressStandardizationServiceTest {
         return props(true, Client.STUB, UNUSED_BASE_URL, "");
     }
 
-    /** The service under test, built with its real constructor. */
     private AddressStandardizationService service(
             AddressValidationClient c, AddressValidationProperties properties) {
         return new AddressStandardizationService(properties, provider(c), stateService);
     }
 
-    /** The service over the mocked client with standardization enabled. */
     private AddressStandardizationService mockedService() {
         return service(client, enabledStubProps());
     }
 
-    /** Runs the mocked service once and returns the request the client received. */
     private AddressValidationRequest capturedRequestFor(Address in) {
         mockedService().standardize(in);
         ArgumentCaptor<AddressValidationRequest> request =
@@ -155,10 +150,6 @@ final class AddressStandardizationServiceTest {
         assertThat(STREET_38_FIRST_30).hasSize(30);
         assertThat(STREET_38).startsWith(STREET_38_FIRST_30);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // Success: the returned values overwrite the address
-    // ---------------------------------------------------------------------------------------------
 
     @Nested
     @DisplayName("on success (a City was returned)")
@@ -226,10 +217,6 @@ final class AddressStandardizationServiceTest {
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Request: what Edit_Address puts into AdrIn
-    // ---------------------------------------------------------------------------------------------
-
     @Nested
     @DisplayName("the request sent to the client")
     final class Request {
@@ -284,10 +271,6 @@ final class AddressStandardizationServiceTest {
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Failures
-    // ---------------------------------------------------------------------------------------------
-
     @Nested
     @DisplayName("on failure")
     final class OnFailure {
@@ -312,6 +295,107 @@ final class AddressStandardizationServiceTest {
                     });
             // The state of a rejected address is never looked up.
             verifyNoInteractions(stateService);
+        }
+
+        @Test
+        @DisplayName("DEM9898 redacts the request echoes and credentials of the description; the result stays raw")
+        void addressErrorRedactsRequestEchoesAndCredentials() {
+            // Fictitious credentials. The password's '&', '"' and apostrophe make each form below distinct.
+            String userId = "TESTUSER7";
+            String password = "pw&\"q'1";
+            String baseUrl = "https://gw.example.test/ShippingAPI.dll";
+            // The request-wire form, as the request document's PASSWORD attribute carries it: '&' and '"'
+            // escaped, the apostrophe left literal. The full-entity form also escapes the apostrophe.
+            String wirePassword = password.replace("&", "&amp;").replace("\"", "&quot;");
+            String entityPassword = wirePassword.replace("'", "&apos;");
+            List<String> credentialForms = List.of(
+                    userId, password, wirePassword, entityPassword,
+                    urlEncoded(password), urlEncoded(wirePassword), urlEncoded(entityPassword));
+            String document = "<AddressValidateRequest USERID=\"" + userId + "\" PASSWORD=\"" + wirePassword
+                    + "\"><Address2>1 NOWHERE LANE</Address2></AddressValidateRequest>";
+            String description = "Rejected " + String.join(" ", credentialForms)
+                    + " in " + baseUrl + "?API=Verify&XML=" + urlEncoded(document)
+                    + " and " + document + ".";
+            String expected = "Rejected **** **** **** **** **** **** **** in [request URL]?[request query]"
+                    + " and [request document].";
+            AddressValidationResult rejected = AddressValidationResult.error(
+                    "", "", "", "", "", "", -2147219401, "clsAMS", description);
+            when(client.validate(any())).thenReturn(rejected);
+            AddressValidationProperties properties = new AddressValidationProperties(
+                    true, Client.STUB, new Usps(baseUrl, userId, password, TIMEOUT, TIMEOUT));
+            AddressStandardizationService service = service(client, properties);
+            Address in = new Address("1 NOWHERE LANE", "OLD LYME", "CT", "06371");
+            MessageCatalog catalog = new MessageCatalog();
+
+            assertThatThrownBy(() -> service.standardize(in))
+                    .isInstanceOfSatisfying(CustomerValidationException.class, e -> {
+                        assertThat(e.code()).isEqualTo("DEM9898");
+                        assertThat(e.rule()).isEqualTo(CustomerValidationException.ADDRESS_RULE);
+                        assertThat(e.args()).containsExactly(expected);
+                        assertThat(e.errors()).containsExactly(
+                                new FieldError("addr", "DEM9898"),
+                                new FieldError("city", "DEM9898"),
+                                new FieldError("state", "DEM9898"),
+                                new FieldError("zip", "DEM9898"));
+                        // Rendered as the problem's detail and as each field message are.
+                        Object[] args = e.args().toArray();
+                        List<String> messages = new ArrayList<>();
+                        messages.add(catalog.text(e.code(), args));
+                        e.errors().forEach(error -> messages.add(catalog.text(error.code(), args)));
+                        assertThat(messages).hasSize(5).containsOnly("USPS: " + expected);
+                        List<String> texts = new ArrayList<>(e.args());
+                        texts.addAll(messages);
+                        for (String text : texts) {
+                            assertThat(text)
+                                    .doesNotContain(credentialForms.toArray(String[]::new))
+                                    .doesNotContain(baseUrl, "API=Verify", "AddressValidateRequest", "NOWHERE");
+                        }
+                    });
+            assertThat(rejected.errorDescription()).isEqualTo(description);
+        }
+
+        @Test
+        @DisplayName("DEM9898 masks a credential in any URL encoding: a space as %20 or +, hex digits in either case")
+        void addressErrorMasksEveryUrlEncodingOfACredential() {
+            // Fictitious password; its request-wire form is "p a&amp;b".
+            String password = "p a&b";
+            List<String> encodedForms = List.of(
+                    "p%20a%26b", "p+a%26amp%3bb", "p+a%26amp%3Bb", "p%20a%26amp%3bb");
+            List<String> descriptions = List.of(
+                    "Rejected p%20a%26b and p+a%26amp%3bb",
+                    "Rejected p+a%26amp%3Bb and p%20a%26amp%3bb");
+            String expected = "Rejected **** and ****";
+            AddressValidationProperties properties = new AddressValidationProperties(
+                    true, Client.STUB, new Usps(UNUSED_BASE_URL, "TESTUSER8", password, TIMEOUT, TIMEOUT));
+            AddressStandardizationService service = service(client, properties);
+            Address in = new Address("1 NOWHERE LANE", "OLD LYME", "CT", "06371");
+            MessageCatalog catalog = new MessageCatalog();
+
+            for (String description : descriptions) {
+                AddressValidationResult rejected = AddressValidationResult.error(
+                        "", "", "", "", "", "", -2147219401, "clsAMS", description);
+                when(client.validate(any())).thenReturn(rejected);
+
+                assertThatThrownBy(() -> service.standardize(in))
+                        .as(description)
+                        .isInstanceOfSatisfying(CustomerValidationException.class, e -> {
+                            assertThat(e.code()).isEqualTo("DEM9898");
+                            assertThat(e.args()).containsExactly(expected);
+                            Object[] args = e.args().toArray();
+                            List<String> messages = new ArrayList<>();
+                            messages.add(catalog.text(e.code(), args));
+                            e.errors().forEach(error -> messages.add(catalog.text(error.code(), args)));
+                            assertThat(messages).hasSize(5).containsOnly("USPS: " + expected);
+                            List<String> texts = new ArrayList<>(e.args());
+                            texts.addAll(messages);
+                            for (String text : texts) {
+                                assertThat(text)
+                                        .doesNotContain(encodedForms.toArray(String[]::new))
+                                        .doesNotContain(password, "%26");
+                            }
+                        });
+                assertThat(rejected.errorDescription()).isEqualTo(description);
+            }
         }
 
         @Test
@@ -346,11 +430,11 @@ final class AddressStandardizationServiceTest {
                     .isNotInstanceOf(CustomerValidationException.class);
             verifyNoInteractions(stateService);
         }
-    }
 
-    // ---------------------------------------------------------------------------------------------
-    // Disabled
-    // ---------------------------------------------------------------------------------------------
+        private static String urlEncoded(String text) {
+            return URLEncoder.encode(text, StandardCharsets.UTF_8);
+        }
+    }
 
     @Test
     @DisplayName("with standardization disabled the input is returned unchanged and nothing is called")
@@ -365,15 +449,10 @@ final class AddressStandardizationServiceTest {
         verifyNoInteractions(client, stateService);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // A 38-character street through the real clients
-    // ---------------------------------------------------------------------------------------------
-
     @Nested
     @DisplayName("a 38-character street through the real clients")
     final class ThirtyEightCharacterStreet {
 
-        /** Path of the Web Tools endpoint the loopback fake serves. */
         private static final String ENDPOINT_PATH = "/ShippingAPI.dll";
 
         /** Extracts the street line from the decoded request document. */
@@ -466,8 +545,8 @@ final class AddressStandardizationServiceTest {
 
         /**
          * Records the {@code API} value and the decoded {@code Address2} of one Web Tools request. The
-         * query is {@code API=Verify&XML=<url-encoded document>}; the document itself holds no raw
-         * {@code &}, because the encoder escapes it.
+         * query is {@code API=Verify&XML=<url-encoded document>}. The URL-encoded {@code XML} query
+         * value contains no raw {@code '&'}, so splitting the raw query cannot split the document.
          */
         private static void recordRequest(
                 HttpExchange exchange, AtomicReference<String> api, AtomicReference<String> address2) {
@@ -490,7 +569,6 @@ final class AddressStandardizationServiceTest {
             }
         }
 
-        /** Sends {@code body} as {@code text/xml} with {@code status} and closes the exchange. */
         private static void reply(HttpExchange exchange, int status, String body) throws IOException {
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/xml; charset=UTF-8");
@@ -519,7 +597,6 @@ final class AddressStandardizationServiceTest {
                     "stub/usps-stub-fixtures.json has no fixture with input.address2 \"" + address2 + "\"");
         }
 
-        /** Returns a string member of a fixture object, failing clearly when it is absent. */
         private static String text(Map<?, ?> object, String member) {
             Object value = object.get(member);
             if (!(value instanceof String s)) {

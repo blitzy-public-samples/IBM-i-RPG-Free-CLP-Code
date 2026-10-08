@@ -1,71 +1,25 @@
 /**
- * SignInPage: the sign-in screen, at route `/sign-in`.
+ * The sign-in screen at `/sign-in`. The user types a username and password,
+ * `AuthProvider.signIn` checks them against `GET /api/session`, and the roles
+ * that call reports decide the mode; this page never sends a role or a mode.
  *
- * Why it exists. The IBM i application has no sign-on of its own: PMTCUSTR's
- * first parameter (`pParmType` I/M/S) asserted the mode, and the program
- * notes that "In a production environment, this would be called from a
- * tested menu or some program that enforced security"
- * [5250_Subfile/PMTCUSTR.SQLRPGLE:76-79,228-231]. The readme gives the general
- * user population Inquiry and Sales Maintenance [5250_Subfile/README.md:33-40].
- * The target enforces those roles in the API, which needs an identity: the
- * user types a username and password here, `AuthProvider.signIn` checks them
- * with HTTP Basic against `GET /api/session`, and the roles that call reports
- * decide Inquiry or Maintenance mode. This page never sends a role or a mode.
- *
- * Flow:
- * - **Redirect target.** `RequireRole` sends a signed-out visitor here with
- *   `state.from`, the path they asked for. A successful sign-in returns there
- *   ({@link readFrom}); with no usable `from` it goes to `/`, the main menu.
- * - **Already signed in.** The page renders `<Navigate>` to that same target,
- *   so the render after the session update and the handler's own `navigate`
- *   can never disagree about where the user lands.
- * - **Submit.** Enter in either field submits the form natively (no keyboard
- *   scope is registered, so `KeyScopeProvider` leaves Enter alone), as does
- *   the "Sign in" button. A submit while this form's attempt is in flight is
- *   ignored. Earlier messages are cleared first, so a repeated failure shows
- *   exactly one alert. The page navigates to `from` only when `signIn`
- *   reports that this attempt stored its session.
- * - **Failure.** Every rejection (401 APP0401 "Sign in required." for bad
- *   credentials, a synthetic DEM9999 when no HTTP response arrived) of an
- *   attempt this page still owns goes to `useProblemPresenter().present(error)`
- *   unchanged, which publishes the problem's `detail` as the one alert in
- *   `ToastRegion`. This page holds no message text and inspects no status
- *   code. The password is cleared and receives focus, so the user can retype
- *   it straight away.
- * - **Ownership.** Each submit is one attempt with its own `AbortController`.
- *   Leaving the page aborts it, so an abandoned attempt never navigates,
- *   presents or stores anything, and `AuthProvider` drops its answer.
- *
- * Constraints (identity and trust, error model):
- * - Credentials stay in memory: `AuthProvider` hands them to `api/client.ts`
- *   only after the server accepted them. Nothing here touches Web Storage,
- *   cookies or IndexedDB.
- * - Usernames are case-sensitive, so the "User" field is neither uppercased
- *   (no `uppercase` prop, unlike every 5250-derived field) nor trimmed: the
- *   value is sent exactly as typed.
- * - The e2e sign-in fixture finds the inputs by the labels "User" and
- *   "Password" and the button by the name "Sign in". No other label on this
- *   page contains "User" or "Password", and no other button is named
- *   "Sign in"; `ScreenHeader` gets no `user`, so its "Signed in as" line is
- *   not rendered either.
- * - Layer rule: imports `react`, `react-router-dom`, `./AuthProvider`,
- *   `../components/*` and `../errors/useProblemPresenter` only; never
- *   `features/`.
- *
- * Presentation comes from the existing `.sign-in`, `.screen-header*` and
- * `.form-field*` classes of `src/styles/global.css`; the base `button` and
- * `:focus-visible` rules carry the WCAG 2.2 AA token palette. `ToastRegion`
- * is rendered once by `ToastProvider`, never here.
- *
- * Test guidance: render under `QueryClientProvider`, `MessageCatalogProvider`,
- * `ToastProvider`, a router and `AuthProvider` (the order `src/App.tsx`
- * uses), and read the failure through `within(screen.getByRole('alert'))`.
- *
- * @example
- * ```tsx
- * // src/routes.tsx: the one unguarded route.
- * <Route path="/sign-in" element={<SignInPage />} />
- * ```
+ * - A successful sign-in returns to the path `RequireRole` passed as
+ *   `state.from` ({@link readFrom}), or to `/`. Once a session exists the
+ *   page renders `<Navigate>` to the same target, so the render after the
+ *   session update and the handler's own `navigate` never disagree.
+ * - Enter submits the form natively: the page registers no keyboard scope.
+ *   Each submit is one attempt with its own `AbortController`; a submit while
+ *   it is in flight is ignored, and leaving the page aborts it, so an
+ *   abandoned attempt never navigates, presents or stores anything.
+ * - A failure of an attempt the page still owns is presented unchanged as the
+ *   one alert (earlier messages are cleared first), and the password is
+ *   cleared and focused so the user can retype it.
+ * - The "User" field is neither uppercased (no `uppercase` prop, unlike every
+ *   5250-derived field) nor trimmed: the value is sent exactly as typed. The
+ *   server looks the name up case-insensitively and reports its configured
+ *   spelling, which the UI then shows.
+ * - The e2e sign-in fixture finds the fields by the labels "User" and
+ *   "Password" and the button by the name "Sign in", so each stays unique here.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
@@ -76,17 +30,10 @@ import { ScreenHeader } from '../components/ScreenHeader';
 import { useToasts } from '../components/ToastRegion';
 import { useProblemPresenter } from '../errors/useProblemPresenter';
 
-// ---------------------------------------------------------------------------
-// Module constants
-// ---------------------------------------------------------------------------
-
-/** Where a sign-in lands when no guarded path asked for it: the main menu. */
 const HOME_PATH = '/';
 
-/** This page's own route; never a redirect target, or sign-in would loop here. */
 const SIGN_IN_PATH = '/sign-in';
 
-/** `ScreenHeader` id prefix; the header emits `${id}-title` and `${id}-function`. */
 const HEADER_ID = 'sign-in';
 
 /**
@@ -96,9 +43,10 @@ const HEADER_ID = 'sign-in';
 const USERNAME_MAX_LENGTH = 18;
 
 /**
- * Longest accepted password. The server sets no length of its own (passwords
- * are BCrypt-encoded); 128 leaves room for generated passwords while still
- * bounding the `Authorization` header.
+ * Longest password this page accepts, in characters: this input's own bound,
+ * which keeps the `Authorization` header bounded, not the server's limit. The
+ * server validates configured passwords to at most 72 UTF-8 bytes, the most
+ * BCrypt encodes.
  */
 const PASSWORD_MAX_LENGTH = 128;
 
@@ -108,10 +56,6 @@ const PASSWORD_MAX_LENGTH = 128;
  * sign-in column, and the password still scrolls up to its maximum length.
  */
 const FIELD_SIZE = USERNAME_MAX_LENGTH;
-
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
 
 /**
  * The path a successful sign-in returns to, read from the navigation state
@@ -143,22 +87,8 @@ function readFrom(state: unknown): string {
   return route === SIGN_IN_PATH ? HOME_PATH : from;
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
-/**
- * The sign-in form: the screen header ("Customer Master" / "Sign On"), the
- * "User" and "Password" fields and the "Sign in" button. Renders a redirect
- * instead once a session exists.
- *
- * @throws Error (from `useAuth`, `useToasts` or `useProblemPresenter`) when
- *   rendered outside `AuthProvider`, `ToastProvider` or
- *   `MessageCatalogProvider`, and from the router hooks outside a router: a
- *   wiring mistake that must fail loudly
- */
+/** The sign-in form, or a redirect once a session exists. */
 export function SignInPage() {
-  // Every hook runs unconditionally, before the signed-in branch (rules of hooks).
   const { status, signIn } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -209,7 +139,6 @@ export function SignInPage() {
     clear();
     setSubmitting(true);
     try {
-      // Passed exactly as typed: usernames are case-sensitive and never trimmed.
       if (await signIn(username, password, attempt.signal)) {
         void navigate(from, { replace: true });
       }

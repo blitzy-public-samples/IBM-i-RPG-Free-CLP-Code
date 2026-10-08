@@ -99,7 +99,8 @@ type WorkerFixtures = { traceGuard: void };
 
 /**
  * Reads a credential variable, falling back to its documented demo default when the variable is
- * unset or blank. The value itself is used exactly as given: usernames are case-sensitive.
+ * unset or blank. The value itself is used exactly as given; the API matches a username in any case
+ * and reports its configured spelling.
  */
 function envOrDefault(name: string, fallback: string): string {
   const value = process.env[name];

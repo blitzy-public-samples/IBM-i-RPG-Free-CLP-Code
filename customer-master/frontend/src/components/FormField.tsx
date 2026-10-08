@@ -1,78 +1,47 @@
 /**
  * FormField: the labelled text input used by every form.
  *
- * It replaces the 5250 input fields of the screens this application ports:
- * the nine MTNCUSTD customer fields plus the output-only Customer Id
- * (`SD_ACTIVE` … `SD_CORPPH`), the PMTCUSTD search filters (`SC_NAME 13A`,
- * `SC_CITY 13A`, `SC_STATE 2A`) and the PMTSTATED "Name Contains" filter
- * (`SC_NAME 10A`). Each MTNCUSTD field carries three indicator-driven display
- * attributes, and each becomes component state instead of an indicator:
- *
- *   - `DSPATR(RI)`, reverse image on error (which also turns `HI` off, since
- *     HI and RI together mean non-display): the `error` prop. A non-empty
- *     error sets `aria-invalid="true"`, which `src/styles/global.css` keys the
- *     reverse-image style on, and renders the message under the input,
- *     referenced by `aria-describedby`, so colour is never the only signal.
- *   - `DSPATR(PC)`, cursor position: focus, which the caller moves through
- *     `inputRef` (the detail form focuses its first field in error). This
- *     component never sets `autoFocus` and never focuses itself; `Dialog`
- *     and the callers own focus.
- *   - `DSPATR(PR)`, protect in display mode (indicator 10): the `readOnly`
- *     prop, styled by `.read-only`. A read-only input stays focusable, so
- *     screen-reader users can still reach and read the value.
- *
- * Uppercase as typed (the `uppercase` prop). No input field of those screens
- * declares `CHECK(LC)`, so the workstation uppercased every keyed character.
- * The prop applies the shared, length-preserving rule of `./upperField` on
- * every change and restores the caret at the typed offset. Because
- * `upperField` never changes the length, `maxLength` keeps counting the typed
- * characters and the value submitted is exactly the value shown; the server
- * (`TextNormalizer`) then changes it only by trimming. `value.toUpperCase()`
- * on the whole string is never used: it expands `ß` to `SS` and changes the
- * length. Without the prop the value passes through untouched, as passwords
- * and the case-sensitive sign-in user name require.
- *
- * The component holds no message text: `label` and `error` arrive already
- * formatted from the caller (labels such as "Name starts with:" or
- * "Active (Y/N)"; errors from a problem's `errors[].message`).
- *
- * Layer rule: components import nothing from `api/`, `errors/` or
- * `features/`. This file imports React types and `./upperField` only.
- *
- * @example
- * // Detail form field, protected in display mode, reverse image on error
- * <FormField id="detail-name" label="Name" value={values.name}
- *            onChange={(v) => onChange('name', v)} maxLength={40} size={40}
- *            uppercase readOnly={readOnly} error={errors.name}
- *            inputRef={inputRef?.('name')} />
- *
- * @example
- * // Sign-in password: no uppercasing, browser autofill hint
- * <FormField id="sign-in-password" label="Password" type="password"
- *            value={password} onChange={setPassword} maxLength={128}
- *            autoComplete="current-password" />
+ * - **Error.** A non-empty `error` sets `aria-invalid="true"`, which the
+ *   stylesheet keys the reverse-image style on, and renders the message under
+ *   the input, referenced by `aria-describedby`, so colour is never the only
+ *   signal. `label` and `error` arrive already formatted; the component holds
+ *   no message text.
+ * - **Focus.** The caller moves focus through `inputRef`; this component never
+ *   sets `autoFocus` and never focuses itself. A `readOnly` input stays
+ *   focusable, so screen-reader users can still reach and read the value.
+ * - **Uppercase as typed.** With `uppercase`, the shared, length-preserving
+ *   rule of `./upperField` is applied on every change, or once an input
+ *   method's composition ends, and the caret is restored at the typed offset.
+ *   Because the length never changes, `maxLength` keeps counting the typed
+ *   characters and the value submitted is exactly the value shown.
+ *   `value.toUpperCase()` on the whole string is never used: it expands `ß` to
+ *   `SS` and changes the length. Without the prop the value passes through
+ *   untouched, as passwords and the sign-in user name require: the name is
+ *   sent exactly as typed, the server matches it in any case and reports its
+ *   configured spelling.
  */
 import type { ChangeEvent, CompositionEvent, Ref } from 'react';
 import { upperField } from './upperField';
 
-/** Props of {@link FormField}. */
 export type FormFieldProps = {
   /**
    * The input's id. The label's `htmlFor` points at it, and the error
-   * message, when present, gets the id `${id}-error`. Callers derive it from
-   * a `useId()` prefix so two screens mounted together never collide.
+   * message, when present, gets the id `${id}-error`. It must be unique among
+   * the controls mounted at the same time; a `useId()` prefix is one way to
+   * guarantee that.
    */
   id: string;
-  /** Visible label text, already formatted by the caller. */
   label: string;
-  /** The controlled value. */
   value: string;
   /**
    * Receives the new value on every change: uppercased by the shared rule
    * when `uppercase` is set, otherwise exactly as typed.
    */
   onChange: (value: string) => void;
-  /** The 5250 field length; the browser stops input beyond it. */
+  /**
+   * Longest value the input accepts (a ported field's 5250 length); the
+   * browser stops input beyond it.
+   */
   maxLength: number;
   /**
    * Field error message (the RI/PC equivalent). Non-empty sets
@@ -139,10 +108,6 @@ function applyUppercase(el: HTMLInputElement): string {
   return upper;
 }
 
-/**
- * The labelled input. Renders, in order, the label, the input and, only when
- * `error` is non-empty, the field message.
- */
 export function FormField({
   id,
   label,

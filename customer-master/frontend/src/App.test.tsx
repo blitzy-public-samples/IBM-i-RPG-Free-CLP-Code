@@ -27,6 +27,10 @@
  *   redirects to `/sign-in` again, and a request the application's own API
  *   client sends afterwards carries no `Authorization` header, so no later
  *   request carries the old credentials.
+ * - **An earlier identity's 401.** A request sent with `sales`'s stored
+ *   credentials and refused only after sign-out and sign-in as `inquiry`
+ *   rejects with its 401 but leaves the `inquiry` session, its menu and its
+ *   credentials in place; the same 401 for the signed-in user still signs out.
  * - **Wiring.** `App`'s one key listener and scope stack: F3 on the search
  *   page returns to the menu, and that one keypress runs no second handler
  *   (the menu's F3 would sign out). A command key clears the previous message
@@ -64,8 +68,9 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { http } from 'msw/http';
 import type * as ApiClient from './api/client';
-import { basicAuth, customers, messageText, users } from './test/handlers';
+import { basicAuth, customerDetail, customers, messageText, problem, users } from './test/handlers';
 import type { Role } from './test/handlers';
 import { server } from './test/server';
 
@@ -123,6 +128,23 @@ const SESSION_PATH = '/api/session';
 /** The search endpoint. */
 const SEARCH_PATH = '/api/customers';
 
+/** The detail fixture's own resource, read with GET and updated with PUT. */
+const CUSTOMER_PATH = `/api/customers/${customerDetail.custId}`;
+
+/** A PUT body the API binds: the nine `CustomerFields` of the detail fixture and the version it was read at. */
+const CUSTOMER_UPDATE = {
+  active: customerDetail.active,
+  name: customerDetail.name,
+  addr: customerDetail.addr,
+  city: customerDetail.city,
+  state: customerDetail.state,
+  zip: customerDetail.zip,
+  acctPhone: customerDetail.acctPhone,
+  acctMgr: customerDetail.acctMgr,
+  corpPhone: customerDetail.corpPhone,
+  version: customerDetail.version,
+};
+
 /** The function lines of the guarded screens' headers: the menu, both search modes and the host form. */
 const GUARDED_FUNCTION_LINES = ['Main Menu', 'Inquiry', 'Maintenance', 'Order entry'] as const;
 
@@ -149,12 +171,35 @@ function recordRequest({ request }: { request: Request }): void {
   });
 }
 
+/** A route that holds its next request until `release()`, and the client calls waiting on it. */
+interface HeldRoute {
+  /** Resolves once the request reached the route. */
+  readonly arrived: Promise<void>;
+  /** Lets the held request answer; calling it again changes nothing. */
+  release(): void;
+  /** Registers `call`, a client call waiting on this route, so its rejection is handled whenever it comes; returns it unchanged. */
+  holding<T>(call: Promise<T>): Promise<T>;
+  /** Resolves once every registered call has settled and the route has answered; never rejects. */
+  settled(): Promise<void>;
+}
+
+/** Every hold the current test made ({@link holdRoute}); `afterEach` releases and settles each. */
+const holds: HeldRoute[] = [];
+
 beforeEach(() => {
   requests.length = 0;
   server.events.on('request:start', recordRequest);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A hold a failed test left closed is released and awaited first, while the
+  // app and the test's handlers still exist, so neither the held request nor
+  // the call waiting on it outlives the test.
+  const pending = holds.splice(0);
+  for (const held of pending) {
+    held.release();
+  }
+  await Promise.all(pending.map((held) => held.settled()));
   server.events.removeListener('request:start', recordRequest);
   window.history.replaceState(null, '', '/');
 });
@@ -226,6 +271,64 @@ async function signIn(user: UserEvent, account: DemoUser): Promise<void> {
 /** The menu's navigation, once the menu is shown. */
 async function findMenu(): Promise<HTMLElement> {
   return screen.findByRole('navigation', { name: 'Main menu' });
+}
+
+/**
+ * Overrides the next `method path` request of the current test: it waits for
+ * `release()`, then is answered with `respond()`; later requests reach the
+ * default handlers again.
+ */
+function holdRoute(method: 'get' | 'put', path: string, respond: () => Response): HeldRoute {
+  let reached: () => void = () => undefined;
+  const arrived = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let open: () => void = () => undefined;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const answers: Array<Promise<void>> = [];
+  const calls: Array<Promise<unknown>> = [];
+  server.use(
+    http[method](
+      path,
+      async () => {
+        let answer: () => void = () => undefined;
+        answers.push(
+          new Promise<void>((resolve) => {
+            answer = resolve;
+          }),
+        );
+        reached();
+        try {
+          await opened;
+          return respond();
+        } finally {
+          answer();
+        }
+      },
+      { once: true },
+    ),
+  );
+  const route: HeldRoute = {
+    arrived,
+    release: () => open(),
+    holding: (call) => {
+      calls.push(Promise.allSettled([call]));
+      return call;
+    },
+    settled: async () => {
+      await Promise.all(calls);
+      await Promise.all(answers);
+    },
+  };
+  holds.push(route);
+  return route;
+}
+
+/** The 401 APP0401 problem+json the API answers credentials it does not accept with. */
+function refusedCustomer(): Response {
+  return problem(401, 'APP0401', { instance: CUSTOMER_PATH });
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +512,72 @@ describe('App', () => {
         expect(screen.getByRole('alert')).toBeEmptyDOMElement();
       },
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // A 401 that answers a request of an earlier identity
+  // -------------------------------------------------------------------------
+
+  describe('a stored-credential 401 after a change of identity', () => {
+    const salesAuthorization = basicAuth(MAINTENANCE_USER.username, MAINTENANCE_USER.password);
+    const inquiryAuthorization = basicAuth(INQUIRY_USER.username, INQUIRY_USER.password);
+
+    it.each([
+      ['GET', 'get', (client: typeof ApiClient) => client.request(CUSTOMER_PATH)],
+      ['PUT', 'put', (client: typeof ApiClient) => client.request(CUSTOMER_PATH, { method: 'PUT', body: CUSTOMER_UPDATE })],
+    ] as const)(
+      'a %s sent as sales and refused after sign-out and sign-in as inquiry rejects with its 401 and leaves the inquiry session in place',
+      async (method, route, send) => {
+        const { user, client } = await renderApp('/');
+        await expectSignInScreen();
+        await signIn(user, MAINTENANCE_USER);
+        await findMenu();
+        const held = holdRoute(route, CUSTOMER_PATH, refusedCustomer);
+        const call = held.holding(send(client));
+        await held.arrived;
+        expect(requests.filter((entry) => entry.path === CUSTOMER_PATH)).toEqual([
+          { method, path: CUSTOMER_PATH, authorization: salesAuthorization },
+        ]);
+
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+        await expectSignInScreen();
+        await signIn(user, INQUIRY_USER);
+        await findMenu();
+        held.release();
+
+        await expect(call).rejects.toMatchObject({ status: 401, problem: { code: 'APP0401' } });
+        expect(window.location.pathname).toBe('/');
+        const menu = await findMenu();
+        expect(within(menu).getByRole('link', { name: 'Work with customers (Inquiry)' })).toBeInTheDocument();
+        expect(screen.getByText(INQUIRY_USER.username)).toBeInTheDocument();
+        expect(screen.getByRole('alert')).toBeEmptyDOMElement();
+        await expect(client.request(SESSION_PATH)).resolves.toEqual({
+          username: INQUIRY_USER.username,
+          roles: INQUIRY_USER.roles,
+        });
+        expect(requests.at(-1)).toEqual({ method: 'GET', path: SESSION_PATH, authorization: inquiryAuthorization });
+        expect(window.location.pathname).toBe('/');
+      },
+    );
+
+    it('the same 401 for the signed-in user still signs out to /sign-in', async () => {
+      const { user, client } = await renderApp('/');
+      await expectSignInScreen();
+      await signIn(user, MAINTENANCE_USER);
+      await findMenu();
+      const held = holdRoute('get', CUSTOMER_PATH, refusedCustomer);
+      const call = held.holding(client.request(CUSTOMER_PATH));
+      await held.arrived;
+      held.release();
+
+      await expect(call).rejects.toMatchObject({ status: 401, problem: { code: 'APP0401' } });
+      await expectSignInScreen();
+      await expect(client.request(SESSION_PATH)).rejects.toMatchObject({ status: 401 });
+      expect(requests.at(-1)).toEqual({ method: 'GET', path: SESSION_PATH, authorization: null });
+      expect(requests.filter((entry) => entry.path === CUSTOMER_PATH)).toEqual([
+        { method: 'GET', path: CUSTOMER_PATH, authorization: salesAuthorization },
+      ]);
+    });
   });
 
   // -------------------------------------------------------------------------

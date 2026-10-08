@@ -3,68 +3,37 @@ package com.democorp.customermaster.address;
 /**
  * Validates and standardizes one USA address against an address service.
  *
- * <p><b>Source replaced.</b> This interface replaces the {@code USAdrVal} prototype
- * {@code dcl-pr USAdrVal likeds(USAdrValDS) extproc('USADRVAL'); inAddr likeds(USAdrValDS);}
- * [Copy_Mbrs/USADRVAL_P.RPGLE:2-4]. Its one implementation, the USADRVAL service program
- * [USPS_Address/USADRVAL.SQLRPGLE:49-139], reached callers through the binding directory
- * ADRVAL_BND [USPS_Address/CRTBNDDIR.CLLE:4-7]. Here the {@code USAdrValDS} parameter and
- * return value become {@link AddressValidationRequest} and {@link AddressValidationResult},
- * and bind-time resolution becomes injection of exactly one bean of this type. The
- * interface knows the USPS address contract and nothing about customers; customer-api's
- * {@code AddressStandardizationService} owns the mapping from customer fields (the
- * Edit_Address logic) and is the only caller.
+ * <p>Replaces the {@code USAdrVal} prototype [Copy_Mbrs/USADRVAL_P.RPGLE:2-4], whose one
+ * implementation, the USADRVAL service program [USPS_Address/USADRVAL.SQLRPGLE:49-139],
+ * reached callers through the binding directory ADRVAL_BND [USPS_Address/CRTBNDDIR.CLLE:4-7].
+ * Its {@code USAdrValDS} parameter and return value become {@link AddressValidationRequest}
+ * and {@link AddressValidationResult}. The interface knows the USPS address contract and
+ * nothing about customers; customer-api's {@code AddressStandardizationService} owns the
+ * mapping from customer fields (the Edit_Address logic) and is the only caller.
+ * {@link AddressValidationAutoConfiguration} registers exactly one implementation:
+ * {@link StubAddressValidationClient} by default, or
+ * {@link UspsWebToolsAddressValidationClient}, which calls the Web Tools contract the source
+ * documents [USPS_Address/USADRVAL.SQLRPGLE:74-137].
  *
  * <h2>Outcomes of {@link #validate validate}</h2>
  * Every call ends in exactly one of three ways:
  * <ul>
- *   <li><b>Standardized.</b> The service returned an address. The result's
- *       {@link AddressValidationResult#standardized() standardized()} is {@code true},
- *       which is the source's own test, "If a city was returned, assume it worked"
- *       [USPS_Address/USADRVAL.SQLRPGLE:118-121]. Its address components hold the
- *       standardized values, {@code zip4} is {@code ""} when the service returned no
- *       ZIP+4, {@code errorNumber} is {@code 0}, and {@code errorSource} and
- *       {@code errorDescription} are {@code ""}.</li>
- *   <li><b>Address-level error.</b> The service examined the address and rejected it.
- *       {@code standardized()} is {@code false}, and {@code errorNumber},
- *       {@code errorSource} and {@code errorDescription} carry the service's report, read
- *       from its {@code Error} element [USPS_Address/USADRVAL.SQLRPGLE:123-133], for
- *       example {@code -2147219401} / {@code clsAMS} / {@code Address Not Found.}. An
+ *   <li><b>Standardized.</b> {@link AddressValidationResult#standardized() standardized()}
+ *       is {@code true}, the source's test "If a city was returned, assume it worked"
+ *       [USPS_Address/USADRVAL.SQLRPGLE:118-121], and the error components are {@code 0},
+ *       {@code ""} and {@code ""}.</li>
+ *   <li><b>Address-level error.</b> The service examined the address and rejected it:
+ *       {@code standardized()} is {@code false}, and the error components carry the
+ *       service's {@code Error} element [USPS_Address/USADRVAL.SQLRPGLE:123-133]. An
  *       implementation with no report to give, such as the stub echoing an input whose
  *       city is blank, leaves them {@code 0}, {@code ""} and {@code ""}. This outcome is a
- *       normal return, never an exception; customer-api turns it into 422 DEM9898
- *       {@code "USPS: " + errorDescription()}.</li>
- *   <li><b>Service fault.</b> The service gave no usable answer. The implementation throws
- *       {@link AddressServiceUnavailableException}, which customer-api maps to 502
- *       APP0502. This replaces the source's {@code SQLProblem} calls after the HTTP GET and
- *       after each XMLTABLE, which ended the program on any SQLSTATE other than
- *       {@code 00000} [USPS_Address/USADRVAL.SQLRPGLE:94-96,114-116,134-136]. A fault is
- *       never returned as a result and never disguised as an address-level error.</li>
+ *       normal return, never an exception; customer-api turns it into 422 DEM9898.</li>
+ *   <li><b>Service fault.</b> The service gave no usable answer, and the implementation
+ *       throws {@link AddressServiceUnavailableException} (502 APP0502), replacing the
+ *       source's {@code SQLProblem} calls
+ *       [USPS_Address/USADRVAL.SQLRPGLE:94-96,114-116,134-136]. A fault is never returned
+ *       as a result and never disguised as an address-level error.</li>
  * </ul>
- *
- * <h2>Implementations and selection</h2>
- * <table>
- *   <caption>Implementations of this interface and the setting that selects each</caption>
- *   <tr><th>Implementation</th><th>Selected by</th><th>Behaviour</th></tr>
- *   <tr><td>{@link StubAddressValidationClient}</td>
- *       <td>{@code customer-master.address.client=stub} ({@code ADDRESS_VALIDATION_CLIENT});
- *           the default, also when the property is absent</td>
- *       <td>Deterministic and offline: fixture lookup from
- *           {@code stub/usps-stub-fixtures.json}, the {@code BADADDR} error, otherwise an
- *           uppercase echo with a blank {@code zip4}. Used by local runs, Compose and every
- *           test suite.</td></tr>
- *   <tr><td>{@link UspsWebToolsAddressValidationClient}</td>
- *       <td>{@code customer-master.address.client=usps}, with
- *           {@code customer-master.address.usps.user-id} set</td>
- *       <td>The USPS Web Tools {@code Verify} XML API at
- *           {@code customer-master.address.usps.base-url}, the contract the source
- *           documents [USPS_Address/USADRVAL.SQLRPGLE:74-137].</td></tr>
- * </table>
- * {@link AddressValidationAutoConfiguration} registers exactly one of them, according to
- * {@link AddressValidationProperties#client()}. Both of its bean methods back off when the
- * context already holds a bean of this interface type, so an application bean or a test
- * double, such as a {@code @MockitoBean AddressValidationClient}, replaces them entirely.
- * {@code customer-master.address.enabled=false} does not remove the bean; customer-api then
- * skips the call.
  *
  * <h2>Rules for every implementation</h2>
  * <ul>
@@ -77,8 +46,8 @@ package com.democorp.customermaster.address;
  *       and implementations must not depend on either.</li>
  *   <li><b>Secret and data hygiene.</b> No log line and no exception message may contain
  *       the request URL or its query string, the request document, a credential or a
- *       customer address value. The message contract of
- *       {@link AddressServiceUnavailableException} states the same rule for faults.</li>
+ *       customer address value. {@link AddressServiceUnavailableException} states the
+ *       message contract for faults.</li>
  * </ul>
  *
  * <h2>Seam for a future adapter</h2>
@@ -91,23 +60,6 @@ package com.democorp.customermaster.address;
  * {@code secondaryAddress}; no caller would change. Building that adapter is outside the
  * scope of this module. The checks to complete before enabling any real client are listed
  * in {@code customer-master/docs/developer-guide.md}.
- *
- * <p>Example, one call and its three outcomes:
- * <pre>{@code
- * try {
- *     AddressValidationResult result = client.validate(
- *             new AddressValidationRequest("", "123 MAIN ST", "ANYTOWN", "CA", "90210", ""));
- *     if (result.standardized()) {
- *         String zip = result.zip4().isBlank()
- *                 ? result.zip5()                              // "90210"
- *                 : result.zip5() + "-" + result.zip4();       // "90210-1234"
- *     } else {
- *         String detail = "USPS: " + result.errorDescription(); // 422 DEM9898
- *     }
- * } catch (AddressServiceUnavailableException e) {
- *     // the service gave no usable answer: 502 APP0502
- * }
- * }</pre>
  */
 @FunctionalInterface
 public interface AddressValidationClient {

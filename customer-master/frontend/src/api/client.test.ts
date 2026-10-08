@@ -1,32 +1,6 @@
 /**
- * Tests of the client transport: `./client.ts` (`request`, `setCredentials`,
- * `onUnauthorized`) with the error types of `./problem.ts` (`ApiError`,
- * `isApiError`, `syntheticProblem`, `fieldErrors`).
- *
- * What is pinned down here is the contract every typed call in
- * `./customers.ts`, `./states.ts`, `./session.ts` and `./messages.ts` relies
- * on, and that replaces the 5250 program-call plumbing of PMTCUSTR
- * (5250_Subfile/PMTCUSTR.SQLRPGLE:83-90), its message-queue errors (SndMsgPgmQ,
- * Service_Pgms/SRV_MSG.RPGLE) and SQLProblem's escape message
- * (Service_Pgms/SRV_SQL.SQLRPGLE):
- *
- * - every call sends `X-Requested-With: XMLHttpRequest` and, once credentials
- *   are known, `Authorization: Basic <base64 of the UTF-8 user:password>`;
- * - every non-2xx response rejects with `ApiError {status, problem}`, the
- *   problem parsed from `application/problem+json`, or the synthetic DEM9999
- *   problem for any other body (an HTML page from a proxy) and, under status 0,
- *   for a call that received no HTTP response, whose server outcome is unknown;
- * - a 401 calls the handler registered with `onUnauthorized` exactly once,
- *   telling it whether the call carried per-call credentials (a sign-in
- *   trial), and still rejects with its `ApiError`;
- * - a GET whose `signal` aborts before its answer arrived (before the call or
- *   while it is pending) or while a 2xx body is read rejects with the
- *   signal's reason and never with an `ApiError`; a non-2xx answer that did
- *   arrive rejects with its `ApiError` even when the signal aborts while its
- *   body is read or inside the 401 hook, which runs once for an arrived 401
- *   only; a POST or PUT carrying a signal is refused with a TypeError before
- *   any request;
- * - nothing is rendered: no call changes the document.
+ * Tests of the client transport, `./client.ts`, with the error types of
+ * `./problem.ts`.
  *
  * Every request is answered by MSW (`../test/server`, started by
  * `../test/setup.ts` with `onUnhandledFrame: 'error'`), so the suite is
@@ -43,10 +17,6 @@ import type { CustomerFieldsFixture, CustomerResponseFixture, Role } from '../te
 import { onUnauthorized, request, setCredentials } from './client';
 import type { Credentials } from './client';
 import { ApiError, fieldErrors, isApiError, syntheticProblem } from './problem';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /** The MSW route methods the stubs below override. */
 type Method = 'get' | 'post' | 'put' | 'all';
@@ -145,10 +115,8 @@ function demoUser(role: Role): Credentials {
   return { username: user.username, password: user.password };
 }
 
-/** The demo user the API lets review, add and update. */
 const MAINTENANCE_USER = demoUser('MAINTENANCE');
 
-/** The demo user the API lets read only; its writes are refused with 403 APP0403. */
 const INQUIRY_USER = demoUser('INQUIRY');
 
 /**
@@ -196,11 +164,12 @@ function expectSentBy(sent: Seen, user: Credentials, body: object): void {
 }
 
 /**
- * Every hold {@link holdGet} made in the current test; `afterEach` abandons
- * their calls, releases them and awaits their settlement, so neither a held
- * request nor a call waiting on one outlives its test.
+ * Every hold {@link holdGet} or {@link holdFetch} made in the current test;
+ * `afterEach` abandons the calls a route holds, releases every hold and
+ * awaits its settlement, so neither a held request nor a call waiting on one
+ * outlives its test.
  */
-const holds: HeldRequest[] = [];
+const holds: Array<HeldRequest | HeldFetch> = [];
 
 afterEach(async () => {
   // A request a failed test left held is settled here, before the
@@ -215,7 +184,10 @@ afterEach(async () => {
   // cannot keep the teardown waiting.
   const pending = holds.splice(0);
   for (const held of pending) {
-    held.abandon();
+    // A call held at `fetch` has opened no connection, so it is only released.
+    if ('abandon' in held) {
+      held.abandon();
+    }
     held.release();
   }
   await Promise.all(pending.map((held) => held.settled()));
@@ -226,10 +198,6 @@ afterEach(async () => {
     unregister();
   }
 });
-
-// ---------------------------------------------------------------------------
-// Request headers and credentials
-// ---------------------------------------------------------------------------
 
 describe('request headers', () => {
   it('sends the stored Basic credentials, X-Requested-With and a problem+json Accept', async () => {
@@ -248,7 +216,6 @@ describe('request headers', () => {
     expect(sent.headers.get('x-requested-with')).toBe('XMLHttpRequest');
     expect(sent.headers.get('accept')).toContain('application/problem+json');
     expect(sent.headers.get('accept')).toContain('application/json');
-    // A GET carries no body and so no Content-Type.
     expect(sent.headers.get('content-type')).toBeNull();
     expect(sent.body).toBe('');
   });
@@ -314,10 +281,6 @@ describe('request headers', () => {
     expect(refused.problem.detail).toBe(messageText('APP0401'));
   });
 });
-
-// ---------------------------------------------------------------------------
-// URL, query and body
-// ---------------------------------------------------------------------------
 
 describe('request URL, query and body', () => {
   it('leaves undefined query values out and sends the others as strings, in insertion order', async () => {
@@ -425,10 +388,6 @@ describe('request URL, query and body', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Error responses
-// ---------------------------------------------------------------------------
-
 describe('error responses', () => {
   it('parses a 409 DEM1002 problem+json body, current customer included, into an ApiError', async () => {
     const seen = stub('put', '/api/customers/:custId', () =>
@@ -496,7 +455,6 @@ describe('error responses', () => {
     expect(error.problem.code).toBe('APP0502');
     expect(error.problem.stateAccepted).toBe('NV');
     expect(error.problem.instance).toBe('/api/customers/review');
-    // A 502 names no field.
     expect(fieldErrors(error.problem)).toEqual([]);
   });
 
@@ -592,11 +550,6 @@ describe('error responses', () => {
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// 401 and the onUnauthorized hook
-// ---------------------------------------------------------------------------
-
 describe('401 responses and onUnauthorized', () => {
   it('calls the registered handler exactly once and rejects with the 401 ApiError', async () => {
     const onUnauth = vi.fn<() => void>();
@@ -622,29 +575,26 @@ describe('401 responses and onUnauthorized', () => {
     expect(onUnauth).toHaveBeenCalledTimes(1);
   });
 
-  it('tells the handler whether the refused call carried per-call credentials, once per 401', async () => {
+  it('tells the handler whether the refused call carried per-call credentials, once per 401, and that credentials stored before the call do not supersede it', async () => {
     const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
     registerUnauthorized(onUnauth);
     stub('get', '/api/session', () => problem(401, 'APP0401', { instance: '/api/session' }));
 
-    // Stored credentials the server no longer accepts.
     setCredentials({ username: 'sales', password: 'changed-on-the-server' });
     await rejectionOf(request('/api/session'));
     expect(onUnauth).toHaveBeenCalledTimes(1);
-    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false });
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: false });
 
-    // No credentials at all.
     setCredentials(null);
     await rejectionOf(request('/api/session'));
     expect(onUnauth).toHaveBeenCalledTimes(2);
-    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false });
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: false });
 
-    // A sign-in trial: per-call credentials, refused while stored ones exist too.
     setCredentials({ username: 'inquiry', password: 'inquiry-demo' });
     const error = await rejectionOf(request('/api/session', { credentials: { username: 'sales', password: 'wrong' } }));
     expect(error.status).toBe(401);
     expect(onUnauth).toHaveBeenCalledTimes(3);
-    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: true });
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: true, superseded: false });
   });
 
   it('no longer calls a handler after its unregister function ran', async () => {
@@ -716,9 +666,201 @@ describe('401 responses and onUnauthorized', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Aborting a read (RequestOptions.signal)
-// ---------------------------------------------------------------------------
+/** Client calls held at `fetch`: what they sent, the release that lets them through, and the calls waiting. */
+interface HeldFetch {
+  /** Resolves once the client handed a request to `fetch`. */
+  readonly arrived: Promise<void>;
+  /** Every request the client handed `fetch` under this hold, in call order. */
+  readonly seen: readonly Seen[];
+  /** Passes every held request on to MSW; calling it again changes nothing. */
+  release(): void;
+  /**
+   * Registers `call`, a client call this hold delays, and returns it
+   * unchanged, its outcome observed at once as {@link HeldRequest.holding}
+   * does.
+   */
+  holding<T>(call: Promise<T>): Promise<T>;
+  /** Resolves once every call registered with `holding` has settled, at once when there is none. It never rejects. */
+  settled(): Promise<void>;
+}
+
+/**
+ * Holds every `fetch` the client makes in the current test until `release`
+ * is called, then hands it, unchanged, to the `fetch` in place before, so the
+ * test's MSW route answers it. To the client the call is sent: its
+ * `Authorization` is built and its credential epoch taken. No request sits on
+ * a connection while held, and the answer arrives only after the test has
+ * changed the stored credentials. The spy is restored after the test by
+ * `restoreMocks`; the hold is registered in {@link holds}, so the file's
+ * `afterEach` releases it and awaits its calls even when the test failed
+ * before its own `release()`.
+ */
+function holdFetch(): HeldFetch {
+  const fetchBefore = globalThis.fetch;
+  const seen: Seen[] = [];
+  let reached: () => void = () => undefined;
+  const arrived = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let open: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  // One promise per call registered with `holding`, fulfilled once that call
+  // has settled, whichever way.
+  const calls: Array<Promise<unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const sent = new Request(input instanceof Request ? input : new URL(input, window.location.href), init);
+    seen.push({
+      method: sent.method,
+      url: new URL(sent.url),
+      headers: sent.headers,
+      body: await sent.text(),
+    });
+    reached();
+    await held;
+    return fetchBefore(input, init);
+  });
+  const hold: HeldFetch = {
+    arrived,
+    seen,
+    release: () => open(),
+    holding: (call) => {
+      calls.push(Promise.allSettled([call]));
+      return call;
+    },
+    settled: async () => {
+      await Promise.all(calls);
+    },
+  };
+  holds.push(hold);
+  return hold;
+}
+
+describe('a 401 for a call sent before the stored credentials changed', () => {
+  const CUSTOMER_ROUTE = '/api/customers/:custId';
+
+  /**
+   * `response` sent with `Connection: close`, so no request of these cases
+   * leaves a kept-alive connection behind. MSW intercepts below `fetch`, at
+   * the socket, and a later request that reuses such a connection can lose
+   * its answer: the 'aborting a read' cases that follow, which hold an answer
+   * or its body open, then failed intermittently.
+   */
+  function closing(response: Response): Response {
+    response.headers.set('Connection', 'close');
+    return response;
+  }
+
+  function refused(): Response {
+    return closing(problem(401, 'APP0401', { instance: '/api/customers/AAAD' }));
+  }
+
+  /**
+   * Sends `send()` with `MAINTENANCE_USER` stored, which `held` delays; then
+   * signs out and in as `INQUIRY_USER`, as `AuthProvider` does, before
+   * releasing it to the route's answer. Returns the call's rejection and the
+   * request sent.
+   */
+  async function refusedAfterNewSignIn(held: HeldFetch, send: () => Promise<unknown>): Promise<[ApiError, Seen]> {
+    setCredentials(MAINTENANCE_USER);
+    const call = held.holding(send());
+    await held.arrived;
+    setCredentials(null);
+    setCredentials(INQUIRY_USER);
+    held.release();
+    return [await rejectionOf(call), only(held.seen)];
+  }
+
+  it('a stored-credential GET refused after sign-out and a new sign-in rejects with its 401 ApiError and reports superseded', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('get', CUSTOMER_ROUTE, refused);
+    const held = holdFetch();
+
+    const [error, sent] = await refusedAfterNewSignIn(held, () => request('/api/customers/AAAD'));
+
+    expect(sent.method).toBe('GET');
+    expect(sent.headers.get('authorization')).toBe(basicAuth(MAINTENANCE_USER.username, MAINTENANCE_USER.password));
+    expect(error.status).toBe(401);
+    expect(error.problem.code).toBe('APP0401');
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: true });
+  });
+
+  it('a stored-credential PUT, which no signal can cancel, refused after sign-out and a new sign-in reports superseded too', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('put', CUSTOMER_ROUTE, refused);
+    const held = holdFetch();
+    const update = { ...customerFields(customerDetail), version: customerDetail.version };
+
+    const [error, sent] = await refusedAfterNewSignIn(held, () =>
+      request('/api/customers/AAAD', { method: 'PUT', body: update }),
+    );
+
+    expectSentBy(sent, MAINTENANCE_USER, update);
+    expect(error.status).toBe(401);
+    expect(error.problem.code).toBe('APP0401');
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: true });
+  });
+
+  it('an anonymous call refused after a sign-in stored credentials reports superseded', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('get', CUSTOMER_ROUTE, refused);
+    const held = holdFetch();
+
+    const call = held.holding(request('/api/customers/AAAD'));
+    await held.arrived;
+    setCredentials(INQUIRY_USER);
+    held.release();
+    const error = await rejectionOf(call);
+
+    expect(only(held.seen).headers.has('authorization')).toBe(false);
+    expect(error.status).toBe(401);
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: true });
+  });
+
+  it('a held call refused with no setCredentials since it was sent reports superseded: false', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('get', CUSTOMER_ROUTE, refused);
+    const held = holdFetch();
+    setCredentials(MAINTENANCE_USER);
+
+    const call = held.holding(request('/api/customers/AAAD'));
+    await held.arrived;
+    await nextMacrotask();
+    held.release();
+    const error = await rejectionOf(call);
+
+    expect(error.status).toBe(401);
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: false, superseded: false });
+  });
+
+  it('a held sign-in trial still reports perCallCredentials, and superseded once credentials were stored meanwhile', async () => {
+    const onUnauth = vi.fn<Parameters<typeof onUnauthorized>[0]>();
+    registerUnauthorized(onUnauth);
+    stub('get', '/api/session', () => closing(problem(401, 'APP0401', { instance: '/api/session' })));
+    const held = holdFetch();
+    const candidate = { username: MAINTENANCE_USER.username, password: 'wrong' };
+
+    const call = held.holding(request('/api/session', { credentials: candidate }));
+    await held.arrived;
+    setCredentials(INQUIRY_USER);
+    held.release();
+    const error = await rejectionOf(call);
+
+    expect(only(held.seen).headers.get('authorization')).toBe(basicAuth(candidate.username, candidate.password));
+    expect(error.status).toBe(401);
+    expect(onUnauth).toHaveBeenCalledTimes(1);
+    expect(onUnauth).toHaveBeenLastCalledWith({ perCallCredentials: true, superseded: true });
+  });
+});
 
 /** A request a route holds open: when it arrived, the release of its answer, and the calls waiting on it. */
 interface HeldRequest {
@@ -1034,10 +1176,6 @@ describe('aborting a read', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// No DOM effect
-// ---------------------------------------------------------------------------
-
 describe('document', () => {
   it('is left unchanged by successful and failed calls alike', async () => {
     registerUnauthorized(vi.fn<() => void>());
@@ -1073,4 +1211,3 @@ describe('document', () => {
     expect(document.documentElement.outerHTML).toBe(documentBefore);
   });
 });
-

@@ -20,14 +20,12 @@ import org.springframework.core.io.Resource;
  * Deterministic, offline {@link AddressValidationClient}: the default implementation for
  * local runs, Docker Compose and every test suite.
  *
- * <p><b>What it stands in for.</b> The USADRVAL service program called the USPS Web Tools
- * {@code Verify} API [USPS_Address/USADRVAL.SQLRPGLE:74-137], and its test harness
- * USADRVAL_T exercised it with eight sample addresses in Old Lyme CT, Pasadena CA, Los
- * Ranchos de Albuquerque NM and Rancho Santa Margarita CA
- * [USPS_Address/USADRVAL_T.RPGLE:25-79]. This class answers the same question without
- * any network: its fixtures, read from {@value #FIXTURES_LOCATION} on the class path, are
- * fictitious stand-ins modelled on those harness calls, so no real address appears in
- * the repository and no run depends on a USPS account.
+ * <p>Answers the question the USADRVAL service program put to the USPS Web Tools
+ * {@code Verify} API [USPS_Address/USADRVAL.SQLRPGLE:74-137] without any network. Its
+ * fixtures, read from {@value #FIXTURES_LOCATION} on the class path, are fictitious
+ * stand-ins modelled on the eight sample addresses of the USADRVAL_T harness
+ * [USPS_Address/USADRVAL_T.RPGLE:25-79], so no real address appears in the repository
+ * and no run depends on a USPS account.
  *
  * <h2>Answers, in this order</h2>
  * <ol>
@@ -35,8 +33,8 @@ import org.springframework.core.io.Resource;
  *       {@code address2} contains {@value #BAD_ADDRESS_MARKER}, the result is
  *       {@link AddressValidationResult#error error(...)} with every address component blank
  *       and the triple {@value #NOT_FOUND_NUMBER} / {@value #NOT_FOUND_SOURCE} /
- *       {@value #NOT_FOUND_DESCRIPTION}, the report Web Tools gives for an unknown address.
- *       customer-api turns it into 422 DEM9898 {@code "USPS: Address Not Found."}.</li>
+ *       {@value #NOT_FOUND_DESCRIPTION}, the report Web Tools gives for an unknown address,
+ *       which customer-api turns into 422 DEM9898.</li>
  *   <li><b>Fixture hit.</b> The lookup key is {@code (address2, city, state, zip5)} of the
  *       request <em>as sent</em>, each stripped and uppercased. customer-api has already cut
  *       the 40-character street to the 30 characters of {@code Address2}
@@ -62,32 +60,20 @@ import org.springframework.core.io.Resource;
  * module cannot depend on customer-api, so the class carries its own private copy.
  *
  * <h2>Fixture file</h2>
- * A JSON array of objects:
- * <pre>{@code
- * [
- *   {
- *     "description": "Street with ZIP+4",
- *     "input":  { "address2": "15 ORCHARD PLACE", "city": "MAPLE CROSSING",
- *                 "state": "NJ", "zip5": "08999" },
- *     "output": { "address1": "", "address2": "15 ORCHARD PL", "city": "MAPLE CROSSING",
- *                 "state": "NJ", "zip5": "08999", "zip4": "3101" }
- *   }
- * ]
- * }</pre>
- * <ul>
- *   <li>{@code description} is free text used only to name the fixture in load errors.</li>
- *   <li>{@code input} holds {@code address2}, {@code city}, {@code state} and {@code zip5};
- *       {@code output} holds {@code address1}, {@code address2}, {@code city},
- *       {@code state}, {@code zip5} and {@code zip4}. A missing member reads {@code ""}.
- *       Input values are normalized exactly as requests are; output values are returned
- *       as written.</li>
- *   <li>The file is parsed through {@link JsonParserFactory}, because this module carries
- *       no JSON library. Inside customer-api that resolves to Jackson; in this module's own
- *       tests it resolves to Spring Boot's {@code BasicJsonParser}, which does not
- *       unescape strings and mishandles braces and brackets inside quoted values. Every
- *       value is therefore a plain quoted string, ZIP codes included, with no backslash
- *       escapes, braces or brackets.</li>
- * </ul>
+ * A JSON array of objects, each with an {@code input} key ({@code address2}, {@code city},
+ * {@code state}, {@code zip5}), an {@code output} address (those four, {@code address1}
+ * and {@code zip4}) and an optional {@code description} used only to name the fixture in
+ * load errors. A missing member reads {@code ""}. Input values are normalized exactly as
+ * requests are; output values are returned as written.
+ *
+ * <p>The file is parsed through {@link JsonParserFactory}, because this module carries no
+ * JSON library. Inside customer-api that resolves to Jackson; in this module's own tests
+ * it resolves to Spring Boot's {@code BasicJsonParser}, which does not unescape strings,
+ * mishandles braces and brackets inside quoted values, and corrupts an array element
+ * whose closing brace is followed by whitespace before the separating comma. Every value
+ * is therefore a plain quoted string, ZIP codes included, with no backslash escapes,
+ * braces or brackets, and each fixture's closing brace is followed directly by the comma
+ * that separates it from the next, as in <code>},{</code>.
  *
  * <h2>Load failures</h2>
  * The fixtures are read once, in the constructor, and any defect fails construction (and
@@ -104,24 +90,8 @@ import org.springframework.core.io.Resource;
  * The fixture map is immutable ({@link Map#copyOf}) and nothing else is stored, so one
  * instance can serve any number of concurrent requests, and equal requests always receive
  * equal results. No address value is ever logged; the only log line reports how many
- * fixtures were loaded and from where.
- *
- * <p>The class carries no Spring stereotype annotation. Its package lies under
- * customer-api's component-scan root, and the bean is created only by
- * {@link AddressValidationAutoConfiguration} when {@code customer-master.address.client} is
- * {@code stub} or absent.
- *
- * <p>Example:
- * <pre>{@code
- * AddressValidationClient client = new StubAddressValidationClient();
- * client.validate(new AddressValidationRequest(
- *         "", "15 orchard place ", "Maple Crossing", "nj", "08999", ""));
- * // fixture hit: "15 ORCHARD PL", "MAPLE CROSSING", "NJ", "08999", zip4 "3101"
- * client.validate(new AddressValidationRequest("", "1 BADADDR WAY", "X", "CA", "", ""));
- * // error: -2147219401 / clsAMS / Address Not Found.
- * client.validate(new AddressValidationRequest("", "9 nowhere rd", "smalltown", "ca", "", ""));
- * // echo: "9 NOWHERE RD", "SMALLTOWN", "CA", zip5 "", zip4 ""
- * }</pre>
+ * fixtures were loaded and from where. The bean is created only by
+ * {@link AddressValidationAutoConfiguration}.
  */
 public final class StubAddressValidationClient implements AddressValidationClient {
 

@@ -15,7 +15,7 @@ Paths are relative to `customer-master/` unless marked as the repository root. `
 3. `feat(api): domain model, repositories and customer id allocation`
    - the remaining `{api}config/` classes (`AppProperties` is in commit 1), `{api}domain/`, `{api}repository/` (including `CustomerIdAllocator` and `JdbcConfig`), `{api}service/exception/`, `resources/application.yml`
 4. `feat(address): address-validation module with stub and Web Tools client`
-   - `backend/address-validation/src/main/**` (client interface, records, stub, Web Tools client, `UspsXmlCodec`, auto-configuration, stub fixtures) and `backend/address-validation/src/test/**`
+   - `backend/address-validation/src/main/**` (client interface, records, stub, Web Tools client, `UspsXmlCodec`, `UspsTextRedactor`, auto-configuration, stub fixtures) and `backend/address-validation/src/test/**`
 5. `feat(api): search, maintenance, states, messages, security and problem details`
    - `{api}service/`, `{api}controller/` (including `dto/`), `{api}security/`, `{api}messages/`, `resources/messages/messages.properties`
 6. `feat(generator): LOADCUSTR-equivalent data generator`
