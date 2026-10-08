@@ -143,8 +143,8 @@ export interface AuthContextValue {
    *   the call or while it was pending), whatever the server answered.
    *   An already aborted `signal` sends no request.
    * - Rejects with the client's `ApiError` unchanged (401 APP0401 for bad
-   *   credentials, status 0 when the server is unreachable) when the server
-   *   refused the attempt while it was still current; nothing is stored then.
+   *   credentials, status 0 when no HTTP response arrived) when the attempt
+   *   failed while it was still current; nothing is stored then.
    *
    * @param signal aborted by the caller that abandons the attempt, such as a
    *   sign-in page that unmounts

@@ -35,6 +35,13 @@
  *   PmtState prompt over it (5250_Subfile/MTNCUSTR.SQLRPGLE:364-382): only
  *   the window on top is keyed, and returning from the prompt leaves the
  *   detail window and the list as they were.
+ * - **Obsolete requests** (no 5250 counterpart: the subfile cursor was
+ *   closed with its program). A search that a new Enter, F5 or leaving the
+ *   screen replaced is aborted and publishes nothing, as does the first page
+ *   StrictMode's simulated unmount aborts; a next page still loading after
+ *   PageUp is kept, not aborted. A 401 to the stored credentials signs the
+ *   session out, and the sign-out aborts that search, yet the answer did
+ *   arrive, so its APP0401 alert is still shown.
  *
  * What is pinned down here (AAP 0.3.8 "Modes" and the keyboard table, 0.7.2
  * PMTCUSTD filters, 0.8.3 `CustomerSearchPage.test.tsx`).
@@ -61,6 +68,7 @@
  * assertions start only once the catalog has loaded (until then `format`
  * returns the bare code).
  */
+import { StrictMode } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -73,7 +81,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCredentials } from '../../api/client';
 import type { CustomerSummaryResponse, SearchResponse } from '../../api/customers';
-import { AuthProvider } from '../../auth/AuthProvider';
+import { AuthProvider, useAuth } from '../../auth/AuthProvider';
+import { RequireRole } from '../../auth/RequireRole';
 import { ToastProvider, useToasts } from '../../components/ToastRegion';
 import { KeyScopeProvider } from '../../keyboard/KeyScopeProvider';
 import { MessageCatalogProvider, useMessages } from '../../messages/MessageCatalogProvider';
@@ -175,6 +184,12 @@ const STATES_PATH = '/api/states';
 
 /** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
+
+/** The test id of {@link SessionProbe}. */
+const SESSION_PROBE_ID = 'session-probe';
+
+/** The text a test's `/sign-in` route renders, standing in for the sign-in page. */
+const SIGN_IN_ROUTE = 'Sign-in route';
 
 // ---------------------------------------------------------------------------
 // Search requests and the request log
@@ -326,18 +341,30 @@ function CatalogProbe() {
 }
 
 /**
+ * Exposes the session status of `useAuth()` (`signed-in` or `signed-out`) as
+ * `data-status`, so a test can see a sign-out. Hidden and without a role.
+ */
+function SessionProbe() {
+  const { status } = useAuth();
+  return <span hidden data-testid={SESSION_PROBE_ID} data-status={status} />;
+}
+
+/**
  * Renders `ui` inside the application's providers, signed in as `account`: a
  * fresh query client (no retries), the message catalog, the toast host, the
  * key scope stack, a router at `/customers` and the session. The account's
  * credentials are stored as after a real sign-in, because every customer and
  * state route answers 401 without them. Resolves once the catalog has loaded
- * and the Name filter holds the initial focus.
+ * and the Name filter holds the initial focus. With `strict`, the tree is
+ * rendered under `<StrictMode>`, as `src/main.tsx` renders the application,
+ * so development's extra effect cycle (a simulated unmount and remount) runs
+ * too.
  */
-async function renderWithProviders(account: Account, ui: ReactElement): Promise<UserEvent> {
+async function renderWithProviders(account: Account, ui: ReactElement, { strict = false } = {}): Promise<UserEvent> {
   setCredentials({ username: account.username, password: account.password });
   const user = userEvent.setup();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const screens = (
     <QueryClientProvider client={queryClient}>
       <MessageCatalogProvider>
         <ToastProvider>
@@ -351,8 +378,9 @@ async function renderWithProviders(account: Account, ui: ReactElement): Promise<
           </KeyedScreens>
         </ToastProvider>
       </MessageCatalogProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  render(strict ? <StrictMode>{screens}</StrictMode> : screens);
   await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
   await waitFor(() => expect(filterInput(NAME_FILTER)).toHaveFocus());
   return user;
@@ -1059,6 +1087,268 @@ describe('CustomerSearchPage', () => {
       expect(alertRegion()).toBeEmptyDOMElement();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Obsolete requests: the list a new search, F5 or leaving the screen
+  // replaced is aborted, and a page load of the current list never is
+  // -------------------------------------------------------------------------
+
+  describe('aborting obsolete requests', () => {
+    /** One search as the client handed it to `fetch`: its URL and its abort signal. */
+    interface FetchedSearch {
+      url: URL;
+      signal: AbortSignal | undefined;
+    }
+
+    /**
+     * The `GET /api/customers` searches the client handed `fetch`, in call
+     * order, read from a spy on the global `fetch` that calls through
+     * (restored after the test by `restoreMocks`). The list's query aborts a
+     * search's signal once that search is obsolete, and the browser then
+     * stops waiting for its answer.
+     */
+    function searchFetches(): () => FetchedSearch[] {
+      const spy = vi.spyOn(globalThis, 'fetch');
+      return () =>
+        spy.mock.calls.flatMap(([input, init]) => {
+          const url = new URL(String(input), window.location.href);
+          return url.pathname === SEARCH_PATH ? [{ url, signal: init?.signal ?? undefined }] : [];
+        });
+    }
+
+    /** What {@link holdSearches} returns. */
+    interface HeldSearches {
+      /** How many searches are held so far. */
+      held(): number;
+      /** Lets every held search answer, then waits until the answers had their chance to reach the screen. */
+      release(): Promise<void>;
+    }
+
+    /**
+     * Holds every search whose query `matches` until `release` is called,
+     * then answers it with `answer(query)`; every other search is answered at
+     * once from the fixture. Registered over the suite's override, it records
+     * every query in {@link searches} as that override does.
+     */
+    function holdSearches(
+      matches: (query: SearchQuery) => boolean,
+      answer: (query: SearchQuery) => Response,
+    ): HeldSearches {
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let held = 0;
+      let answered = 0;
+      server.use(
+        http.get(SEARCH_PATH, async ({ request }) => {
+          const query = readQuery(request);
+          searches.push(query);
+          if (!matches(query)) {
+            return fixturePage(query);
+          }
+          held += 1;
+          await gate;
+          answered += 1;
+          return answer(query);
+        }),
+      );
+      return {
+        held: () => held,
+        release: async () => {
+          open();
+          await waitFor(() => expect(answered).toBe(held));
+          // An answer still travels through fetch and the query cache before
+          // React could render anything it caused.
+          await act(
+            () =>
+              new Promise<void>((resolve) => {
+                setTimeout(resolve, 100);
+              }),
+          );
+        },
+      };
+    }
+
+    /** A 500 DEM9999 problem: presenting it would publish an alert. */
+    function serverFailure(): Response {
+      return problem(500, 'DEM9999', { instance: SEARCH_PATH });
+    }
+
+    it('a new Enter search with other criteria aborts the pending one; the new rows show and the old answer publishes nothing', async () => {
+      // The held search matches nothing, so its answer would carry the DEM0002 notice.
+      const route = holdSearches((query) => query.name === 'ZZZ', fixturePage);
+      const fetched = searchFetches();
+      const user = await renderSearchPage('MAINTENANCE');
+      await user.type(filterInput(NAME_FILTER), 'zzz');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(route.held()).toBe(1));
+      expect(fetched()[0]?.signal?.aborted).toBe(false);
+
+      await user.clear(filterInput(NAME_FILTER));
+      await user.type(filterInput(NAME_FILTER), 'ali');
+      await user.keyboard('{Enter}');
+
+      const aliRows = ACTIVE_ROWS.filter((row) => row.name.startsWith('ALI'));
+      expect(aliRows.length).toBeGreaterThan(0);
+      await waitForPage(aliRows, 0);
+      await waitFor(() => expect(fetched()[0]?.signal?.aborted).toBe(true));
+      expect(fetched()[1]?.signal?.aborted).toBe(false);
+
+      await route.release();
+
+      expect(shownNames()).toEqual(pageNames(aliRows, 0));
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(statusRegion()).toBeEmptyDOMElement();
+      expect(searches).toEqual([
+        { ...FIRST_PAGE, name: 'ZZZ' },
+        { ...FIRST_PAGE, name: 'ALI' },
+      ]);
+    });
+
+    it('F5 while a search is pending aborts it; its failing answer shows no alert and the list stays empty', async () => {
+      const route = holdSearches((query) => query.name === 'ALI', serverFailure);
+      const fetched = searchFetches();
+      const user = await renderSearchPage('MAINTENANCE');
+      await user.type(filterInput(NAME_FILTER), 'ali');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(route.held()).toBe(1));
+      expect(fetched()[0]?.signal?.aborted).toBe(false);
+
+      await user.keyboard('{F5}');
+
+      await waitFor(() => expect(fetched()[0]?.signal?.aborted).toBe(true));
+      await route.release();
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(shownNames()).toEqual([]);
+      expect(pagingIndicator()).not.toBeInTheDocument();
+      expect(fetched()).toHaveLength(1);
+      expect(searches).toEqual([{ ...FIRST_PAGE, name: 'ALI' }]);
+    });
+
+    it('leaving the screen (F3) while its first page loads aborts that search; its failing answer shows no alert', async () => {
+      const route = holdSearches((query) => query.cursor === null, serverFailure);
+      const fetched = searchFetches();
+      const user = await renderSearchPage('INQUIRY');
+      await waitFor(() => expect(route.held()).toBe(1));
+      expect(fetched()[0]?.signal?.aborted).toBe(false);
+
+      await user.keyboard('{F3}');
+
+      expect(await screen.findByText('Home')).toBeInTheDocument();
+      await waitFor(() => expect(fetched()[0]?.signal?.aborted).toBe(true));
+      await route.release();
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(fetched()).toHaveLength(1);
+      expect(searches).toEqual([FIRST_PAGE]);
+    });
+
+    it('PageUp while the next page loads keeps that load: it is not aborted, and PageDown later shows its page with no request', async () => {
+      const route = holdSearches((query) => query.cursor === 'c2', fixturePage);
+      const fetched = searchFetches();
+      const continuation = (): FetchedSearch | undefined =>
+        fetched().find((entry) => entry.url.searchParams.get('cursor') === 'c2');
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.keyboard('{F9}');
+      await waitForPage(ALL_ROWS, 0);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 1);
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(route.held()).toBe(1));
+      await user.keyboard('{PageUp}');
+      await waitForPage(ALL_ROWS, 0);
+
+      expect(continuation()?.signal?.aborted).toBe(false);
+      await route.release();
+      expect(continuation()?.signal?.aborted).toBe(false);
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 0));
+
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 1);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ALL_ROWS, 2);
+
+      const includingInactive: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
+      expect(searches).toEqual([
+        FIRST_PAGE,
+        includingInactive,
+        { ...includingInactive, cursor: 'c1' },
+        { ...includingInactive, cursor: 'c2' },
+      ]);
+      // The first list, replaced by F9, was complete before; no search of the current list was aborted.
+      expect(fetched().map((entry) => entry.signal?.aborted)).toEqual([false, false, false, false]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('under StrictMode the first page the simulated unmount aborted shows no alert, and the remount loads the list', async () => {
+      const fetched = searchFetches();
+      await renderWithProviders(
+        INQUIRY_USER,
+        <Routes>
+          <Route path="/customers" element={<CustomerSearchPage />} />
+          <Route path="/" element={<p>Home</p>} />
+        </Routes>,
+        { strict: true },
+      );
+
+      await waitForPage(ACTIVE_ROWS, 0);
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, 50);
+          }),
+      );
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(statusRegion()).toBeEmptyDOMElement();
+      // Development's extra effect cycle aborted the first request; the remount's answered.
+      expect(fetched().map((entry) => entry.signal?.aborted)).toEqual([true, false]);
+    });
+
+    it('a 401 to the stored credentials signs out; the sign-out aborts that search, and its APP0401 alert still shows', async () => {
+      // The stored credentials stopped working on the server (a changed password).
+      answerSearch(() => problem(401, 'APP0401', { instance: SEARCH_PATH }));
+      const fetched = searchFetches();
+      // Guarded as `src/routes.tsx` guards it, so the signed-out session
+      // replaces the screen at once and nothing reloads its list.
+      const user = await renderWithProviders(
+        MAINTENANCE_USER,
+        <>
+          <SessionProbe />
+          <Routes>
+            <Route
+              path="/customers"
+              element={
+                <RequireRole role="INQUIRY">
+                  <CustomerSearchPage />
+                </RequireRole>
+              }
+            />
+            <Route path="/sign-in" element={<p>{SIGN_IN_ROUTE}</p>} />
+            <Route path="/" element={<p>Home</p>} />
+          </Routes>
+        </>,
+      );
+      expect(screen.getByTestId(SESSION_PROBE_ID)).toHaveAttribute('data-status', 'signed-in');
+
+      await user.keyboard('{Enter}');
+
+      // AuthProvider's 401 handler signed the session out and routed to /sign-in.
+      expect(await screen.findByText(SIGN_IN_ROUTE)).toBeInTheDocument();
+      expect(screen.getByTestId(SESSION_PROBE_ID)).toHaveAttribute('data-status', 'signed-out');
+      // Its sign-out cancelled the user's queries, which aborted the refused search's own signal.
+      expect(fetched().map((entry) => entry.signal?.aborted)).toEqual([true]);
+      // The 401 did arrive, so it is presented, not swallowed as an abort.
+      expect(messageText('APP0401')).toBe('Sign in required.');
+      await waitFor(() => expect(within(alertRegion()).getByText(messageText('APP0401'))).toBeInTheDocument());
+      expect(searches).toEqual([FIRST_PAGE]);
+    });
+  });
+
 
   // -------------------------------------------------------------------------
   // Rendering (PMTCUSTD SFLCTL and SFL records)

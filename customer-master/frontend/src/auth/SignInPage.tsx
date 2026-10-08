@@ -26,7 +26,7 @@
  *   exactly one alert. The page navigates to `from` only when `signIn`
  *   reports that this attempt stored its session.
  * - **Failure.** Every rejection (401 APP0401 "Sign in required." for bad
- *   credentials, a synthetic DEM9999 when the server is unreachable) of an
+ *   credentials, a synthetic DEM9999 when no HTTP response arrived) of an
  *   attempt this page still owns goes to `useProblemPresenter().present(error)`
  *   unchanged, which publishes the problem's `detail` as the one alert in
  *   `ToastRegion`. This page holds no message text and inspects no status

@@ -37,10 +37,11 @@
  *   PageDown, Enter and F7; "No states match." for a filter that matched
  *   nothing; "States not loaded." after a failure, whose problem is the one
  *   alert; and nothing after F5.
- * - **Obsolete requests.** A request failing after the window closed, after
- *   F5, or after a newer Enter replaced it shows no alert, marks nothing and
- *   moves no focus; a reopened window sends its own request; a current
- *   failure is still presented exactly once.
+ * - **Obsolete requests.** A request the window closing, F5 or a newer Enter
+ *   made obsolete is aborted, and its answer, even a failure, shows no
+ *   alert, marks nothing and moves no focus; so is the load StrictMode's
+ *   simulated unmount aborts; a reopened window sends its own request; a
+ *   current failure is still presented exactly once.
  *
  * Fixtures. The rows are the 58 STATES rows of 5250_Subfile/States.sql as
  * served by the default `GET /api/states` handler of `src/test/handlers.ts`.
@@ -60,6 +61,7 @@
  * probe reads `useMessages().ready`, so message assertions start only once
  * the catalog has loaded (until then `format` returns the bare code).
  */
+import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -72,7 +74,6 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock, MockInstance } from 'vitest';
 import { setCredentials } from '../../api/client';
-import { ApiError } from '../../api/problem';
 import { statesApi } from '../../api/states';
 import type { StateResponse, StateSort } from '../../api/states';
 import { AuthProvider } from '../../auth/AuthProvider';
@@ -203,30 +204,35 @@ type PickerView = PickerCallbacks & { user: UserEvent; setOpen(open: boolean): v
  * Renders the picker inside the application's providers: a fresh query client
  * (no retries), the message catalog, the toast host, the key scope stack, a
  * router and a MAINTENANCE session. Clears the request log first, so it holds
- * only what the picker sends.
+ * only what the picker sends. With `strict`, the tree is rendered under
+ * `<StrictMode>`, as `src/main.tsx` renders the application, so development's
+ * extra effect cycle (a simulated unmount and remount) runs too.
  */
-function renderPicker({ open = true }: { open?: boolean } = {}): PickerView {
+function renderPicker({ open = true, strict = false }: { open?: boolean; strict?: boolean } = {}): PickerView {
   stateRequests.length = 0;
   const user = userEvent.setup();
   const onSelect = vi.fn<StatePickerProps['onSelect']>();
   const onCancel = vi.fn<StatePickerProps['onCancel']>();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const tree = (isOpen: boolean) => (
-    <QueryClientProvider client={queryClient}>
-      <MessageCatalogProvider>
-        <ToastProvider>
-          <KeyedScreens>
-            <MemoryRouter>
-              <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
-                <CatalogProbe />
-                <StatePicker open={isOpen} onSelect={onSelect} onCancel={onCancel} />
-              </AuthProvider>
-            </MemoryRouter>
-          </KeyedScreens>
-        </ToastProvider>
-      </MessageCatalogProvider>
-    </QueryClientProvider>
-  );
+  const tree = (isOpen: boolean) => {
+    const screens = (
+      <QueryClientProvider client={queryClient}>
+        <MessageCatalogProvider>
+          <ToastProvider>
+            <KeyedScreens>
+              <MemoryRouter>
+                <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
+                  <CatalogProbe />
+                  <StatePicker open={isOpen} onSelect={onSelect} onCancel={onCancel} />
+                </AuthProvider>
+              </MemoryRouter>
+            </KeyedScreens>
+          </ToastProvider>
+        </MessageCatalogProvider>
+      </QueryClientProvider>
+    );
+    return strict ? <StrictMode>{screens}</StrictMode> : screens;
+  };
   const { rerender } = render(tree(open));
   return { user, onSelect, onCancel, setOpen: (isOpen) => rerender(tree(isOpen)) };
 }
@@ -332,9 +338,12 @@ function filterProblem(): Response {
 /**
  * Releases a held-back failing response and waits, inside `act`, until call
  * `call` of the `statesApi.list` spy has rejected and React has rendered
- * whatever that rejection caused. The hook attached its own handler to the
- * call's promise when the request started, before this wait did, so that
- * handler has run by the time the wait ends.
+ * whatever that rejection caused. The call is an obsolete request, which the
+ * hook aborted as it became obsolete, so it rejects with the abort reason (an
+ * `AbortError`) and never with the `ApiError` the held answer would have
+ * produced. The hook attached its own handler to the call's promise when the
+ * request started, before this wait did, so that handler has run by the time
+ * the wait ends.
  */
 async function failLate(held: Gate, list: MockInstance<typeof statesApi.list>, call: number): Promise<void> {
   const result = list.mock.results[call];
@@ -343,10 +352,25 @@ async function failLate(held: Gate, list: MockInstance<typeof statesApi.list>, c
   }
   await act(async () => {
     held.release();
-    await expect(result.value).rejects.toBeInstanceOf(ApiError);
+    await expect(result.value).rejects.toHaveProperty('name', 'AbortError');
     // One more macrotask, so nothing queued behind the rejection is left over.
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+/**
+ * The `AbortSignal` the client handed `fetch` for each `GET /api/states`, in
+ * call order, read from a spy on the global `fetch` that calls through
+ * (restored after the test by `restoreMocks`). The hook's query aborts that
+ * signal when its request becomes obsolete, and the browser then stops
+ * waiting for the answer.
+ */
+function statesFetchSignals(): () => Array<AbortSignal | undefined> {
+  const spy = vi.spyOn(globalThis, 'fetch');
+  return () =>
+    spy.mock.calls
+      .filter(([input]) => new URL(String(input), window.location.href).pathname === STATES_PATH)
+      .map(([, init]) => init?.signal ?? undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +989,99 @@ describe('StatePicker', () => {
       expect(alertRegion()).toBeEmptyDOMElement();
       expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE));
       expect(within(statusLine(again)).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument();
+    });
+
+    it('closing the window (F12) while the list request is pending aborts it, and its failing answer shows no alert', async () => {
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return filterProblem();
+          },
+          { once: true },
+        ),
+      );
+      const signals = statesFetchSignals();
+      const list = vi.spyOn(statesApi, 'list');
+
+      const { user, setOpen, onCancel } = renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      await waitForCatalog();
+      await waitFor(() => expect(stateRequests).toHaveLength(1));
+      expect(signals()).toHaveLength(1);
+      expect(signals()[0]?.aborted).toBe(false);
+
+      await user.keyboard('{F12}');
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      setOpen(false);
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+
+      await waitFor(() => expect(signals()[0]?.aborted).toBe(true));
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(statusToasts()).toBeEmptyDOMElement();
+      expect(stateRequests).toHaveLength(1);
+    });
+
+    it('F5 while the list request is pending aborts it: no alert, no filter error and no new request', async () => {
+      const held = gate();
+      server.use(
+        http.get(
+          STATES_PATH,
+          async () => {
+            await held.promise;
+            return filterProblem();
+          },
+          { once: true },
+        ),
+      );
+      const signals = statesFetchSignals();
+      const list = vi.spyOn(statesApi, 'list');
+
+      const { user } = renderPicker();
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      const filter = within(dialog).getByRole('textbox', { name: FILTER_NAME });
+      await waitForCatalog();
+      await waitFor(() => expect(filter).toHaveFocus());
+      expect(signals()).toHaveLength(1);
+      expect(signals()[0]?.aborted).toBe(false);
+
+      await user.keyboard('{F5}');
+
+      await waitFor(() => expect(signals()[0]?.aborted).toBe(true));
+      await failLate(held, list, 0);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(filter).not.toHaveAttribute('aria-invalid');
+      expect(dataRows(table)).toEqual([]);
+      expect(signals()).toHaveLength(1);
+      expect(stateRequests).toHaveLength(1);
+    });
+
+    it('under StrictMode the load the simulated unmount aborted shows no alert, and the remount loads the list', async () => {
+      const byName = await serverRows('', 'name');
+      const signals = statesFetchSignals();
+
+      renderPicker({ strict: true });
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAME });
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      await waitForCatalog();
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(within(statusLine(dialog)).getByText('Showing 1 to 6 of 58 states, sorted by Name.')).toBeInTheDocument();
+      // Development's extra effect cycle aborted the first load; the remount's load answered.
+      const sent = signals();
+      expect(sent).toHaveLength(2);
+      expect(sent[0]?.aborted).toBe(true);
+      expect(sent[1]?.aborted).toBe(false);
     });
 
     it('a current failure is still presented exactly once: one alert, the filter marked and focused', async () => {

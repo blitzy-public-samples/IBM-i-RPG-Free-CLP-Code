@@ -394,7 +394,7 @@ describe('useProblemPresenter: alerts by status', () => {
 describe('useProblemPresenter: synthetic DEM9999', () => {
   it.each([
     { label: 'a response without a problem body', error: () => new ApiError(500, syntheticProblem(500)), hidden: [] },
-    { label: 'a request that never reached the server', error: () => new ApiError(0, syntheticProblem(0)), hidden: [] },
+    { label: 'a call that received no HTTP response', error: () => new ApiError(0, syntheticProblem(0)), hidden: [] },
     { label: 'an Error that is not an ApiError', error: () => new Error('boom'), hidden: ['boom'] },
     { label: 'a thrown string', error: () => 'boom', hidden: ['boom'] },
   ] satisfies ReadonlyArray<{ label: string; error: () => unknown; hidden: readonly string[] }>)(

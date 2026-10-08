@@ -31,7 +31,7 @@
  *   {@link StateSort} from here and never import `schema.d.ts` themselves.
  * - Errors are not caught. A failed call rejects with the `ApiError` that
  *   `./client` built (400 APP0400, 401 APP0401, 500 DEM9999, or the synthetic
- *   DEM9999 for a request that never reached the server), and the State
+ *   DEM9999 under status 0 when no HTTP response arrived), and the State
  *   picker passes it to `errors/useProblemPresenter.ts`.
  * - No caching. The server's `StateService` holds the states in memory; the
  *   picker loads the list once when it opens and asks again only when Enter
@@ -86,13 +86,17 @@ export const statesApi = {
    *   most 10 characters; blank for all 58 states. Neither trimmed nor
    *   uppercased here, because the server applies the shared normalization.
    * @param sort `name` or `code`, the F7 order
+   * @param signal aborts the read once its list is no longer wanted (the
+   *   picker cleared, searched again or closed)
    * @returns the matching rows; an empty array when no name matches
-   * @throws ApiError (as a rejection) for every failed call, unhandled here
+   * @throws ApiError (as a rejection) for every failed call, unhandled here;
+   *   the signal's reason instead when `signal` abandoned the call before
+   *   its answer arrived
    */
-  list(nameContains: string, sort: StateSort): Promise<StateResponse[]> {
+  list(nameContains: string, sort: StateSort, signal?: AbortSignal): Promise<StateResponse[]> {
     // `satisfies` ties the parameter names to the snapshot's `listStates`
     // operation, so a renamed or removed parameter fails `tsc -b`.
     const query = { nameContains, sort } satisfies ListStatesQuery;
-    return request<StateResponse[]>('/api/states', { query });
+    return request<StateResponse[]>('/api/states', { query, signal });
   },
 };

@@ -23,11 +23,22 @@
  *   known. It never adds a role, a mode, an id or a change stamp to a request.
  * - Parses every non-2xx response into `ApiError {status, problem}`; a body
  *   that is not usable problem+json (an HTML page from a proxy, plain text,
- *   broken JSON) becomes the synthetic DEM9999 problem, and a request that
- *   never reached the server becomes `ApiError(0, DEM9999)`.
+ *   broken JSON) becomes the synthetic DEM9999 problem, and a call for which
+ *   no HTTP response arrived becomes `ApiError(0, DEM9999)`. Status 0 leaves
+ *   the outcome unknown: the server may have received, and a write may have
+ *   committed, the request whose answer was lost. Nothing is retried.
  * - On 401, calls the handler `AuthProvider` registered, telling it whether
  *   the refused call carried its own per-call credentials (a sign-in trial)
  *   or the stored ones ({@link UnauthorizedInfo}), then rejects.
+ * - Aborts a read on request: a GET whose `RequestOptions.signal` abandons
+ *   it before its answer arrived, or while a 2xx body is read, rejects with
+ *   the signal's reason, not an `ApiError`, so an abandoned read is never
+ *   presented. A non-2xx answer that did arrive always rejects with its
+ *   `ApiError`, even when the signal aborts while its body is read or inside
+ *   the 401 handler. The browser stops waiting and frees the connection,
+ *   which does not mean the server stopped: it may still finish the request.
+ *   Writes are never cancelled; a POST or PUT carrying a signal is refused
+ *   before anything is sent.
  *
  * Constraints:
  * - Credentials live in memory only, in this module's variable, never in Web
@@ -79,12 +90,21 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT';
  *   `active` on an add stays absent and the server defaults it to `Y`.
  * - `credentials`: used for this call instead of the stored ones, as the
  *   sign-in page does to try credentials before they are stored.
+ * - `signal`: aborts a read whose result nobody needs any more, such as a
+ *   query that a newer search replaced, a reset cleared or an unmounted
+ *   owner left behind. The browser stops waiting and frees the connection;
+ *   the server may still finish the request. Only a read abandoned before
+ *   its answer arrived, or while a 2xx body is read, rejects with the
+ *   signal's reason; a non-2xx answer that arrived keeps its `ApiError`.
+ *   GET only: a write is never cancelled, so a `signal` with `POST` or `PUT`
+ *   is refused.
  */
 export type RequestOptions = {
   method?: HttpMethod;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
   credentials?: Credentials;
+  signal?: AbortSignal;
 };
 
 /**
@@ -168,22 +188,42 @@ const PROBLEM_TYPE_PREFIX = 'urn:customer-master:problem:';
  *   the problem+json body or the synthetic DEM9999 one; on 401 the
  *   {@link onUnauthorized} handler runs first, exactly once, with
  *   `perCallCredentials` telling whether `options.credentials` was given.
- * - Rejects with `ApiError(0, DEM9999)` when no response arrives (offline,
- *   DNS, a refused or reset connection), and with `ApiError(status, DEM9999)`
- *   for a 2xx body that is not JSON. The 401 handler runs for neither.
+ * - Rejects with `ApiError(0, DEM9999)` when no HTTP response arrives
+ *   (offline, DNS, a refused or reset connection, a response lost after the
+ *   server answered): whether the server received or executed the request is
+ *   unknown, so a POST or PUT may have committed. Rejects with
+ *   `ApiError(status, DEM9999)` for a 2xx body that is not JSON. The 401
+ *   handler runs for neither, and nothing is retried.
+ * - Rejects with `options.signal.reason` (a `DOMException` named
+ *   `AbortError` unless the caller gave another reason) when that signal
+ *   abandoned the call before its answer arrived (before the call or while
+ *   it was pending) or while a 2xx body was read, never with an `ApiError`,
+ *   so no presenter shows it. A non-2xx answer that arrived always rejects
+ *   with its `ApiError`, even when the signal aborts while its body is read
+ *   (the synthetic DEM9999 then, as the body is lost) or inside the 401
+ *   handler. The 401 handler runs only when a 401 answer had arrived.
  *
  * `T` is the caller's declared response type, taken from the generated
  * `./schema`; the body is not validated against it.
  *
  * @param path the API path, relative and starting with `/api/`, without a
  *   query string of its own unless `options.query` is empty
- * @param options method, query, JSON body and per-call credentials
+ * @param options method, query, JSON body, per-call credentials and, for a
+ *   GET, the abort signal
  * @throws TypeError (as a rejection) when `path` does not start with `/api/`,
- *   a programming error that never reaches the network
+ *   or when `options.signal` is given with `POST` or `PUT`: programming
+ *   errors that never reach the network
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   if (!path.startsWith(API_PREFIX)) {
     throw new TypeError(`API paths are relative and start with ${API_PREFIX}: ${path}`);
+  }
+  const method = options.method ?? 'GET';
+  const { signal } = options;
+  if (signal !== undefined && method !== 'GET') {
+    // A write whose request was sent may already have committed, so stopping
+    // to wait for its answer would only hide the outcome from the user.
+    throw new TypeError(`Only a GET can be aborted; ${method} ${path} must not carry a signal`);
   }
   const url = withQuery(path, options.query);
 
@@ -208,19 +248,36 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     // The global `fetch` is looked up on every call, never captured in a
     // module constant: the test base replaces `globalThis.fetch` after MSW
     // starts listening, to resolve relative URLs against jsdom's location.
-    response = await fetch(url, { method: options.method ?? 'GET', headers, body });
+    response = await fetch(url, { method, headers, body, signal });
   } catch {
-    // No response at all; the server never saw the request, so there is no
-    // status, no problem body and no reason to sign the user out.
+    if (signal?.aborted === true) {
+      // The caller abandoned the read: reject with its own reason, never an
+      // ApiError, so nothing is presented and nobody is signed out.
+      throw signal.reason;
+    }
+    // The exchange failed before a usable response or status arrived:
+    // offline, DNS, a refused or reset connection, or a response lost after
+    // the server answered. Whether the server received or executed the
+    // request is unknown, and a POST or PUT may have committed, so no caller
+    // may read status 0 as "nothing was written"; nothing here retries.
+    // Without a status no authentication decision was received either, so
+    // the 401 handler does not run.
     throw new ApiError(0, syntheticProblem(0));
   }
 
   if (response.ok) {
-    return readSuccess<T>(response);
+    return readSuccess<T>(response, signal);
   }
 
+  // A non-2xx answer arrived, so its ApiError is the rejection whatever the
+  // signal does from here on: a body whose read the abort cut short becomes
+  // the synthetic DEM9999 under this status (readProblem), and a 401 handler
+  // that aborts this very signal (AuthProvider's sign-out cancels the user's
+  // queries) still leaves the caller the 401's ApiError to present.
   const error = new ApiError(response.status, await readProblem(response));
   if (response.status === 401) {
+    // The server's authentication decision did arrive, so it stands even
+    // when the caller abandoned the call while its body was being read.
     notifyUnauthorized({ perCallCredentials: options.credentials !== undefined });
   }
   throw error;
@@ -286,13 +343,17 @@ function notifyUnauthorized(info: UnauthorizedInfo): void {
 /**
  * The JSON body of a 2xx response, or `undefined` when it is empty. A body
  * that cannot be read or is not JSON rejects with the synthetic DEM9999
- * problem under the response's status.
+ * problem under the response's status; a body whose read failed because
+ * `signal` aborted rejects with the signal's reason instead.
  */
-async function readSuccess<T>(response: Response): Promise<T> {
+async function readSuccess<T>(response: Response, signal: AbortSignal | undefined): Promise<T> {
   let text: string;
   try {
     text = await response.text();
   } catch {
+    if (signal?.aborted === true) {
+      throw signal.reason;
+    }
     throw new ApiError(response.status, syntheticProblem(response.status));
   }
   if (text === '') {

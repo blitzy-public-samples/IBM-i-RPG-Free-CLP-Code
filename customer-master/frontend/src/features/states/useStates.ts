@@ -29,11 +29,14 @@
  *   never repeats them; the rows keep the server's order (by `name` or by
  *   `state`) and are never re-sorted here.
  * - Only the current query is shown, and only its failure is reported. A
- *   response that arrives late for an older query lands in that query's own
- *   cache entry, never in `rows` or `error`. The request itself is not
- *   cancelled (`statesApi.list` takes no abort signal, and react-query does
- *   not cancel a fetch whose observer went away), so a late rejection still
- *   settles its own cache entry but reaches no callback.
+ *   request made obsolete by `clear`, a newer `search` or unmounting is
+ *   aborted: the query function hands react-query's abort signal to
+ *   `statesApi.list`, and react-query aborts the request once its query
+ *   loses its last observer. The browser stops waiting, though the server
+ *   may still answer; the abort's own rejection reaches no callback and
+ *   never lands in `rows` or `error`. An answer that did arrive is still
+ *   reported while its request is current: a 401 whose sign-out cancelled
+ *   the query goes to `onError` as APP0401.
  * - Nothing is shared across picker openings: every query key carries an
  *   identity of the mounted hook, a new one per mount, so a fresh mount
  *   sends its own request, as PMTSTATER reopened its cursor each time it was
@@ -235,14 +238,20 @@ export function useStates(options?: UseStatesOptions): UseStatesResult {
     queryFn:
       query === null
         ? skipToken
-        : async () => {
+        : async ({ signal }) => {
             try {
-              return await statesApi.list(query.nameContains, query.sort);
+              return await statesApi.list(query.nameContains, query.sort, signal);
             } catch (failure) {
               // Reported only while this is still the current request of a
-              // mounted hook; rethrown either way, so react-query records the
-              // failure in this request's own cache entry.
-              if (mountedRef.current && currentRef.current === seq) {
+              // mounted hook, and never when the rejection is the abort's own
+              // (an aborted request is obsolete, including the one
+              // StrictMode's simulated unmount aborts after `mountedRef` is
+              // true again). An answer that did arrive, such as a 401 whose
+              // sign-out cancelled this query, is still reported. Rethrown
+              // either way, so react-query settles this request's own cache
+              // entry.
+              const abandoned = signal.aborted && failure === signal.reason;
+              if (mountedRef.current && currentRef.current === seq && !abandoned) {
                 onErrorRef.current?.(failure);
               }
               throw failure;

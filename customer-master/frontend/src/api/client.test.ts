@@ -15,10 +15,17 @@
  * - every non-2xx response rejects with `ApiError {status, problem}`, the
  *   problem parsed from `application/problem+json`, or the synthetic DEM9999
  *   problem for any other body (an HTML page from a proxy) and, under status 0,
- *   for a request that never reached the server;
+ *   for a call that received no HTTP response, whose server outcome is unknown;
  * - a 401 calls the handler registered with `onUnauthorized` exactly once,
  *   telling it whether the call carried per-call credentials (a sign-in
  *   trial), and still rejects with its `ApiError`;
+ * - a GET whose `signal` aborts before its answer arrived (before the call or
+ *   while it is pending) or while a 2xx body is read rejects with the
+ *   signal's reason and never with an `ApiError`; a non-2xx answer that did
+ *   arrive rejects with its `ApiError` even when the signal aborts while its
+ *   body is read or inside the 401 hook, which runs once for an arrived 401
+ *   only; a POST or PUT carrying a signal is refused with a TypeError before
+ *   any request;
  * - nothing is rendered: no call changes the document.
  *
  * Every request is answered by MSW (`../test/server`, started by
@@ -474,7 +481,7 @@ describe('error responses', () => {
     });
   });
 
-  it('rejects a request that never reached the server with ApiError status 0 and DEM9999, without the 401 hook', async () => {
+  it('rejects a call that received no HTTP response with ApiError status 0 and DEM9999, without the 401 hook', async () => {
     const onUnauth = vi.fn<() => void>();
     registerUnauthorized(onUnauth);
     stub('get', '/api/customers', () => HttpResponse.error());
@@ -602,6 +609,253 @@ describe('401 responses and onUnauthorized', () => {
 
     expect(statuses).toEqual([403, 404, 409, 500]);
     expect(onUnauth).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aborting a read (RequestOptions.signal)
+// ---------------------------------------------------------------------------
+
+/** A request a route holds open: when it arrived, and the release of its answer. */
+interface HeldRequest {
+  /** Resolves once the request reached the route. */
+  readonly arrived: Promise<void>;
+  /** Whether the route has answered the request. */
+  answered(): boolean;
+  /** Lets the held request answer with `respond()`. */
+  release(): void;
+}
+
+/**
+ * Overrides `GET path` for the current test: holds each request until
+ * `release` is called, then answers it with `respond()`. A call that settles
+ * while `answered()` is still false settled without waiting for the server.
+ */
+function holdGet(path: string, respond: () => Response): HeldRequest {
+  let reached: () => void = () => undefined;
+  const arrived = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let open: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  let done = false;
+  server.use(
+    http.get(path, async () => {
+      reached();
+      await held;
+      done = true;
+      return respond();
+    }),
+  );
+  return { arrived, answered: () => done, release: () => open() };
+}
+
+/**
+ * The `AbortSignal` the client handed `fetch` on each call, in call order,
+ * from a spy on the global `fetch` (restored after the test by
+ * `restoreMocks`). The spy calls through, so MSW still answers.
+ */
+function fetchSignals(): () => Array<AbortSignal | null | undefined> {
+  const spy = vi.spyOn(globalThis, 'fetch');
+  return () => spy.mock.calls.map(([, init]) => init?.signal);
+}
+
+/** The value a call rejects with; fails the test when the call resolves. */
+async function reasonOf(call: Promise<unknown>): Promise<unknown> {
+  try {
+    await call;
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error('Expected the call to reject, but it resolved');
+}
+
+/**
+ * Waits one macrotask, so the I/O and timers queued before it run first: a
+ * request reaching the route has then been sent in full, and a late answer
+ * has had its chance to reach a handler.
+ */
+function nextMacrotask(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+describe('aborting a read', () => {
+  it('aborting a pending GET rejects with the signal reason, not an ApiError, aborts its fetch and skips the 401 hook', async () => {
+    const onUnauth = vi.fn<() => void>();
+    registerUnauthorized(onUnauth);
+    const signals = fetchSignals();
+    // Had the read been waited for, its answer would have been a 401.
+    const route = holdGet('/api/customers', () => problem(401, 'APP0401', { instance: '/api/customers' }));
+    const controller = new AbortController();
+
+    const call = request('/api/customers', { query: { name: 'SLOWA' }, signal: controller.signal });
+    await route.arrived;
+    // The request is in flight: the route holds it and its answer is pending.
+    await nextMacrotask();
+    expect(signals()).toEqual([controller.signal]);
+    controller.abort();
+    const reason = await reasonOf(call);
+
+    expect(reason).toBe(controller.signal.reason);
+    expect(reason).toHaveProperty('name', 'AbortError');
+    expect(isApiError(reason)).toBe(false);
+    // The call stopped waiting: it settled while the server still held the request.
+    expect(route.answered()).toBe(false);
+
+    route.release();
+    await vi.waitFor(() => expect(route.answered()).toBe(true));
+    await nextMacrotask();
+    expect(onUnauth).not.toHaveBeenCalled();
+  });
+
+  it('a signal aborted before the call rejects with its reason, the caller-given one included, and sends nothing', async () => {
+    const seen = stub('get', '/api/states', () => HttpResponse.json([]));
+    const aborted = new AbortController();
+    aborted.abort();
+    const superseded = new AbortController();
+    const supersededReason = new Error('superseded by a newer search');
+    superseded.abort(supersededReason);
+
+    await expect(request('/api/states', { signal: aborted.signal })).rejects.toBe(aborted.signal.reason);
+    await expect(request('/api/states', { signal: superseded.signal })).rejects.toBe(supersededReason);
+
+    expect(aborted.signal.reason).toHaveProperty('name', 'AbortError');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('refuses a signal on POST and on PUT with a TypeError before any request is made', async () => {
+    const seen = stub('all', '*', () => HttpResponse.json({}));
+    const { signal } = new AbortController();
+
+    await expect(
+      request('/api/customers', { method: 'POST', body: { name: 'ACME' }, signal }),
+    ).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      request('/api/customers/AAAD', { method: 'PUT', body: { version: 0 }, signal }),
+    ).rejects.toThrow(/Only a GET can be aborted; PUT \/api\/customers\/AAAD/);
+    await expect(
+      request('/api/customers/review', { method: 'POST', body: { purpose: 'ADD' }, signal }),
+    ).rejects.toThrow(/Only a GET can be aborted; POST/);
+
+    expect(seen).toHaveLength(0);
+  });
+
+  it('a GET with a signal that is never aborted resolves, and fails with its ApiError, as without one', async () => {
+    const page = { items: [], nextCursor: null, limitReached: false, notice: null };
+    const seen = stub('get', '/api/customers', () => HttpResponse.json(page));
+    stub('get', '/api/customers/:custId', () => problem(404, 'DEM0599', { instance: '/api/customers/ZZZZ' }));
+    const controller = new AbortController();
+
+    await expect(request('/api/customers', { signal: controller.signal })).resolves.toEqual(page);
+    const error = await rejectionOf(request('/api/customers/ZZZZ', { signal: controller.signal }));
+    // Aborting once the calls have settled changes nothing about them.
+    controller.abort();
+
+    expect(only(seen).method).toBe('GET');
+    expect(error.status).toBe(404);
+    expect(error.problem.code).toBe('DEM0599');
+  });
+
+  /**
+   * Sends a GET under `signal` to a route whose answer of `status` arrives
+   * with its status and headers while its body never completes, aborts
+   * `signal` once the client's fetch has resolved, so the abort lands while
+   * the body is read rather than before, and returns what the call rejected
+   * with. A `fetch` spy (restored after the test by `restoreMocks`) tells
+   * when the status has arrived.
+   */
+  async function abortWhileBodyIsRead(status: number, controller: AbortController): Promise<unknown> {
+    server.use(
+      http.get('/api/session', () => {
+        // Aborting the fetch fails the client's read of this unfinished
+        // body, as in the browser.
+        const body = new ReadableStream<Uint8Array>({
+          start(stream) {
+            stream.enqueue(new TextEncoder().encode(`{"status":${status},"code":"`));
+          },
+        });
+        return new HttpResponse(body, {
+          status,
+          headers: { 'Content-Type': status < 300 ? 'application/json' : 'application/problem+json' },
+        });
+      }),
+    );
+    const fetchBefore = globalThis.fetch;
+    let responded: () => void = () => undefined;
+    const statusArrived = new Promise<void>((resolve) => {
+      responded = resolve;
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const response = await fetchBefore(input, init);
+      responded();
+      return response;
+    });
+
+    const call = request('/api/session', { signal: controller.signal });
+    await statusArrived;
+    await nextMacrotask();
+    controller.abort();
+    return reasonOf(call);
+  }
+
+  it('an abort while the body of a 200 is read rejects with the abort reason, not an ApiError', async () => {
+    const onUnauth = vi.fn<() => void>();
+    registerUnauthorized(onUnauth);
+    const controller = new AbortController();
+
+    const reason = await abortWhileBodyIsRead(200, controller);
+
+    expect(reason).toBe(controller.signal.reason);
+    expect(reason).toHaveProperty('name', 'AbortError');
+    expect(isApiError(reason)).toBe(false);
+    expect(onUnauth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 401, hookCalls: 1 },
+    { status: 404, hookCalls: 0 },
+  ])(
+    'an abort while the body of a $status is read rejects with its ApiError and the synthetic DEM9999; the 401 hook runs $hookCalls time(s)',
+    async ({ status, hookCalls }) => {
+      const onUnauth = vi.fn<() => void>();
+      registerUnauthorized(onUnauth);
+      const controller = new AbortController();
+
+      const reason = await abortWhileBodyIsRead(status, controller);
+
+      // The answer arrived, so it is the rejection; only its unread body is lost.
+      expect(controller.signal.aborted).toBe(true);
+      expect(isApiError(reason)).toBe(true);
+      expect(reason).toBeInstanceOf(ApiError);
+      expect(reason).toMatchObject({ status, problem: syntheticProblem(status) });
+      // A 401 is an authentication decision that did arrive, so it stands.
+      expect(onUnauth).toHaveBeenCalledTimes(hookCalls);
+    },
+  );
+
+  it('a 401 whose unauthorized handler aborts the same signal still rejects with its APP0401 ApiError, the hook called once', async () => {
+    const controller = new AbortController();
+    // As AuthProvider's sign-out does: clearing the session cancels the
+    // user's queries, which aborts the signal of the very read refused.
+    const onUnauth = vi.fn<() => void>(() => {
+      controller.abort();
+    });
+    registerUnauthorized(onUnauth);
+    const seen = stub('get', '/api/customers', () => problem(401, 'APP0401', { instance: '/api/customers' }));
+
+    const error = await rejectionOf(request('/api/customers', { query: { name: 'NIBH' }, signal: controller.signal }));
+
+    expect(only(seen).method).toBe('GET');
+    expect(controller.signal.aborted).toBe(true);
+    expect(error).not.toBe(controller.signal.reason);
+    expect(error.status).toBe(401);
+    expect(error.problem.code).toBe('APP0401');
+    expect(error.problem.detail).toBe('Sign in required.');
+    expect(onUnauth).toHaveBeenCalledTimes(1);
   });
 });
 

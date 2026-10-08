@@ -33,6 +33,10 @@
  * `CustomerDetailDialog.test.tsx`):
  * - Display read-only; Enter, F4, F5, F12 and Escape close with no picker and
  *   no reload; F3 shows DEM0003 and the window stays; a missing row DEM0599.
+ * - Closing the window while its opening read is pending aborts that read,
+ *   and its answer shows no alert; under StrictMode the read the simulated
+ *   unmount aborts shows none either, and the remount's read opens the
+ *   record.
  * - Edit → review → DEM0000 → PUT with `version`; add opens with Active `Y`
  *   → DEM0009 → POST → closes; a 422 highlights and focuses the first field
  *   and shows its message as an alert.
@@ -71,6 +75,7 @@
  * assertions start only once the catalog has loaded (until then `format`
  * returns the bare code).
  */
+import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -301,11 +306,16 @@ function CatalogProbe() {
 /** The window's `onClose`, as a mock. */
 type CloseMock = Mock<CustomerDetailDialogProps['onClose']>;
 
-/** What {@link renderDialog} needs: the function, the id (absent in add) and, optionally, the close callback. */
+/**
+ * What {@link renderDialog} needs: the function, the id (absent in add) and,
+ * optionally, the close callback and `strict`, which renders the tree under
+ * `<StrictMode>` as `src/main.tsx` renders the application.
+ */
 interface RenderOptions {
   mode: DetailMode;
   custId?: string;
   onClose?: CloseMock;
+  strict?: boolean;
 }
 
 /** What {@link renderDialog} returns. */
@@ -323,28 +333,37 @@ interface RenderedDialog {
  * application's providers: a fresh query client (no retries), the message
  * catalog, the toast host, the key scope stack, a router and a MAINTENANCE
  * session. Clears the request log first, so it holds only what the window
- * sends.
+ * sends. With `strict`, development's extra effect cycle (a simulated unmount
+ * and remount) runs too.
  */
-function renderDialog({ mode, custId, onClose = vi.fn<CustomerDetailDialogProps['onClose']>() }: RenderOptions): RenderedDialog {
+function renderDialog({
+  mode,
+  custId,
+  onClose = vi.fn<CustomerDetailDialogProps['onClose']>(),
+  strict = false,
+}: RenderOptions): RenderedDialog {
   traffic.length = 0;
   const user = userEvent.setup();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const screens = (open: boolean) => (
-    <QueryClientProvider client={queryClient}>
-      <MessageCatalogProvider>
-        <ToastProvider>
-          <KeyedScreens>
-            <MemoryRouter>
-              <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
-                <CatalogProbe />
-                <CustomerDetailDialog open={open} mode={mode} custId={custId} onClose={onClose} />
-              </AuthProvider>
-            </MemoryRouter>
-          </KeyedScreens>
-        </ToastProvider>
-      </MessageCatalogProvider>
-    </QueryClientProvider>
-  );
+  const screens = (open: boolean) => {
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <MessageCatalogProvider>
+          <ToastProvider>
+            <KeyedScreens>
+              <MemoryRouter>
+                <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
+                  <CatalogProbe />
+                  <CustomerDetailDialog open={open} mode={mode} custId={custId} onClose={onClose} />
+                </AuthProvider>
+              </MemoryRouter>
+            </KeyedScreens>
+          </ToastProvider>
+        </MessageCatalogProvider>
+      </QueryClientProvider>
+    );
+    return strict ? <StrictMode>{tree}</StrictMode> : tree;
+  };
   const { rerender } = render(screens(true));
   return {
     user,
@@ -630,6 +649,53 @@ describe('CustomerDetailDialog', () => {
         expect(alertRegion()).toBeEmptyDOMElement();
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
         expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      });
+
+      /**
+       * The `AbortSignal` the client handed `fetch` for each read of the
+       * stored customer, in call order, from a spy on the global `fetch`
+       * that calls through (restored after the test by `restoreMocks`).
+       */
+      function customerReadSignals(): () => Array<AbortSignal | undefined> {
+        const spy = vi.spyOn(globalThis, 'fetch');
+        return () =>
+          spy.mock.calls
+            .filter(([input]) => new URL(String(input), window.location.href).pathname === CUSTOMER_PATH)
+            .map(([, init]) => init?.signal ?? undefined);
+      }
+
+      it('edit: F12 while the opening read is pending aborts it, and the DEM0599 it would answer shows no alert', async () => {
+        const signals = customerReadSignals();
+        const { user, onClose, queryClient, setOpen, release } = await renderWhileReading('edit');
+        expect(signals()).toHaveLength(1);
+        expect(signals()[0]?.aborted).toBe(false);
+
+        await user.keyboard('{F12}');
+        expect(onClose).toHaveBeenCalledTimes(1);
+        setOpen(false);
+
+        await waitFor(() => expect(signals()[0]?.aborted).toBe(true));
+        release(0);
+        await settleReads(queryClient, 0);
+
+        expect(alertRegion()).toBeEmptyDOMElement();
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(signals()).toHaveLength(1);
+        expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      });
+
+      it('under StrictMode the read the simulated unmount aborted shows no alert, and the remount opens the record', async () => {
+        const signals = customerReadSignals();
+        const { queryClient } = renderDialog({ mode: 'display', custId: STORED.custId, strict: true });
+
+        const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
+        await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+        await settleReads(queryClient, 0);
+
+        expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
+        expect(alertRegion()).toBeEmptyDOMElement();
+        // Development's extra effect cycle aborted the first read; the remount's read answered.
+        expect(signals().map((signal) => signal?.aborted)).toEqual([true, false]);
       });
 
       it('a read answering DEM0599 while the window stays open shows the alert and opens on blank fields', async () => {

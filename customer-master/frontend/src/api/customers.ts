@@ -31,6 +31,12 @@
  * - Errors. Nothing here catches. Every non-2xx response rejects with the
  *   `ApiError` of `./client`, which the calling feature hands to
  *   `errors/useProblemPresenter.ts`.
+ * - Cancellation. Only the reads, `search` and `get`, take an `AbortSignal`,
+ *   which a query passes on so a read nobody waits for any more is aborted;
+ *   abandoned before its answer arrived, it rejects with the signal's
+ *   reason, while an error answer that arrived still rejects with its
+ *   `ApiError`. `review`, `add` and `update` take none: a write is never
+ *   cancelled, because once sent it may commit.
  * - Layer rule. The only runtime import is `request` from `./client`; types
  *   come from the generated `./schema` as type-only imports. Nothing is
  *   imported from `components/`, `errors/`, `features/` or `auth/`, and
@@ -187,8 +193,14 @@ export const customersApi = {
    * Rejects with 400 APP0400 (cursor, size, entry length) or 400 DEM0007
    * (`state` neither blank nor two characters), with `errors` naming the
    * parameter.
+   *
+   * `signal`, when given, aborts the read once its list is no longer wanted
+   * (replaced by a new search, reset, or left by an unmounted owner); a call
+   * abandoned before its answer arrived then rejects with the signal's
+   * reason, not an `ApiError`, while an error answer that arrived keeps its
+   * `ApiError`.
    */
-  search(params: CustomerSearchParams = {}): Promise<SearchResponse> {
+  search(params: CustomerSearchParams = {}, signal?: AbortSignal): Promise<SearchResponse> {
     return request<SearchResponse>('/api/customers', {
       query: {
         name: params.name,
@@ -198,6 +210,7 @@ export const customersApi = {
         size: params.size ?? DEFAULT_PAGE_SIZE,
         cursor: params.cursor,
       },
+      signal,
     });
   },
 
@@ -206,9 +219,14 @@ export const customersApi = {
    *
    * Rejects with 404 DEM0599 when the customer no longer exists, and 400
    * APP0400 when `custId` is not four characters of A–Z and 0–9.
+   *
+   * `signal`, when given, aborts the read once nobody waits for it (the
+   * window that asked closed); a call abandoned before its answer arrived
+   * then rejects with the signal's reason, not an `ApiError`, while an
+   * error answer that arrived keeps its `ApiError`.
    */
-  get(custId: string): Promise<CustomerResponse> {
-    return request<CustomerResponse>(customerPath(custId));
+  get(custId: string, signal?: AbortSignal): Promise<CustomerResponse> {
+    return request<CustomerResponse>(customerPath(custId), { signal });
   },
 
   /**

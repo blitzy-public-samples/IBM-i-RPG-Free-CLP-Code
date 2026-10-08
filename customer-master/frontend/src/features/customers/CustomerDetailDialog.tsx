@@ -309,12 +309,18 @@ function DetailSession({ mode, custId, onClose }: SessionProps) {
  *
  * Each opening owns its read. The query key carries an id of this opening,
  * so reopening the same customer while an earlier read is still pending
- * sends a request of its own instead of joining the closed window's. A read
- * that settles after its window closed (F12 or Escape while it was pending)
- * presents nothing, so no late DEM0599 or other alert reaches the screen now
- * displayed; it still rejects, so the query settles and is then dropped.
- * The request itself is not aborted: StrictMode's simulated unmount would
- * cancel it and the remount send a second one.
+ * sends a request of its own instead of joining the closed window's.
+ * Closing the window while the opening read is pending (F12 or Escape)
+ * aborts that read: the query function hands react-query's abort signal to
+ * `customersApi.get`, and the browser stops waiting, though the server may
+ * still answer. Under React StrictMode in development the simulated unmount
+ * aborts the first read and the remount sends one more; production builds
+ * send one read per opening. The abort's own rejection, and any read that
+ * settles after its window closed, presents nothing, so no late DEM0599 or
+ * other alert reaches the screen now displayed; it still rejects, so the
+ * query settles and is then dropped. An answer that did arrive while the
+ * window is open is still presented, even when handling it aborted the
+ * read: a 401 whose sign-out cancelled the query shows APP0401.
  */
 function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId: string }) {
   const { present } = useProblemPresenter();
@@ -330,12 +336,17 @@ function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId
   }, []);
   const query = useQuery({
     queryKey: ['customers', 'detail', custId, opening],
-    queryFn: async (): Promise<CustomerResponse> => {
+    queryFn: async ({ signal }): Promise<CustomerResponse> => {
       try {
-        return await customersApi.get(custId);
+        return await customersApi.get(custId, signal);
       } catch (error) {
-        // Shown only while this opening is mounted; after a close the screen now displayed did not ask for it.
-        if (mounted.current) {
+        // Shown only while this opening is mounted, and never when the
+        // rejection is the abort's own: after a close the screen now
+        // displayed did not ask for it, and StrictMode's aborted first read
+        // is followed by the remount's. An answer that did arrive, such as a
+        // 401 whose sign-out cancelled this query, is still shown.
+        const abandoned = signal.aborted && error === signal.reason;
+        if (mounted.current && !abandoned) {
           present(error);
         }
         throw error;

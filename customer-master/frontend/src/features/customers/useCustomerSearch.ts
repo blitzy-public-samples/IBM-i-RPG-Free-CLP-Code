@@ -46,6 +46,18 @@
  *   `ApiError`, such as 400 DEM0007) goes to `onError` uninspected. A
  *   response that arrives after its list was replaced by `search` or
  *   `reset`, or after the owner unmounted, reaches neither callback.
+ * - Cancellation. The query function hands react-query's abort signal to
+ *   `customersApi.search`, so react-query aborts the request of a list that
+ *   `search` or `reset` replaced, or whose owner unmounted, as soon as the
+ *   list loses its last observer; the abort's own rejection reaches no
+ *   callback, and neither does the notice of a list that was aborted. An
+ *   answer that did arrive is still reported while its list is current: a
+ *   401 whose sign-out cancelled the query goes to `onError` as APP0401.
+ *   The browser stops waiting, though the server may still finish the
+ *   request. A page load of the current list is never aborted: PageUp,
+ *   PageDown, `toLastLoaded` and `showPageOf` keep its query observed, and a
+ *   `next` joining a load in flight requests nothing, so no second fetch
+ *   cancels the first.
  * - No effect sets state. Requests start from event handlers (`search`,
  *   `next`) or, for Inquiry's load on open (PMTCUSTR :252-256), from the
  *   lazily initialised request that `initial` seeds; the query fetches it on
@@ -311,30 +323,41 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
 
   const query = useInfiniteQuery<SearchResponse, DefaultError, SearchData, SearchQueryKey, string | null>({
     queryKey: searchQueryKey(instanceId, request),
-    queryFn: async ({ queryKey, pageParam }): Promise<SearchResponse> => {
+    queryFn: async ({ queryKey, pageParam, signal }): Promise<SearchResponse> => {
       const [, , , criteria, generation] = queryKey;
       if (criteria === undefined || generation === undefined) {
         // The query is disabled without a request, so this cannot be reached.
         throw new Error('useCustomerSearch: no search is requested');
       }
+      // Whether this list is still the one a mounted owner shows.
       const isCurrent = (): boolean => mountedRef.current && generationRef.current === generation;
       let response: SearchResponse;
       try {
-        response = await customersApi.search({
-          name: criteria.name,
-          city: criteria.city,
-          state: criteria.state,
-          includeInactive: criteria.includeInactive,
-          size: SEARCH_PAGE_SIZE,
-          cursor: pageParam ?? undefined,
-        });
+        response = await customersApi.search(
+          {
+            name: criteria.name,
+            city: criteria.city,
+            state: criteria.state,
+            includeInactive: criteria.includeInactive,
+            size: SEARCH_PAGE_SIZE,
+            cursor: pageParam ?? undefined,
+          },
+          signal,
+        );
       } catch (error) {
-        if (isCurrent()) {
+        // The abort's own rejection is never reported: react-query aborts a
+        // request once its list lost its last observer, which StrictMode's
+        // simulated unmount also does after `mountedRef` is true again. An
+        // answer that did arrive (a 401 whose sign-out cancelled this very
+        // query among them) is still reported while the list is current.
+        const abandoned = signal.aborted && error === signal.reason;
+        if (isCurrent() && !abandoned) {
           callbacksRef.current.onError(error);
         }
         throw error;
       }
-      if (response.notice !== null && isCurrent()) {
+      // An aborted list is obsolete, and so is its notice.
+      if (response.notice !== null && isCurrent() && !signal.aborted) {
         callbacksRef.current.onNotice(response.notice);
       }
       return response;

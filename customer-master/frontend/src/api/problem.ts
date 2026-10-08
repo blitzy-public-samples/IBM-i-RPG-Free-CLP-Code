@@ -64,8 +64,9 @@ export type FieldError = components['schemas']['FieldError'];
  * Always present:
  * - `type`: `urn:customer-master:problem:<code>`.
  * - `title`: the HTTP reason phrase of `status`; empty in a synthetic problem.
- * - `status`: the HTTP status; `0` in a synthetic problem for a request that
- *   never reached the server.
+ * - `status`: the HTTP status; `0` in a synthetic problem when no HTTP
+ *   response was received, in which case whether the server received or
+ *   processed the request is unknown.
  * - `detail`: the catalog text of `code` with `args` substituted; empty in a
  *   synthetic problem, whose text the presenter takes from the catalog.
  * - `code`: the catalog key, such as `DEM1002` or `APP0400`.
@@ -92,8 +93,9 @@ export type Problem = Omit<ProblemSchema, 'args'> & Partial<Pick<ProblemSchema, 
  * The rejection of every failed API call: the HTTP status and the problem the
  * response carried, or a {@link syntheticProblem} when it carried none.
  *
- * `status` is the HTTP status of the response; `0` means the request never
- * reached the server (a network failure). `message` is the problem's
+ * `status` is the HTTP status of the response; `0` means no HTTP response was
+ * received (a network failure), so whether the server received or processed
+ * the request, a write included, is unknown. `message` is the problem's
  * `detail`, or its `code` when the detail is empty, so a stray rejection that
  * reaches a log or a test failure still names the catalog key.
  *
@@ -111,8 +113,8 @@ export class ApiError extends Error {
   readonly problem: Problem;
 
   /**
-   * @param status the HTTP status of the response, or `0` for a request that
-   *   never reached the server
+   * @param status the HTTP status of the response, or `0` when no HTTP
+   *   response was received and the server's outcome is unknown
    * @param problem the problem the response carried, or a synthetic one
    */
   constructor(status: number, problem: Problem) {
@@ -144,7 +146,8 @@ export function fieldErrors(problem: Problem): FieldError[] {
 /**
  * The DEM9999 problem `client.ts` uses when a response carries no usable
  * problem+json body (an HTML error page from a proxy, plain text, unparsable
- * JSON) and, with status `0`, when the request never reached the server.
+ * JSON) and, with status `0`, when no HTTP response was received; whether
+ * the server received or processed the request is then unknown.
  *
  * `title` and `detail` are empty because the bundle carries no message text:
  * `errors/useProblemPresenter.ts` shows the catalog text of `code` instead,
