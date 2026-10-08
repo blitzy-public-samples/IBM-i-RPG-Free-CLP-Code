@@ -92,10 +92,10 @@ import org.xml.sax.SAXParseException;
  * class. Fault messages name the kind of fault only and never quote the body, an element
  * value, a URL or a credential. Parser exceptions are not chained, because a
  * {@link SAXParseException} can quote the document it failed on. For the log line of a
- * fault, {@link #serviceError serviceError} reads the {@code Number} and
- * {@code Description} of the body's USPS {@code Error} element with the same hardened
- * parser; the client masks the configured credentials in them and escapes them before
- * logging, and never puts them in an exception message.
+ * fault or of an address-level error, {@link #serviceError serviceError} reads the
+ * {@code Number} and {@code Description} of the body's USPS {@code Error} element with
+ * the same hardened parser; the client masks the configured credentials in them and
+ * escapes them before logging, and never puts them in an exception message.
  *
  * <p><b>Threading.</b> The class holds no mutable state. JAXP factories, builders and
  * writers are not thread-safe, so each call creates its own; one instance can be shared
@@ -353,8 +353,9 @@ public final class UspsXmlCodec {
 
     /**
      * Reads the {@code Number} and {@code Description} of the USPS {@code Error} element a
-     * body holds, for the log line of a fault {@link #parse parse} reported. Logging only:
-     * the values are not validated, and no result or exception is built from them.
+     * body holds, for the log line of a fault {@link #parse parse} reported or of an
+     * address-level error it returned, whose {@code Number} is logged as sent. Logging
+     * only: the values are not validated, and no result or exception is built from them.
      *
      * <p>The {@code Error} read is:
      * <ul>

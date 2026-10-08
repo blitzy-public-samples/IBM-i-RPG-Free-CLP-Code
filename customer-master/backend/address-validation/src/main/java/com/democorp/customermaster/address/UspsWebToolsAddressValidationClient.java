@@ -297,9 +297,16 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
 
         if (result.standardized()) {
             log.debug("USPS address standardized: host={} status={}", host, status);
-        } else {
+        } else if (log.isInfoEnabled()) {
+            // The Number is logged as the service sent it, not as the parsed int, so a
+            // credential echoed with a sign or leading zeros is still masked whole. The body
+            // parse accepted holds exactly one Error, which serviceError reads.
+            Optional<UspsXmlCodec.ServiceError> serviceError = codec.serviceError(raw.body());
+            String number = serviceError.isPresent()
+                    ? serviceError.get().number()
+                    : Integer.toString(result.errorNumber());
             log.info("USPS address not standardized: host={} status={} errorNumber={} errorDescription={}",
-                    host, status, result.errorNumber(), logText(result.errorDescription()));
+                    host, status, logElement(number), logText(result.errorDescription()));
         }
         return result;
     }

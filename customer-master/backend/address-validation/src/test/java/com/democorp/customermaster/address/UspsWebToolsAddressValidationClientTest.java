@@ -104,6 +104,11 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  *   <li>Credential echo: a {@code Description} that echoes the user id and password, in an
  *       address-level error or a root {@code <Error>}, is logged with {@code ****} in their
  *       place.</li>
+ *   <li>Numeric credential echoed as the {@code Number}: an address-level error whose
+ *       {@code Number} echoes a numeric user id (plain, with a leading zero or with a plus
+ *       sign) or a numeric password returns the parsed number while its INFO line carries
+ *       {@code errorNumber=****}, and the captured output holds neither the echoed text nor
+ *       the parsed number's text.</li>
  *   <li>Credential forms: with the password {@code p'&q}, the request carries the
  *       {@code PASSWORD} attribute exactly as {@link UspsXmlCodec#attributeValue} writes
  *       it, {@code p'&amp;q}; the mask removes that wire form, the raw form, the
@@ -430,6 +435,53 @@ class UspsWebToolsAddressValidationClientTest {
         assertThat(capturedLines(output, "USPS address not standardized"))
                 .singleElement(InstanceOfAssertFactories.STRING)
                 .endsWith("errorNumber=-2147219401 errorDescription=No match for **** / ****.");
+        assertNoCredentials(output, null);
+    }
+
+    /**
+     * Numeric credentials a service echoes as the address-level {@code Number}: each case
+     * is the {@code Number} text the fake sends, named for the case, followed by the
+     * configured user id and password, one of which that text equals. The values are
+     * fictitious, and 9 or 10 digits long so that no PID, port or timestamp in the console
+     * output can contain them. The leading zero and the plus sign are lost when the text
+     * is parsed to an int, so only masking the text as sent hides those two credentials.
+     */
+    static Stream<Arguments> numericCredentialsEchoedAsNumber() {
+        return Stream.of(
+                Arguments.of(Named.of("a numeric user id", "731942586"), "731942586", PASSWORD),
+                Arguments.of(Named.of("a numeric user id with a leading zero", "0731942586"), "0731942586", PASSWORD),
+                Arguments.of(Named.of("a numeric user id with a plus sign", "+975318642"), "+975318642", PASSWORD),
+                Arguments.of(Named.of("a numeric password", "864209753"), USER_ID, "864209753"));
+    }
+
+    @ParameterizedTest(name = "{0} echoed as the address-level Number is logged as ****")
+    @MethodSource("numericCredentialsEchoedAsNumber")
+    @DisplayName("a numeric credential echoed as the address-level Number is returned parsed and logged as ****")
+    void addressErrorNumberEchoingNumericCredentialIsMasked(
+            String echoed, String userId, String password, CapturedOutput output) {
+        byte[] body = addressErrorBody(echoed, "Address Not Found.");
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+        int parsed = Integer.parseInt(echoed);
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(
+                "http://127.0.0.1:" + port + ENDPOINT_PATH, userId, password,
+                NORMAL_CONNECT_TIMEOUT, NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(result.standardized()).isFalse();
+        // The result keeps the parsed Number unmasked; only the log line masks it.
+        assertThat(result.errorNumber() == parsed)
+                .withFailMessage("returned errorNumber is not the parsed Number")
+                .isTrue();
+        assertThat(result.errorDescription()).isEqualTo("Address Not Found.");
+        // Checked before the line itself, whose failure message would quote a leaked value.
+        assertAbsent(output.getAll(), "captured output", echoed, Integer.toString(parsed), userId, password);
+        assertThat(capturedLines(output, "USPS address not standardized"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" INFO ")
+                .endsWith("host=127.0.0.1 status=200 errorNumber=**** errorDescription=Address Not Found.");
         assertNoCredentials(output, null);
     }
 
@@ -1049,11 +1101,20 @@ class UspsWebToolsAddressValidationClientTest {
      */
     private static UspsWebToolsAddressValidationClient client(
             String baseUrl, String password, Duration connectTimeout, Duration readTimeout) {
+        return client(baseUrl, USER_ID, password, connectTimeout, readTimeout);
+    }
+
+    /**
+     * Builds a client for {@code baseUrl} with {@code userId}, {@code password} and the given
+     * connect and read timeouts.
+     */
+    private static UspsWebToolsAddressValidationClient client(
+            String baseUrl, String userId, String password, Duration connectTimeout, Duration readTimeout) {
         return new UspsWebToolsAddressValidationClient(new AddressValidationProperties(
                 true,
                 AddressValidationProperties.Client.USPS,
                 new AddressValidationProperties.Usps(
-                        baseUrl, USER_ID, password, connectTimeout, readTimeout)));
+                        baseUrl, userId, password, connectTimeout, readTimeout)));
     }
 
     /**
@@ -1063,10 +1124,19 @@ class UspsWebToolsAddressValidationClientTest {
      * references.
      */
     private static byte[] addressErrorBody(String descriptionXml) {
+        return addressErrorBody("-2147219401", descriptionXml);
+    }
+
+    /**
+     * A 200 body holding an address-level error: blank {@code City}, {@code numberText} as
+     * the {@code Number} content, {@code Source} {@code clsAMS} and {@code descriptionXml}
+     * as the {@code Description} content, both inserted as XML markup.
+     */
+    private static byte[] addressErrorBody(String numberText, String descriptionXml) {
         return ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                 + "<AddressValidateResponse><Address ID=\"0\">"
                 + "<Address2>8 ELMWOOD DR</Address2><City></City><State>CT</State><Zip5>06399</Zip5>"
-                + "<Error><Number>-2147219401</Number><Source>clsAMS</Source>"
+                + "<Error><Number>" + numberText + "</Number><Source>clsAMS</Source>"
                 + "<Description>" + descriptionXml + "</Description></Error>"
                 + "</Address></AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
     }

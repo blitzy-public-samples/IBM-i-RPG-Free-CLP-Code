@@ -113,11 +113,22 @@ class MessageCatalogIT extends AbstractPostgresIT {
     void literalSubstitution() {
         assertThat(catalog.text("DEM0004", "X")).isEqualTo("X is not a valid option at this time.");
         assertThat(catalog.text("DEM0502", "Name")).isEqualTo("Name: Must not be blank");
-        // MessageFormat would treat the apostrophe as a quote and drop it.
+        // An apostrophe in an argument is copied verbatim. MessageFormat would copy it too, because it
+        // reads quotes only in its pattern, so this line guards argument pass-through; the template case
+        // below is the one MessageFormat would corrupt.
         assertThat(catalog.text("DEM9898", "Can't find it")).isEqualTo("USPS: Can't find it");
         // One pass: text inserted from an argument is never substituted again.
         assertThat(catalog.text("DEM9898", "{0}")).isEqualTo("USPS: {0}");
         assertThat(catalog.text("DEM0000")).isEqualTo("Press Enter to update. F12 to Cancel.");
+
+        // Apostrophes in the template. MessageFormat formats "Can't find {0}" as "Cant find {0}": the lone
+        // quote opens a quoted span to the end of the pattern, so it is dropped and {0} is never replaced.
+        // It also turns a doubled quote into one. Literal substitution keeps both templates as written.
+        MessageCatalog fixture = MessageCatalog.fromReader(new StringReader("Q=Can't find {0}\nQQ=It''s {0}\n"));
+
+        assertThat(fixture.all()).containsExactly(Map.entry("Q", "Can't find {0}"), Map.entry("QQ", "It''s {0}"));
+        assertThat(fixture.text("Q", "it")).isEqualTo("Can't find it");
+        assertThat(fixture.text("QQ", "it")).isEqualTo("It''s it");
     }
 
     @Test

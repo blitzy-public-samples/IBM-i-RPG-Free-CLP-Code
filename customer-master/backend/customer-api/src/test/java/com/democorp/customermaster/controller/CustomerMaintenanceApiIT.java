@@ -138,6 +138,13 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
             new AddressValidationRequest("", "12 MAIN ST", "SPRINGFIELD", "IL", "62701", "");
 
     /**
+     * A successful answer to {@link #EXPECTED_REQUEST} that differs from it in every address component: another
+     * street, another city, another State of STATES, another Zip5, and a Zip4.
+     */
+    private static final AddressValidationResult STANDARDIZED =
+            AddressValidationResult.success("", "1200 N MAIN ST STE 4", "CHATHAM", "MO", "62702", "1234");
+
+    /**
      * The address service, mocked for this class only. By default it echoes the request as a standardized
      * address without ZIP+4 ({@link #echoAddresses()}); tests that need another outcome override it.
      */
@@ -148,6 +155,8 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
      * Stubs {@link #addressClient} to standardize every request to itself, with a blank ZIP+4. Because every
      * street in this class is at most 30 characters and every ZIP 5 digits, the echo leaves the reviewed
      * values equal to the normalized input. Runs after the base's database reset.
+     * {@link #reviewReturnsTheStandardizedAddress()} overrides it with {@link #STANDARDIZED}, which proves
+     * that the reviewed address is the service's answer and not the draft's.
      */
     @BeforeEach
     void echoAddresses() {
@@ -217,6 +226,37 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(addBody.path("standardized").asBoolean()).isTrue();
         assertNotice(addBody.path("notice"), "DEM0009", ADD_CONFIRMATION);
 
+        ArgumentCaptor<AddressValidationRequest> sent = ArgumentCaptor.forClass(AddressValidationRequest.class);
+        verify(addressClient, times(2)).validate(sent.capture());
+        assertThat(sent.getAllValues()).containsExactly(EXPECTED_REQUEST, EXPECTED_REQUEST);
+        assertThat(count()).isZero();
+    }
+
+    @Test
+    @DisplayName("review answers the standardized address, not the draft's, with its notice, and stores nothing")
+    void reviewReturnsTheStandardizedAddress() {
+        // doReturn, not when(addressClient.validate(any())), which would call the echo with a null argument.
+        doReturn(STANDARDIZED).when(addressClient).validate(any());
+
+        ResponseEntity<String> edit = review("EDIT", validFields());
+
+        assertThat(edit.getStatusCode()).as("body: %s", edit.getBody()).isEqualTo(HttpStatus.OK);
+        JsonNode editBody = json(edit);
+        assertStandardizedFields(editBody.path("customer"));
+        assertThat(editBody.path("standardized").isBoolean()).isTrue();
+        assertThat(editBody.path("standardized").asBoolean()).isTrue();
+        assertNotice(editBody.path("notice"), "DEM0000", EDIT_CONFIRMATION);
+
+        ResponseEntity<String> add = review("ADD", validFields());
+
+        assertThat(add.getStatusCode()).as("body: %s", add.getBody()).isEqualTo(HttpStatus.OK);
+        JsonNode addBody = json(add);
+        assertStandardizedFields(addBody.path("customer"));
+        assertThat(addBody.path("standardized").isBoolean()).isTrue();
+        assertThat(addBody.path("standardized").asBoolean()).isTrue();
+        assertNotice(addBody.path("notice"), "DEM0009", ADD_CONFIRMATION);
+
+        // The service received the draft's address; only the answer carries the standardized one.
         ArgumentCaptor<AddressValidationRequest> sent = ArgumentCaptor.forClass(AddressValidationRequest.class);
         verify(addressClient, times(2)).validate(sent.capture());
         assertThat(sent.getAllValues()).containsExactly(EXPECTED_REQUEST, EXPECTED_REQUEST);
@@ -538,6 +578,26 @@ class CustomerMaintenanceApiIT extends AbstractPostgresIT {
         assertThat(customer.path("city").asText()).isEqualTo("SPRINGFIELD");
         assertThat(customer.path("state").asText()).isEqualTo("IL");
         assertThat(customer.path("zip").asText()).isEqualTo("62701");
+        assertThat(customer.path("corpPhone").asText()).isEqualTo("(217) 555-0100");
+        assertThat(customer.path("acctMgr").asText()).isEqualTo("JANE DOE");
+        assertThat(customer.path("acctPhone").asText()).isEqualTo("(217) 555-0101");
+        assertThat(customer.path("active").asText()).isEqualTo("Y");
+    }
+
+    /**
+     * Asserts the {@code customer} member of a review of {@link #validFields()} answered by {@link #STANDARDIZED}:
+     * {@code Edit_Address} overwrites the street with {@code Address2}, the city and the State, and builds
+     * the ZIP as {@code Zip5-Zip4} [USPS_Address/MTNCUSTR.SQLRPGLE:480-488]; the five other fields stay
+     * normalized.
+     *
+     * @param customer the {@code customer} member of a review
+     */
+    private static void assertStandardizedFields(JsonNode customer) {
+        assertThat(customer.path("addr").asText()).isEqualTo("1200 N MAIN ST STE 4");
+        assertThat(customer.path("city").asText()).isEqualTo("CHATHAM");
+        assertThat(customer.path("state").asText()).isEqualTo("MO");
+        assertThat(customer.path("zip").asText()).isEqualTo("62702-1234");
+        assertThat(customer.path("name").asText()).isEqualTo("ACME TOOLS");
         assertThat(customer.path("corpPhone").asText()).isEqualTo("(217) 555-0100");
         assertThat(customer.path("acctMgr").asText()).isEqualTo("JANE DOE");
         assertThat(customer.path("acctPhone").asText()).isEqualTo("(217) 555-0101");

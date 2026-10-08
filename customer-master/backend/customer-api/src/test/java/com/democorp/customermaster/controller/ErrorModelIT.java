@@ -63,8 +63,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  *   <li>The catch-all: a {@code DuplicateKeyException} whose messages quote SQL and a secret becomes an
  *       opaque 500 DEM9999.</li>
  *   <li>Framework 4xx (405, 415, unreadable JSON, an unknown route) keep their status with APP0400.</li>
- *   <li>ERROR dispatch answered by {@code ProblemErrorController}: an anonymous unknown route (401
- *       APP0401) and an exception thrown by a servlet filter outside any controller (500 DEM9999).</li>
+ *   <li>The security filter chain, before any handler mapping: an anonymous request to an unknown route is
+ *       rejected and answered by {@code SecurityConfig}'s authentication entry point (401 APP0401).</li>
+ *   <li>ERROR dispatch answered by {@code ProblemErrorController}: an exception thrown by a servlet filter
+ *       outside any controller (500 DEM9999).</li>
  *   <li>An {@code Accept: text/html} request still receives problem+json, never an HTML page, and no
  *       body ever holds Spring Boot's {@code timestamp}, {@code error} or {@code path} members.</li>
  * </ul>
