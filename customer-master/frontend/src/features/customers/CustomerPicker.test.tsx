@@ -31,8 +31,19 @@
  * - option 2 is DEM0004 and opens no window; option 5 opens the display
  *   window over the picker;
  * - F3, F12 and Escape call `onCancel` and return no id; F6 is DEM0003;
- * - closed, the picker renders nothing and sends no request; a host that
- *   closes it in its callbacks gets focus back and a fresh search on reopen;
+ * - closed, the picker renders nothing and sends no request;
+ * - in its production host, the "Order entry" form (`HostFormDemoPage`, route
+ *   `/demo/selection`): "Customer id +" takes four characters, uppercased as
+ *   typed; the "Look up customer" button, F4 with focus on the field or on
+ *   that button, and the F4=Prompt+ legend button with focus in the field
+ *   open the picker, while either F4 with focus anywhere else is DEM0005
+ *   and opens nothing;
+ *   option 1 writes the id into the field and leaves focus in the field, not
+ *   on the button that opened the picker; F3, F12 and Escape in the picker
+ *   close it with the field unchanged, focus in it and the host still shown,
+ *   because the picker's scope is topmost and the host's own exits never run;
+ *   a reopened picker searches anew; with the picker closed, the host's F3,
+ *   F12 and Escape leave for `/` and F6 is DEM0003;
  * - every panel and every opening owns its list: two Selection panels with
  *   the same criteria under one query client each request their own first
  *   page and page independently, and a picker reopened after paging requests
@@ -51,18 +62,21 @@
  *
  * Harness. The providers are mounted in the order `src/App.tsx` uses, with a
  * fresh `QueryClient` per test and the toast `clear` wired to the key scope's
- * `onBeforeCommand`, under a `MemoryRouter`. The session is the MAINTENANCE
- * demo user, which proves the role adds nothing to Selection. A probe reads
+ * `onBeforeCommand`, under a `MemoryRouter`. The host tests render the
+ * production `HostFormDemoPage` at `/demo/selection` in a route table whose
+ * `/` is a marker standing in for the menu, so the host's exits show as that
+ * marker appearing; the picker inside it is the real one, with no test
+ * callback between them. The session is the MAINTENANCE demo user, which
+ * proves the role adds nothing to Selection. A probe reads
  * `useMessages().ready`, so message assertions start only once the catalog
  * has loaded (until then `format` returns the bare code).
  */
-import { useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { setCredentials } from '../../api/client';
@@ -73,6 +87,7 @@ import { KeyScopeProvider } from '../../keyboard/KeyScopeProvider';
 import { MessageCatalogProvider, useMessages } from '../../messages/MessageCatalogProvider';
 import { customers, messageText, users } from '../../test/handlers';
 import { server } from '../../test/server';
+import { HostFormDemoPage } from '../demo/HostFormDemoPage';
 import { CustomerPicker } from './CustomerPicker';
 import type { CustomerPickerProps } from './CustomerPicker';
 import { CustomerSearchPanel } from './CustomerSearchPage';
@@ -143,6 +158,21 @@ const SEARCH_PATH = '/api/customers';
 
 /** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
+
+/** The route of the Order entry host form, as `src/routes.tsx` serves it. */
+const HOST_PATH = '/demo/selection';
+
+/** The function line of the Order entry host form's header. */
+const HOST_FUNCTION = 'Order entry';
+
+/** Label of the host form's promptable field (the calling program's return slot). */
+const CUSTOMER_ID_LABEL = 'Customer id +';
+
+/** Name of the host form's button that opens the picker. */
+const LOOKUP_BUTTON = 'Look up customer';
+
+/** Text of the element the host tests route `/` to, standing in for the main menu. */
+const HOME_MARKER = 'Main menu stand-in';
 
 // ---------------------------------------------------------------------------
 // Request log
@@ -221,13 +251,20 @@ async function waitForCatalog(): Promise<void> {
   await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
 }
 
+/** Options of {@link renderWithProviders}. */
+interface RenderOptions {
+  /** The router's history, current entry last; the router's own default (`/`) when absent. */
+  initialEntries?: string[];
+}
+
 /**
  * Renders `ui` inside the application's providers, signed in as the
  * MAINTENANCE user: a fresh query client (no retries), the message catalog,
- * the toast host, the key scope stack, a router and the session. Resolves
- * once the catalog has loaded.
+ * the toast host, the key scope stack, a router at `initialEntries` and the
+ * session. `ui` may be a `<Routes>` table, which then matches against that
+ * history. Resolves once the catalog has loaded.
  */
-async function renderWithProviders(ui: ReactElement): Promise<UserEvent> {
+async function renderWithProviders(ui: ReactElement, { initialEntries }: RenderOptions = {}): Promise<UserEvent> {
   const user = userEvent.setup();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -235,7 +272,7 @@ async function renderWithProviders(ui: ReactElement): Promise<UserEvent> {
       <MessageCatalogProvider>
         <ToastProvider>
           <KeyedScreens>
-            <MemoryRouter>
+            <MemoryRouter initialEntries={initialEntries}>
               <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: [...MAINTENANCE_USER.roles] }}>
                 <CatalogProbe />
                 {ui}
@@ -279,42 +316,48 @@ async function openPicker(initialName?: string): Promise<OpenPicker> {
   return { user, dialog, onSelect, onCancel };
 }
 
-/** Props of {@link HostForm}: spies that see each callback before the host acts on it. */
-interface HostFormProps {
-  onSelectSeen: (custId: string) => void;
-  onCancelSeen: () => void;
+/** What {@link renderHostForm} returns: the user-event instance and the host's two promptable controls. */
+interface HostFormHandle {
+  user: UserEvent;
+  /** The "Customer id +" input. */
+  field: HTMLInputElement;
+  /** The "Look up customer" button. */
+  lookup: HTMLElement;
 }
 
 /**
- * A minimal host, as the "Order entry" demo form hosts the picker: a
- * "Customer id +" field and a prompt button. It closes the picker in both
- * callbacks, as the contract asks; a selection writes the id into the
- * field, a cancel leaves the field as it was.
+ * Renders the production Order entry host form (`HostFormDemoPage`) at
+ * {@link HOST_PATH}, in a route table whose `/` shows {@link HOME_MARKER},
+ * and resolves once the catalog has loaded. The picker it hosts is closed,
+ * and nothing has focus.
  */
-function HostForm({ onSelectSeen, onCancelSeen }: HostFormProps) {
-  const [custId, setCustId] = useState('');
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <label htmlFor="host-customer-id">Customer id +</label>
-      <input id="host-customer-id" value={custId} readOnly />
-      <button type="button" onClick={() => setOpen(true)}>
-        Prompt customer
-      </button>
-      <CustomerPicker
-        open={open}
-        onSelect={(selected) => {
-          onSelectSeen(selected);
-          setCustId(selected);
-          setOpen(false);
-        }}
-        onCancel={() => {
-          onCancelSeen();
-          setOpen(false);
-        }}
-      />
-    </div>
+async function renderHostForm(): Promise<HostFormHandle> {
+  const user = await renderWithProviders(
+    <Routes>
+      <Route path={HOST_PATH} element={<HostFormDemoPage />} />
+      <Route path="/" element={<p>{HOME_MARKER}</p>} />
+    </Routes>,
+    { initialEntries: [HOST_PATH] },
   );
+  const field = screen.getByLabelText(CUSTOMER_ID_LABEL);
+  if (!(field instanceof HTMLInputElement)) {
+    throw new Error(`The ${CUSTOMER_ID_LABEL} label does not name an input`);
+  }
+  return { user, field, lookup: screen.getByRole('button', { name: LOOKUP_BUTTON }) };
+}
+
+/**
+ * The host form's legend button `label`. Only for use while the picker is
+ * closed, when the host's legend is the one function-key toolbar shown.
+ */
+function hostLegendKey(label: string): HTMLElement {
+  return within(screen.getByRole('toolbar', { name: 'Function keys' })).getByRole('button', { name: label });
+}
+
+/** Asserts that the Order entry form is still the screen shown: its function line is there and the menu stand-in is not. */
+function expectHostShown(): void {
+  expect(screen.getByText(HOST_FUNCTION, { selector: 'p' })).toBeInTheDocument();
+  expect(screen.queryByText(HOME_MARKER)).not.toBeInTheDocument();
 }
 
 /** Accessible names of the two regions {@link TwoSelectionPanels} renders, in order. */
@@ -452,6 +495,7 @@ describe('CustomerPicker', () => {
     expect(NIBH).toMatchObject({ custId: 'AAAD', active: 'Y' });
     expect(messageText('DEM0003')).toBe('Key is not active now');
     expect(messageText('DEM0004', ['2'])).toBe('2 is not a valid option at this time.');
+    expect(messageText('DEM0005')).toBe('Use F4 only if + is on field');
   });
 
   // -------------------------------------------------------------------------
@@ -666,45 +710,182 @@ describe('CustomerPicker', () => {
   });
 
   // -------------------------------------------------------------------------
-  // In a host (the Selection demo form)
+  // In its host: the production Order entry form (HostFormDemoPage)
   // -------------------------------------------------------------------------
 
-  describe('in a host form', () => {
-    it('the host closes it in each callback: the id fills the field, focus returns to the invoker, a reopened picker starts fresh, Cancel leaves the field', async () => {
-      const onSelectSeen = vi.fn<(custId: string) => void>();
-      const onCancelSeen = vi.fn<() => void>();
-      const user = await renderWithProviders(<HostForm onSelectSeen={onSelectSeen} onCancelSeen={onCancelSeen} />);
-      const field = screen.getByLabelText('Customer id +');
-      const prompt = screen.getByRole('button', { name: 'Prompt customer' });
+  describe('in the Order entry host form', () => {
+    it('shows "Customer id +" as a four-character field that uppercases as typed, beside "Look up customer" and the F3, F4 and F12 legend', async () => {
+      const { user, field, lookup } = await renderHostForm();
 
-      await user.click(prompt);
+      expect(screen.getByRole('heading', { name: 'Customer Master' })).toBeInTheDocument();
+      expectHostShown();
+      expect(field).toHaveAttribute('maxlength', '4');
+      expect(field).toHaveValue('');
+      expect(lookup).toHaveAttribute('aria-haspopup', 'dialog');
+      expect(
+        within(screen.getByRole('toolbar', { name: 'Function keys' }))
+          .getAllByRole('button')
+          .map((button) => button.textContent),
+      ).toEqual(['F3=Exit', 'F4=Prompt+', 'F12=Cancel']);
+
+      await user.type(field, 'aaagx');
+
+      expect(field).toHaveValue('AAAG');
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(traffic).toEqual([]);
+    });
+
+    it('"Look up customer" opens the picker; option 1 writes the id into the field and puts focus back in the field, not on the button; a reopened picker starts fresh, and F12 there leaves the field as it was', async () => {
+      const { user, field, lookup } = await renderHostForm();
+
+      await user.click(lookup);
       const first = await screen.findByRole('dialog', { name: PICKER_NAME });
       await waitFor(() => expect(nameFilter(first)).toHaveFocus());
+      expect(traffic).toEqual([]);
       await searchByName(user, first, 'URNA', [URNA.name]);
       await user.type(optionInput(first, URNA.name), '1');
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-      expect(onSelectSeen).toHaveBeenCalledTimes(1);
-      expect(onSelectSeen).toHaveBeenCalledWith(URNA.custId);
+      // Option 1 returned this row's id, and the host wrote exactly it.
       expect(field).toHaveValue(URNA.custId);
-      expect(prompt).toHaveFocus();
+      // Dialog hands focus back to its invoker, the button; the host then
+      // moves it on to the field, as a 5250 prompt returned the cursor there.
+      await waitFor(() => expect(field).toHaveFocus());
+      expect(lookup).not.toHaveFocus();
+      expectHostShown();
 
       // Reopened: a new opening, as PMTCUSTR ran Init on every call.
-      await user.click(prompt);
+      await user.click(lookup);
       const second = await screen.findByRole('dialog', { name: PICKER_NAME });
       await waitFor(() => expect(nameFilter(second)).toHaveFocus());
       expect(nameFilter(second)).toHaveValue('');
       expect(shownNames(second)).toEqual([]);
-      expect(searches()).toHaveLength(1);
+      expect(searches()).toEqual([firstPageQuery('URNA')]);
 
       await user.keyboard('{F12}');
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-      expect(onCancelSeen).toHaveBeenCalledTimes(1);
-      expect(onSelectSeen).toHaveBeenCalledTimes(1);
       expect(field).toHaveValue(URNA.custId);
-      expect(prompt).toHaveFocus();
+      await waitFor(() => expect(field).toHaveFocus());
+      expectHostShown();
+      expect(searches()).toEqual([firstPageQuery('URNA')]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it.each([
+      [
+        'F4 with focus in "Customer id +"',
+        async ({ user }: HostFormHandle) => {
+          await user.keyboard('{F4}');
+        },
+      ],
+      [
+        'F4 with focus on "Look up customer"',
+        async ({ user, lookup }: HostFormHandle) => {
+          await user.tab();
+          expect(lookup).toHaveFocus();
+          await user.keyboard('{F4}');
+        },
+      ],
+      [
+        'the F4=Prompt+ legend button with focus in "Customer id +"',
+        async ({ user, field }: HostFormHandle) => {
+          expect(field).toHaveFocus();
+          // The legend button takes no focus on mouse-down, so the field still
+          // holds it when the shared F4 handler checks where focus is.
+          await user.click(hostLegendKey('F4=Prompt+'));
+        },
+      ],
+    ])('%s opens the picker, which starts in "Name starts with:" with nothing searched', async (_how, prompt) => {
+      const host = await renderHostForm();
+      await host.user.type(host.field, 'ab');
+
+      await prompt(host);
+
+      const dialog = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(dialog)).toHaveFocus());
+      expect(nameFilter(dialog)).toHaveValue('');
+      expect(shownNames(dialog)).toEqual([]);
+      expect(traffic).toEqual([]);
+      expect(host.field).toHaveValue('AB');
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it.each([
+      ['F12', '{F12}'],
+      ['Escape', '{Escape}'],
+      ['F3', '{F3}'],
+    ])('%s in the picker cancels only the picker: the field keeps its value and gets focus back, and the host form stays', async (_key, keys) => {
+      const { user, field } = await renderHostForm();
+      await user.type(field, 'ab');
+      await user.keyboard('{F4}');
+      const dialog = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(dialog)).toHaveFocus());
+      await searchByName(user, dialog, 'URNA', [URNA.name]);
+      // An option typed but not yet entered selects nothing.
+      await user.type(optionInput(dialog, URNA.name), '1');
+
+      await user.keyboard(keys);
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      // No id returned: the field still holds what the user typed.
+      expect(field).toHaveValue('AB');
+      await waitFor(() => expect(field).toHaveFocus());
+      // The picker's scope was topmost, so the host's own exit to `/` did not run.
+      expectHostShown();
+      expect(searches()).toEqual([firstPageQuery('URNA')]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('F4, and the F4=Prompt+ button, with focus off the field show DEM0005 "Use F4 only if + is on field" and open nothing', async () => {
+      const { user } = await renderHostForm();
+      expect(document.body).toHaveFocus();
+
+      await user.keyboard('{F4}');
+
+      expect(await within(alertRegion()).findByText(messageText('DEM0005'))).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      // The click clears the earlier message first, so exactly one DEM0005 shows.
+      await user.click(hostLegendKey('F4=Prompt+'));
+
+      await waitFor(() => expect(within(alertRegion()).getAllByText(messageText('DEM0005'))).toHaveLength(1));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(document.body).toHaveFocus();
+      expectHostShown();
+      expect(traffic).toEqual([]);
+    });
+
+    it.each([
+      ['F3', '{F3}'],
+      ['F12', '{F12}'],
+      ['Escape', '{Escape}'],
+    ])('with the picker closed, %s leaves the host form for the menu at /', async (_key, keys) => {
+      const { user, field } = await renderHostForm();
+      await user.type(field, 'ab');
+
+      await user.keyboard(keys);
+
+      expect(await screen.findByText(HOME_MARKER)).toBeInTheDocument();
+      expect(screen.queryByText(HOST_FUNCTION)).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(traffic).toEqual([]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('F6, which the host form does not enable, shows DEM0003 "Key is not active now" and changes nothing', async () => {
+      const { user, field } = await renderHostForm();
+      await user.type(field, 'ab');
+
+      await user.keyboard('{F6}');
+
+      expect(await within(alertRegion()).findByText(messageText('DEM0003'))).toBeInTheDocument();
+      expect(field).toHaveValue('AB');
+      expect(field).toHaveFocus();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expectHostShown();
+      expect(traffic).toEqual([]);
     });
   });
 
@@ -754,13 +935,10 @@ describe('CustomerPicker', () => {
     });
 
     it('a picker reopened after paging starts anew: the same criteria request page 1 again and show it', async () => {
-      const onSelectSeen = vi.fn<(custId: string) => void>();
-      const onCancelSeen = vi.fn<() => void>();
-      const user = await renderWithProviders(<HostForm onSelectSeen={onSelectSeen} onCancelSeen={onCancelSeen} />);
-      const prompt = screen.getByRole('button', { name: 'Prompt customer' });
+      const { user, field, lookup } = await renderHostForm();
       const pageOne = FIRST_PAGE_ROWS.map((row) => row.name);
 
-      await user.click(prompt);
+      await user.click(lookup);
       const first = await screen.findByRole('dialog', { name: PICKER_NAME });
       await waitFor(() => expect(nameFilter(first)).toHaveFocus());
       await searchWithEnter(user, first, pageOne);
@@ -769,13 +947,15 @@ describe('CustomerPicker', () => {
       await user.keyboard('{F12}');
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
-      expect(onCancelSeen).toHaveBeenCalledTimes(1);
+      // Cancelled: no id came back, and the host form is still shown.
+      expect(field).toHaveValue('');
+      expectHostShown();
       expect(searches()).toHaveLength(2);
 
       // Reopened with the same (blank) criteria: nothing is shown before Enter,
       // and Enter requests the first page again rather than reusing the pages
       // the closed opening loaded.
-      await user.click(prompt);
+      await user.click(lookup);
       const second = await screen.findByRole('dialog', { name: PICKER_NAME });
       await waitFor(() => expect(nameFilter(second)).toHaveFocus());
       expect(shownNames(second)).toEqual([]);
@@ -789,7 +969,7 @@ describe('CustomerPicker', () => {
       expect(recorded[1]?.cursor).toEqual(expect.any(String));
       expect(recorded[2]).toEqual(firstPageQuery());
       expect(within(second).getByText('More...')).toBeInTheDocument();
-      expect(onSelectSeen).not.toHaveBeenCalled();
+      expect(field).toHaveValue('');
     });
   });
 });

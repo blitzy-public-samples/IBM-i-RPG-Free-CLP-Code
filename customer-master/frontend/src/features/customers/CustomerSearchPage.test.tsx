@@ -35,6 +35,9 @@
  *   PmtState prompt over it (5250_Subfile/MTNCUSTR.SQLRPGLE:364-382): only
  *   the window on top is keyed, and returning from the prompt leaves the
  *   detail window and the list as they were.
+ * - **Saved edit.** An update CustDsp committed is re-read into its subfile
+ *   record where it stood (ReadByKey + UpdSflRecd, :454-457): no new search,
+ *   no re-sort, ZIP cut to five characters, red once inactive.
  * - **Obsolete requests** (no 5250 counterpart: the subfile cursor was
  *   closed with its program). A search that a new Enter, F5 or leaving the
  *   screen replaced is aborted and publishes nothing, as does the first page
@@ -54,8 +57,9 @@
  * on an empty first page. It records every query it answers in
  * {@link searches}. A test that needs another answer (DEM0006, DEM0007)
  * sets {@link answerSearch}. Every other route (the catalog, one customer,
- * the states, review and add) is answered by the default handlers, and every
- * request is logged from MSW's `request:start` event in {@link traffic}.
+ * the states, review, add and update) is answered by the default handlers,
+ * and every request is logged from MSW's `request:start` event in
+ * {@link traffic}.
  *
  * Evidence. These tests are derived from reading the IBM i source and the
  * plan; they are not executed against the IBM i program and do not establish
@@ -66,20 +70,26 @@
  * scope's `onBeforeCommand`, under a `MemoryRouter` at `/customers` whose `/`
  * route renders "Home". A probe reads `useMessages().ready`, so message
  * assertions start only once the catalog has loaded (until then `format`
- * returns the bare code).
+ * returns the bare code). A search answer a test holds back
+ * ({@link heldAnswer}) is released by waiting for evidence, never for a
+ * time: MSW's request events, the settled `customersApi.search` call, an idle
+ * query cache that has notified its observers, and a second probe, on
+ * `useIsFetching()`, that shows it ({@link settleSearches}). `afterEach`
+ * releases every hold a failed test left closed.
  */
 import { StrictMode } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, notifyManager, useIsFetching } from '@tanstack/react-query';
 // MSW 3 serves `http` and `HttpResponse` from its `msw/http` entry point, the
 // one src/test/handlers.ts and the other suites import them from.
 import { http, HttpResponse } from 'msw/http';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCredentials } from '../../api/client';
+import { customersApi } from '../../api/customers';
 import type { CustomerSummaryResponse, SearchResponse } from '../../api/customers';
 import { AuthProvider, useAuth } from '../../auth/AuthProvider';
 import { RequireRole } from '../../auth/RequireRole';
@@ -187,6 +197,9 @@ const CATALOG_PROBE_ID = 'catalog-probe';
 
 /** The test id of {@link SessionProbe}. */
 const SESSION_PROBE_ID = 'session-probe';
+
+/** The test id of {@link QueryProbe}. */
+const QUERY_PROBE_ID = 'query-probe';
 
 /** The text a test's `/sign-in` route renders, standing in for the sign-in page. */
 const SIGN_IN_ROUTE = 'Sign-in route';
@@ -302,11 +315,192 @@ function sent(method: string, path: string): RecordedRequest[] {
   return traffic.filter((entry) => entry.method === method && entry.path === path);
 }
 
+// ---------------------------------------------------------------------------
+// Settlement and held answers: a released search is followed through MSW,
+// the API client and the query cache to the screen; nothing is timed
+// ---------------------------------------------------------------------------
+
+/** A promise and the function that resolves it. */
+interface Deferred {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+/**
+ * A pending {@link Deferred}. The promise executor runs synchronously, so
+ * `resolve` works as soon as this returns; resolving it again changes nothing.
+ */
+function deferred(): Deferred {
+  let settle: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, resolve: () => settle() };
+}
+
+/**
+ * Every `GET /api/customers` request MSW received in the current test, by
+ * request id. Each one's promise resolves once MSW has run the handlers for
+ * it. MSW 3.0.2 emits `request:match` once a handler has returned its answer,
+ * and `request:end` only once the interceptor has accepted that answer; for a
+ * request the client aborted meanwhile the interceptor can refuse it, and that
+ * request then gets no `request:end`. Either event closes the record.
+ */
+const searchRequests = new Map<string, Deferred>();
+
+/** MSW `request:start` listener: opens the record of a search request, which {@link endSearchRequest} closes. */
+function startSearchRequest({ requestId, request }: { requestId: string; request: Request }): void {
+  if (request.method === 'GET' && new URL(request.url).pathname === SEARCH_PATH) {
+    searchRequests.set(requestId, deferred());
+  }
+}
+
+/** MSW `request:match` and `request:end` listener: closes the record {@link startSearchRequest} opened for the same request. */
+function endSearchRequest({ requestId }: { requestId: string }): void {
+  searchRequests.get(requestId)?.resolve();
+}
+
+/** The promise of every `customersApi.search` call in the current test, in call order. */
+const searchCalls: Array<Promise<SearchResponse>> = [];
+
+/**
+ * Installs a pass-through spy on `customersApi.search`, the call the list's
+ * query function awaits, that keeps the promise of every call in
+ * {@link searchCalls}; `restoreMocks` removes it before the next test.
+ */
+function trackSearchCalls(): void {
+  const search = customersApi.search;
+  vi.spyOn(customersApi, 'search').mockImplementation((params, signal) => {
+    const call = search.call(customersApi, params, signal);
+    searchCalls.push(call);
+    return call;
+  });
+}
+
+/** What {@link trackQueries} returns. */
+interface TrackedQueries {
+  /**
+   * Resolves once no query of the client is fetching and the query cache has
+   * delivered every change to its subscribers, the screen's query observers
+   * among them; at once when that already holds.
+   */
+  idle(): Promise<void>;
+}
+
+/**
+ * Tracks the query cache of `client`. TanStack Query calls a plain cache
+ * subscriber during each change, but hands the screen's observers (which
+ * subscribe through `notifyManager.batchCalls`) their notifications later, in
+ * the batch the change scheduled. One plain and one batched subscriber count
+ * the changes made and the changes delivered; while both counts agree, no
+ * notification is still on its way to an observer.
+ */
+function trackQueries(client: QueryClient): TrackedQueries {
+  const cache = client.getQueryCache();
+  let made = 0;
+  let delivered = 0;
+  const waiting: Array<() => void> = [];
+  const isIdle = (): boolean => client.isFetching() === 0 && delivered === made;
+  cache.subscribe(() => {
+    made += 1;
+  });
+  cache.subscribe(
+    notifyManager.batchCalls(() => {
+      delivered += 1;
+      if (isIdle()) {
+        for (const resolve of waiting.splice(0)) {
+          resolve();
+        }
+      }
+    }),
+  );
+  return {
+    idle: () =>
+      isIdle()
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            waiting.push(resolve);
+          }),
+  };
+}
+
+/** The query cache tracker of the tree the current test rendered; `null` until {@link renderWithProviders} runs. */
+let trackedQueries: TrackedQueries | null = null;
+
+/**
+ * Waits until the searches of the current test have settled, so that an
+ * assertion that a late answer changed nothing can follow at once. Inside
+ * `act`, it waits until MSW has run the handlers of every search request it
+ * received ({@link searchRequests}), every `customersApi.search` call has
+ * settled either way (an aborted call's query function has then run its
+ * `catch`), and the query client is idle with every change delivered; `act`
+ * then renders what they caused, effects and focus moves included. Last, it
+ * waits until {@link QueryProbe} shows no fetch in flight. Each step waits
+ * for an event the step before makes certain.
+ */
+async function settleSearches(): Promise<void> {
+  await act(async () => {
+    await Promise.all(Array.from(searchRequests.values(), (entry) => entry.promise));
+    await Promise.allSettled(searchCalls);
+    await trackedQueries?.idle();
+  });
+  if (trackedQueries !== null) {
+    await waitFor(() => expect(screen.getByTestId(QUERY_PROBE_ID)).toHaveAttribute('data-fetching', '0'));
+  }
+}
+
+/**
+ * A search answer held back until the test releases it, so the screen can be
+ * observed while the request is pending. Every hold is registered in
+ * {@link heldAnswers} when made, and `afterEach` releases whatever a test
+ * left held, so no handler stays suspended once its test has ended.
+ */
+interface HeldAnswer {
+  /** Settles once the hold is opened, by {@link HeldAnswer.open} or {@link HeldAnswer.release}. */
+  readonly released: Promise<void>;
+  /** Lets every held request be answered; calling it again changes nothing. */
+  readonly open: () => void;
+  /**
+   * Lets every held request be answered, then waits until the searches have
+   * settled ({@link settleSearches}); calling it again only waits again.
+   */
+  readonly release: () => Promise<void>;
+}
+
+/** Every hold the current test made, in order; `afterEach` empties it. */
+const heldAnswers: HeldAnswer[] = [];
+
+/** A held answer, closed until its `open` or `release` is called, registered in {@link heldAnswers}. */
+function heldAnswer(): HeldAnswer {
+  const gate = deferred();
+  const held: HeldAnswer = {
+    released: gate.promise,
+    open: gate.resolve,
+    release: async () => {
+      gate.resolve();
+      await settleSearches();
+    },
+  };
+  heldAnswers.push(held);
+  return held;
+}
+
+// ---------------------------------------------------------------------------
+// Per-test setup and teardown
+// ---------------------------------------------------------------------------
+
 beforeEach(() => {
   searches.length = 0;
   traffic.length = 0;
   searchAnswer = null;
+  searchRequests.clear();
+  searchCalls.length = 0;
+  trackedQueries = null;
   server.events.on('request:start', recordRequest);
+  server.events.on('request:start', startSearchRequest);
+  server.events.on('request:match', endSearchRequest);
+  server.events.on('request:end', endSearchRequest);
+  trackSearchCalls();
   server.use(
     http.get(SEARCH_PATH, ({ request }) => {
       const query = readQuery(request);
@@ -316,8 +510,22 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A hold a failed test left closed is released here, first: every gate
+  // opens, then the searches settle while the tree is still mounted
+  // (src/test/setup.ts unmounts it after this hook), so no handler stays
+  // suspended and nothing a late answer causes reaches the next test.
+  const pending = heldAnswers.splice(0);
+  for (const held of pending) {
+    held.open();
+  }
+  for (const held of pending) {
+    await held.release();
+  }
   server.events.removeListener('request:start', recordRequest);
+  server.events.removeListener('request:start', startSearchRequest);
+  server.events.removeListener('request:match', endSearchRequest);
+  server.events.removeListener('request:end', endSearchRequest);
   setCredentials(null);
 });
 
@@ -350,9 +558,21 @@ function SessionProbe() {
 }
 
 /**
+ * Exposes how many queries are fetching, from `useIsFetching()`, as
+ * `data-fetching`, so a test can see the query client's state reach the
+ * screen ({@link settleSearches}). Hidden and without a role.
+ */
+function QueryProbe() {
+  const fetching = useIsFetching();
+  return <span hidden data-testid={QUERY_PROBE_ID} data-fetching={String(fetching)} />;
+}
+
+/**
  * Renders `ui` inside the application's providers, signed in as `account`: a
- * fresh query client (no retries), the message catalog, the toast host, the
- * key scope stack, a router at `/customers` and the session. The account's
+ * fresh query client (no retries) whose cache {@link trackedQueries} follows,
+ * the message catalog, the toast host, the key scope stack, a router at
+ * `/customers` and the session, with {@link CatalogProbe} and
+ * {@link QueryProbe} beside `ui`. The account's
  * credentials are stored as after a real sign-in, because every customer and
  * state route answers 401 without them. Resolves once the catalog has loaded
  * and the Name filter holds the initial focus. With `strict`, the tree is
@@ -364,6 +584,7 @@ async function renderWithProviders(account: Account, ui: ReactElement, { strict 
   setCredentials({ username: account.username, password: account.password });
   const user = userEvent.setup();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  trackedQueries = trackQueries(queryClient);
   const screens = (
     <QueryClientProvider client={queryClient}>
       <MessageCatalogProvider>
@@ -372,6 +593,7 @@ async function renderWithProviders(account: Account, ui: ReactElement, { strict 
             <MemoryRouter initialEntries={['/customers']}>
               <AuthProvider initialSession={{ username: account.username, roles: [...account.roles] }}>
                 <CatalogProbe />
+                <QueryProbe />
                 {ui}
               </AuthProvider>
             </MemoryRouter>
@@ -932,38 +1154,23 @@ describe('CustomerSearchPage', () => {
      * Holds the continuation page requested with `cursor` until the returned
      * function is called; every other query is answered at once from the
      * fixture. Registered over the suite's override, it records every query in
-     * {@link searches} as that override does. The returned function resolves
-     * once the held page has been answered and has reached the screen.
+     * {@link searches} as that override does. The returned function is the
+     * hold's {@link HeldAnswer.release}: it resolves once the held page has
+     * been answered and the list has settled on screen ({@link settleSearches}).
      */
     function holdContinuation(cursor: string): () => Promise<void> {
-      let open: () => void = () => undefined;
-      const held = new Promise<void>((resolve) => {
-        open = resolve;
-      });
-      let answered = false;
+      const held = heldAnswer();
       server.use(
         http.get(SEARCH_PATH, async ({ request }) => {
           const query = readQuery(request);
           searches.push(query);
           if (query.cursor === cursor) {
-            await held;
-            answered = true;
+            await held.released;
           }
           return fixturePage(query);
         }),
       );
-      return async () => {
-        open();
-        await waitFor(() => expect(answered).toBe(true));
-        // The answer still travels through fetch and the query cache, which
-        // notifies its observers with setTimeout(0), before React renders it.
-        await act(
-          () =>
-            new Promise<void>((resolve) => {
-              setTimeout(resolve, 100);
-            }),
-        );
-      };
+      return held.release;
     }
 
     /**
@@ -1120,7 +1327,11 @@ describe('CustomerSearchPage', () => {
     interface HeldSearches {
       /** How many searches are held so far. */
       held(): number;
-      /** Lets every held search answer, then waits until the answers had their chance to reach the screen. */
+      /**
+       * Lets every held search answer, then waits until the searches have
+       * settled ({@link settleSearches}), so anything an answer caused is on
+       * screen.
+       */
       release(): Promise<void>;
     }
 
@@ -1128,18 +1339,15 @@ describe('CustomerSearchPage', () => {
      * Holds every search whose query `matches` until `release` is called,
      * then answers it with `answer(query)`; every other search is answered at
      * once from the fixture. Registered over the suite's override, it records
-     * every query in {@link searches} as that override does.
+     * every query in {@link searches} as that override does. Its gate is a
+     * {@link heldAnswer}, so `afterEach` releases it should the test fail first.
      */
     function holdSearches(
       matches: (query: SearchQuery) => boolean,
       answer: (query: SearchQuery) => Response,
     ): HeldSearches {
-      let open: () => void = () => undefined;
-      const gate = new Promise<void>((resolve) => {
-        open = resolve;
-      });
+      const gate = heldAnswer();
       let held = 0;
-      let answered = 0;
       server.use(
         http.get(SEARCH_PATH, async ({ request }) => {
           const query = readQuery(request);
@@ -1148,26 +1356,11 @@ describe('CustomerSearchPage', () => {
             return fixturePage(query);
           }
           held += 1;
-          await gate;
-          answered += 1;
+          await gate.released;
           return answer(query);
         }),
       );
-      return {
-        held: () => held,
-        release: async () => {
-          open();
-          await waitFor(() => expect(answered).toBe(held));
-          // An answer still travels through fetch and the query cache before
-          // React could render anything it caused.
-          await act(
-            () =>
-              new Promise<void>((resolve) => {
-                setTimeout(resolve, 100);
-              }),
-          );
-        },
-      };
+      return { held: () => held, release: gate.release };
     }
 
     /** A 500 DEM9999 problem: presenting it would publish an alert. */
@@ -1296,12 +1489,9 @@ describe('CustomerSearchPage', () => {
       );
 
       await waitForPage(ACTIVE_ROWS, 0);
-      await act(
-        () =>
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, 50);
-          }),
-      );
+      // Both searches, the aborted one included, have been answered and their
+      // calls settled, and the idle query is on screen.
+      await settleSearches();
 
       expect(alertRegion()).toBeEmptyDOMElement();
       expect(statusRegion()).toBeEmptyDOMElement();
@@ -1479,6 +1669,154 @@ describe('CustomerSearchPage', () => {
       expect(screen.queryByText('Home')).not.toBeInTheDocument();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Saved edit (CustDsp's update, then ReadByKey + UpdSflRecd :454-457)
+  // -------------------------------------------------------------------------
+
+  describe('saved edit (Maintenance)', () => {
+    /** The 0-based place of the edited row on page 2 of the active list: neither its first nor its last row. */
+    const EDITED_INDEX = 3;
+
+    /** The row option 2 edits: ORNARE PLACERAT INSTITUTE (AAA1), MADISON WI 56718, active. */
+    const EDITED = ((): CustomerSummaryResponse => {
+      const row = ACTIVE_ROWS[PAGE_SIZE + EDITED_INDEX];
+      if (row === undefined) {
+        throw new Error('Page 2 of the active rows holds no row at the edited place');
+      }
+      return row;
+    })();
+
+    /** The new name. It sorts ahead of every seed name, so a re-sorted list would move the row to page 1. */
+    const NEW_NAME = 'AAA RENAMED HOLDINGS';
+
+    /**
+     * The change as typed, in MTNCUSTD screen order: Active N, the new name,
+     * and an address the stub address service standardizes to
+     * "15 ORCHARD PL", MAPLE CROSSING NJ 08999-3101, so the stored ZIP carries
+     * a ZIP+4 that the list must cut to its first five characters.
+     */
+    const CHANGES: ReadonlyArray<readonly [label: string, value: string]> = [
+      ['Active (Y/N)', 'N'],
+      ['Name', NEW_NAME],
+      ['Address', '15 ORCHARD PLACE'],
+      ['City', 'MAPLE CROSSING'],
+      ['State +', 'NJ'],
+      ['ZIP', '08999'],
+    ];
+
+    /** Asserts the list row of the saved customer: its Customer Name, City, St and ZIP cells, red and labelled inactive. */
+    function expectSavedRow(): void {
+      const row = rowOf(NEW_NAME);
+      expect(
+        within(row)
+          .getAllByRole('cell')
+          .slice(1, 5)
+          .map((cell) => cell.textContent),
+      ).toEqual([`${NEW_NAME} Inactive`, 'MAPLE CROSSING', 'NJ', '08999']);
+      expect(row).toHaveClass('row--inactive');
+      expect(within(row).getByText('Inactive')).toHaveClass('visually-hidden');
+    }
+
+    it('option 2 on page 2, review and save: the PUT result replaces that row in place, with no search and no re-sort', async () => {
+      const customerPath = `${SEARCH_PATH}/${EDITED.custId}`;
+      // Each PUT body as sent, read by a handler that answers nothing, so the
+      // default update handler still validates, stores and answers it.
+      const updates: unknown[] = [];
+      server.use(
+        http.put(customerPath, async ({ request }) => {
+          updates.push(await request.clone().json());
+          return undefined;
+        }),
+      );
+      const user = await renderSearchPage('MAINTENANCE');
+      await user.keyboard('{Enter}');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ACTIVE_ROWS, 1);
+      const pageTwo = pageNames(ACTIVE_ROWS, 1);
+      expect(pageTwo).toHaveLength(11);
+      expect(pageTwo[EDITED_INDEX]).toBe(EDITED.name);
+      expect(EDITED.active).toBe('Y');
+      expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
+
+      // Option 2 + Enter opens the change window on the stored record.
+      await user.type(optionInput(EDITED.name), '2');
+      await user.keyboard('{Enter}');
+      const dialog = await screen.findByRole('dialog', { name: CHANGE_DIALOG });
+      await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveValue(EDITED.name));
+      expect(within(dialog).getByLabelText('Customer Id')).toHaveValue(EDITED.custId);
+      await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveFocus());
+      for (const [label, value] of CHANGES) {
+        const input = within(dialog).getByLabelText(label);
+        await user.clear(input);
+        await user.type(input, value);
+      }
+
+      // Enter reviews: DEM0000 over the reviewed values, the address standardized.
+      await user.keyboard('{Enter}');
+      await within(statusRegion()).findByText(messageText('DEM0000'));
+      const panel = await within(dialog).findByRole('group', { name: 'Confirm customer' });
+      await waitFor(() => expect(panel).toHaveFocus());
+      expect(within(panel).getByLabelText('Address')).toHaveValue('15 ORCHARD PL');
+      expect(within(panel).getByLabelText('ZIP')).toHaveValue('08999-3101');
+      expect(sent('PUT', customerPath)).toHaveLength(0);
+
+      // Enter at the confirmation commits the change.
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      expect(sent('PUT', customerPath)).toHaveLength(1);
+      // The nine reviewed fields and the version read; never the id, stamp or user.
+      expect(updates).toEqual([
+        {
+          name: NEW_NAME,
+          addr: '15 ORCHARD PL',
+          city: 'MAPLE CROSSING',
+          state: 'NJ',
+          zip: '08999-3101',
+          corpPhone: '(555) 010-0001',
+          acctMgr: 'TEST MANAGER',
+          acctPhone: '(555) 010-0002',
+          active: 'N',
+          version: 0,
+        },
+      ]);
+      // ReadByKey + UpdSflRecd (:454-457): the saved row replaces the edited
+      // one where it stood, red now that it is inactive, although it no longer
+      // matches the active-only criteria or the list's name order.
+      const replaced = pageTwo.map((name, index) => (index === EDITED_INDEX ? NEW_NAME : name));
+      await waitFor(() => expect(shownNames()).toEqual(replaced));
+      expectSavedRow();
+      expect(optionInput(NEW_NAME)).toHaveValue('');
+      // No search ran: the suite's override serves the seed rows, so a reload would have restored the old row.
+      expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
+      expect(traffic).toEqual([
+        { method: 'GET', path: SEARCH_PATH },
+        { method: 'GET', path: SEARCH_PATH },
+        { method: 'GET', path: customerPath },
+        { method: 'POST', path: REVIEW_PATH },
+        { method: 'PUT', path: customerPath },
+      ]);
+      expect(listStatus()).toHaveTextContent('Page 2, rows 13 to 23. Bottom');
+      expect(statusRegion()).toBeEmptyDOMElement();
+      expect(alertRegion()).toBeEmptyDOMElement();
+
+      // The replacement belongs to the loaded list: PageUp and PageDown keep it, with no request.
+      await user.keyboard('{PageUp}');
+
+      await waitForPage(ACTIVE_ROWS, 0);
+
+      await user.keyboard('{PageDown}');
+
+      await waitFor(() => expect(shownNames()).toEqual(replaced));
+      expectSavedRow();
+      expect(listStatus()).toHaveTextContent('Page 2, rows 13 to 23. Bottom');
+      expect(searches).toHaveLength(2);
+      expect(traffic).toHaveLength(5);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1529,27 +1867,11 @@ describe('CustomerSearchPanel in Selection mode', () => {
 // page loads, once it has loaded, and after a rejected option's alert clears
 // ---------------------------------------------------------------------------
 
-/** A search answer held back until the test releases it, so the screen can be observed while the request is pending. */
-interface HeldAnswer {
-  /** Settles once {@link HeldAnswer.release} is called. */
-  released: Promise<void>;
-  /** Lets every held request be answered. */
-  release: () => void;
-}
-
-/** A held answer, closed until its `release` is called. */
-function heldAnswer(): HeldAnswer {
-  let release: () => void = () => undefined;
-  const released = new Promise<void>((resolve) => {
-    release = () => resolve();
-  });
-  return { released, release };
-}
-
 /**
  * Answers the search queries `holds` selects with the fixture pages only once
- * `held` is released; the others are answered at once. Registered over the
- * suite's override, and records every query in {@link searches} as it does.
+ * `held` ({@link heldAnswer}) is released; the others are answered at once.
+ * Registered over the suite's override, and records every query in
+ * {@link searches} as it does.
  */
 function holdSearches(holds: (query: SearchQuery) => boolean, held: HeldAnswer): void {
   server.use(
@@ -1602,7 +1924,7 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(statusRegion()).toBeEmptyDOMElement();
     expect(alertRegion()).toBeEmptyDOMElement();
 
-    held.release();
+    await held.release();
 
     await waitForPage(ACTIVE_ROWS, 0);
     await waitFor(() => expect(within(listStatus()).queryByText('Searching...')).not.toBeInTheDocument());
@@ -1634,7 +1956,7 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(pagingIndicator()).toHaveTextContent('More...');
     expect(statusRegion()).toBeEmptyDOMElement();
 
-    held.release();
+    await held.release();
 
     await waitForPage(ACTIVE_ROWS, 1);
     await waitFor(() => expect(within(listStatus()).queryByText('Loading next page...')).not.toBeInTheDocument());
@@ -1688,7 +2010,7 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(pagingIndicator()).toHaveTextContent('More...');
     expect(searches).toHaveLength(4);
 
-    held.release();
+    await held.release();
 
     await waitFor(() => expect(within(listStatus()).queryByText('Loading next page...')).not.toBeInTheDocument());
     expect(resultsTable()).not.toHaveAttribute('aria-busy');
