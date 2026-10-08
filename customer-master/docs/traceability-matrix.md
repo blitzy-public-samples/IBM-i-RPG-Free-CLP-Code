@@ -13,17 +13,20 @@ This matrix traces every feature (F-nnn), use case (UC-nn) and in-scope IBM i so
 
 ## Path key
 
-Every target path in this document begins with one of these roots, written out in full in each table. The prefixes are the ones the developer guide uses.
+Every target path in the tables below is one of these locations or lies under one, written out in full in each table. The prefixes are the ones the developer guide uses; "—" marks a location the guide has no prefix for.
 
-| Prefix | Root (relative to `customer-master/`) | Holds |
-|--------|---------------------------------------|-------|
+| Prefix | Location (relative to `customer-master/`) | Holds |
+|--------|-------------------------------------------|-------|
 | `{api}` | `backend/customer-api/src/main/java/com/democorp/customermaster/` | API code: `domain`, `repository`, `service`, `controller`, `security`, `messages`, `generator` |
-| `{api-test}` | `backend/customer-api/src/test/java/com/democorp/customermaster/` | API unit tests (`*Test`) and Testcontainers integration tests (`*IT`) |
-| `{adr}` | `backend/address-validation/src/main/java/com/democorp/customermaster/address/` | The address-validation module |
-| `{adr-test}` | `backend/address-validation/src/test/java/com/democorp/customermaster/address/` | The address-validation module's tests |
+| — | `backend/customer-api/src/test/java/com/democorp/customermaster/` | API unit tests (`*Test`) and Testcontainers integration tests (`*IT`) |
+| `{adr}` | `backend/address-validation/src/main/java/com/democorp/customermaster/address/` | The address-validation module's code |
+| — | `backend/address-validation/src/test/java/com/democorp/customermaster/address/` | The address-validation module's tests |
+| — | `backend/address-validation/` | The address-validation module as a whole: its `pom.xml`, code, tests and resources, including the stub fixtures |
 | `resources/` | `backend/customer-api/src/main/resources/` | Flyway `db/migration/` and `db/seed/`, the `messages/` catalog |
 | `{web}` | `frontend/src/` | The React application and its colocated Vitest specs |
-| e2e | `e2e/tests/` | The Playwright specs |
+| — | `e2e/tests/` | The Playwright specs |
+| — | `openapi/` | The committed API contract |
+| — | `docker-compose.yml` | The Compose services, among them the `generator` service (profile `tools`) |
 
 ## Identifiers
 

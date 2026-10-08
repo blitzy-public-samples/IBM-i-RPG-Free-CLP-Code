@@ -4,16 +4,16 @@ This file holds the commit sequence and the pull-request description for the one
 
 ## Commit sequence
 
-The work is delivered in one pull request as eleven [Conventional Commits](https://www.conventionalcommits.org/), applied in the order below. Each commit builds on its own: after it, the tree compiles and its own tests pass. If the working branch holds finer-grained development commits, rebase them into this sequence before requesting review.
+The work is delivered in one pull request as eleven [Conventional Commits](https://www.conventionalcommits.org/), applied in the order below. Each commit builds on its own: after it, the checks of its boundary pass on the tree as it then stands, and every later boundary repeats them. At commits 1 to 7 the check is `./mvnw -B verify` from `backend/`, which compiles both modules, packages `app.jar` and runs the tests present. Commit 8 adds `npm ci`, `npm run lint`, `npm test` and `npm run build` from `frontend/`; commit 9 adds `npm ci` and `npm run typecheck` from `e2e/`; commit 10 adds `docker compose up --build -d --wait` from `customer-master/`, and the backend verify then also runs `NginxGatewayProblemTest`; commit 11 changes documents only. `backend/Dockerfile` copies the sources of both modules, so its image first builds at commit 4, and Compose first builds and runs it at commit 10. If the working branch holds finer-grained development commits, rebase them into this sequence before requesting review.
 
 Paths are relative to `customer-master/` unless marked as the repository root. `{api}` stands for `backend/customer-api/src/main/java/com/democorp/customermaster/` and `resources/` for `backend/customer-api/src/main/resources/`.
 
 1. `build(backend): scaffold Maven multi-module project, wrapper and Dockerfile`
-   - `backend/pom.xml`, `backend/mvnw`, `backend/mvnw.cmd`, `backend/.mvn/wrapper/maven-wrapper.properties`, `backend/Dockerfile`, `backend/.dockerignore`, `backend/address-validation/pom.xml`, `backend/customer-api/pom.xml`, `.gitattributes`, `.gitignore`
+   - `backend/pom.xml`, `backend/mvnw`, `backend/mvnw.cmd`, `backend/.mvn/wrapper/maven-wrapper.properties`, `backend/Dockerfile`, `backend/.dockerignore`, `backend/address-validation/pom.xml`, `backend/customer-api/pom.xml`, `{api}CustomerMasterApplication.java` (the minimal application entry point: the main class that the Boot repackage execution inherited by `customer-api/pom.xml` needs), `{api}config/AppProperties.java` (the properties class it registers), `.gitattributes`, `.gitignore`
 2. `feat(db): Flyway migrations V1–V4 and seed V5`
    - `resources/db/migration/V1__create_collation.sql` .. `V4__create_custid_sequence.sql`, `resources/db/seed/V5__seed_customers.sql`
 3. `feat(api): domain model, repositories and customer id allocation`
-   - `{api}CustomerMasterApplication.java`, `{api}config/`, `{api}domain/`, `{api}repository/` (including `CustomerIdAllocator` and `JdbcConfig`), `{api}service/exception/`, `resources/application.yml`
+   - the remaining `{api}config/` classes (`AppProperties` is in commit 1), `{api}domain/`, `{api}repository/` (including `CustomerIdAllocator` and `JdbcConfig`), `{api}service/exception/`, `resources/application.yml`
 4. `feat(address): address-validation module with stub and Web Tools client`
    - `backend/address-validation/src/main/**` (client interface, records, stub, Web Tools client, `UspsXmlCodec`, auto-configuration, stub fixtures) and `backend/address-validation/src/test/**`
 5. `feat(api): search, maintenance, states, messages, security and problem details`
@@ -21,13 +21,13 @@ Paths are relative to `customer-master/` unless marked as the repository root. `
 6. `feat(generator): LOADCUSTR-equivalent data generator`
    - `{api}generator/`, `resources/application-generator.yml`, `resources/generator/csz-sample.csv`, `resources/META-INF/spring.factories`
 7. `test(api): unit, Testcontainers, OpenAPI snapshot and benchmark suites`
-   - `backend/customer-api/src/test/**` (unit tests, `*IT`, `support/` base classes, `benchmark/SearchBenchmarkIT.java`, test resources), `openapi/customer-master-api.yaml`
+   - `backend/customer-api/src/test/**` (unit tests, `*IT`, `support/` base classes, `benchmark/SearchBenchmarkIT.java`, test resources; except `controller/NginxGatewayProblemTest.java`, which commit 10 adds), `openapi/customer-master-api.yaml`
 8. `feat(web): React frontend with Vitest suites`
    - `frontend/package.json`, `frontend/package-lock.json`, `frontend/tsconfig.json`, `frontend/tsconfig.node.json`, `frontend/vite.config.ts`, `frontend/eslint.config.js`, `frontend/index.html`, `frontend/src/**` (including `src/api/schema.d.ts` and the colocated `*.test.ts(x)` specs)
 9. `test(e2e): Playwright flows`
    - `e2e/package.json`, `e2e/package-lock.json`, `e2e/tsconfig.json`, `e2e/playwright.config.ts`, `e2e/fixtures/auth.ts`, `e2e/tests/*.spec.ts`
 10. `build: Docker Compose, nginx, environment template and k6 script`
-    - `docker-compose.yml`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `.env.example`, `perf/k6/search-1m.js`, `perf/results/.gitkeep`
+    - `docker-compose.yml`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `.env.example`, `perf/k6/search-1m.js`, `perf/results/.gitkeep`, and `backend/customer-api/src/test/java/com/democorp/customermaster/controller/NginxGatewayProblemTest.java`, which reads `frontend/nginx.conf` and holds its 502 and 504 bodies to `ProblemFactory`
 11. `docs: README, developer guide, deviations, traceability, benchmark; root README entry`
     - `README.md`, `docs/**`, `data/README.md`, and `README.md` at the repository root
 
@@ -62,6 +62,8 @@ From `customer-master/` (prerequisite: Docker Engine with Compose v2):
 
 ### How to test
 
+The backend and frontend commands run on the host and need these tools (see also the README's [Prerequisites](../README.md#prerequisites)): JDK 21, set as `JAVA_HOME` or with `java` and `javac` on `PATH` (the Maven Wrapper downloads Maven 3.9.16 itself); a running Docker Engine for the Testcontainers PostgreSQL 18.6 that the backend `*IT` start; and Node.js 24.21.0 or later with npm, plus git for the schema diff. The end-to-end and load commands need only Docker Engine with Compose v2.
+
 - **Backend** (from `customer-master/backend`): `./mvnw -B verify` runs the unit tests and every `*IT` except the benchmark, against Testcontainers PostgreSQL 18.6; `./mvnw -B verify -Pbenchmark` runs `SearchBenchmarkIT` on 1,000,000 rows.
 - **Frontend** (from `customer-master/frontend`): `npm ci`, `npm run lint`, `npm test`, `npm run build`; then `npm run gen:api` followed by `git diff --exit-code src/api/schema.d.ts`.
 - **End-to-end** (from `customer-master/`): `docker compose --profile e2e run --rm e2e` runs the five Playwright flows `search-and-display`, `edit-with-confirmation`, `add-with-address-standardization`, `concurrent-edit-conflict` and `selection-picker`.
@@ -90,6 +92,6 @@ From `customer-master/` (prerequisite: Docker Engine with Compose v2):
   - [ ] `docker compose --profile e2e run --rm e2e` passes all five specs.
   - [ ] `docker compose --profile tools run --rm generator --count=500 --start-id=B000 --seed=7` exits 0 and prints `Loaded 500 customers B000..`; `docker compose exec db psql -U customermaster -d customermaster -tAc "select count(*), min(custid) from customer_master.custmast"` returns `500|B000`; a second identical run yields the same `md5(string_agg(name, ',' ORDER BY custid))`.
   - [ ] `docker compose --profile tools run --rm generator --count=1000000`, then `docker compose --profile perf run --rm k6` meets its thresholds (`http_req_duration p(95) < 300` ms, `http_req_failed rate < 0.01`).
-- [ ] `grep -rniE 'lennons1|lennonsb' customer-master --exclude-dir=docs --exclude-dir=node_modules` returns nothing.
+- [ ] From the repository root: `grep -rniE 'lennons1|lennonsb' customer-master --exclude-dir=docs --exclude-dir=node_modules` returns nothing. The gate passes only when grep prints nothing and exits 1, its status for no match; exit 2 is an error, such as `customer-master: No such file or directory` when run from another directory, and fails the gate.
 - [ ] No source, config or env template contains a USPS credential value.
 - [ ] No IBM i member is modified; the only existing file edited is the root `README.md`.
