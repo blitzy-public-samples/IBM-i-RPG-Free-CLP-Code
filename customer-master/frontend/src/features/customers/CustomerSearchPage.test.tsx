@@ -961,6 +961,61 @@ describe('CustomerSearchPage', () => {
       expect(searches[1]).toEqual({ ...FIRST_PAGE, name: 'NIBH' });
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
+
+    it('a failed next page leaves the list current: 5 + Enter displays that customer with no search, and PageDown retries the page', async () => {
+      answerSearch((query) => (query.cursor === 'c1' ? problem(500, 'DEM9999', { instance: SEARCH_PATH }) : undefined));
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      const continuation: SearchQuery = { ...FIRST_PAGE, cursor: 'c1' };
+
+      await user.keyboard('{PageDown}');
+
+      await within(alertRegion()).findByText(messageText('DEM9999'));
+      // The failed page load has reached the screen before the next key.
+      await settleSearches();
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      expect(pagingIndicator()).toHaveTextContent('More...');
+      expect(searches).toEqual([FIRST_PAGE, continuation]);
+
+      await user.type(optionInput(FIRST_ACTIVE.name), '5');
+      await user.keyboard('{Enter}');
+
+      const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
+      await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveValue(FIRST_ACTIVE.name));
+      expect(searches).toEqual([FIRST_PAGE, continuation]);
+
+      await user.keyboard('{F12}');
+
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+      expect(optionInput(FIRST_ACTIVE.name)).toHaveValue('');
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      answerSearch(() => undefined);
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      expect(searches).toEqual([FIRST_PAGE, continuation, continuation]);
+      expect(pagingIndicator()).toHaveTextContent('Bottom');
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('a failed first page leaves a search pending: Enter with unchanged criteria searches again', async () => {
+      answerSearch((query) => (query.cursor === null ? problem(500, 'DEM9999', { instance: SEARCH_PATH }) : undefined));
+      const user = await renderSearchPage('INQUIRY');
+
+      await within(alertRegion()).findByText(messageText('DEM9999'));
+      await settleSearches();
+      expect(shownNames()).toEqual([]);
+      expect(pagingIndicator()).not.toBeInTheDocument();
+      expect(searches).toEqual([FIRST_PAGE]);
+      answerSearch(() => undefined);
+
+      await user.keyboard('{Enter}');
+
+      await waitForPage(ACTIVE_ROWS, 0);
+      expect(searches).toEqual([FIRST_PAGE, FIRST_PAGE]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
   });
 
   // Every key stays live, the latest navigation decides the page shown, and focus follows to the page asked for.

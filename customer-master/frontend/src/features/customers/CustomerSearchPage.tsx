@@ -15,11 +15,13 @@
  * Enter: new search criteria take precedence over options. A search runs
  * when one is pending (at entry, NewSearchCriteria = *on, :243; after F5, an
  * F4 prompt that left a State differing from the applied one, DEM0002 or a
- * failed search) or when the typed Name, City or State differ from the
- * criteria last applied. Otherwise the typed options are processed over every
- * loaded row in list order, as READC read every changed record, their windows
- * opened one at a time. With nothing to process the last page loaded so far
- * is shown (the preserved ProcessOption defect, :506-513).
+ * failed first page) or when the typed Name, City or State differ from the
+ * criteria last applied. A failed next page (PageDown) leaves the loaded
+ * pages current and no search pending; PageDown retries it. Otherwise the
+ * typed options are processed over every loaded row in list order, as READC
+ * read every changed record, their windows opened one at a time. With nothing
+ * to process the last page loaded so far is shown (the preserved
+ * ProcessOption defect, :506-513).
  *
  * Keys: one scope with the panel's `<section>` as its container, so Enter is
  * a command in the filters, the option fields and the panel itself. The

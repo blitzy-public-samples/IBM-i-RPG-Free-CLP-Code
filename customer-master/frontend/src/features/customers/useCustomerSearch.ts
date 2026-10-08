@@ -124,8 +124,10 @@ export interface UseCustomerSearchResult {
   limitReached: boolean;
   /**
    * PMTCUSTR `NewSearchCriteria`: the next Enter must search. True with no
-   * request, after a failed request (such as DEM0007), and after a first page
-   * that matched nothing (DEM0002, :539-541).
+   * request, after a failed first page (such as DEM0007), and after a first
+   * page that matched nothing (DEM0002, :539-541). A failed next page
+   * (PageDown) leaves the loaded pages current, so it stays false: Enter then
+   * processes the options, and PageDown retries that page.
    */
   pendingNewSearch: boolean;
   loading: boolean;
@@ -325,7 +327,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     gcTime: 0,
   });
 
-  const { data, isError, isFetching, isFetchingNextPage, fetchNextPage } = query;
+  const { data, isError, isFetchNextPageError, isFetching, isFetchingNextPage, fetchNextPage } = query;
 
   const browsable = useMemo(() => browsablePages(data), [data]);
   const pages = useMemo(
@@ -347,7 +349,11 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   const more = position < pageCount - 1 || (deepest !== undefined && deepest.nextCursor !== null);
   const limitReached = deepest?.limitReached ?? false;
   const firstPage = data?.pages[0];
-  const pendingNewSearch = request === null || isError || (firstPage !== undefined && firstPage.items.length === 0);
+  // A failed next page sets `isError` too, but leaves the loaded pages
+  // current: only a failed first page leaves a search pending.
+  const firstPageFailed = isError && !isFetchNextPageError;
+  const pendingNewSearch =
+    request === null || firstPageFailed || (firstPage !== undefined && firstPage.items.length === 0);
 
   const search = useCallback((criteria: SearchCriteria) => {
     generationRef.current += 1;
