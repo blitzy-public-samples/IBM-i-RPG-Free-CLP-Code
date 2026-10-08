@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 import javax.xml.XMLConstants;
@@ -90,7 +91,11 @@ import org.xml.sax.SAXParseException;
  * id and password; neither is ever logged or placed in an exception message by this
  * class. Fault messages name the kind of fault only and never quote the body, an element
  * value, a URL or a credential. Parser exceptions are not chained, because a
- * {@link SAXParseException} can quote the document it failed on.
+ * {@link SAXParseException} can quote the document it failed on. For the log line of a
+ * fault, {@link #serviceError serviceError} reads the {@code Number} and
+ * {@code Description} of the body's USPS {@code Error} element with the same hardened
+ * parser; the client masks the configured credentials in them and escapes them before
+ * logging, and never puts them in an exception message.
  *
  * <p><b>Threading.</b> The class holds no mutable state. JAXP factories, builders and
  * writers are not thread-safe, so each call creates its own; one instance can be shared
@@ -347,6 +352,60 @@ public final class UspsXmlCodec {
     }
 
     /**
+     * Reads the {@code Number} and {@code Description} of the USPS {@code Error} element a
+     * body holds, for the log line of a fault {@link #parse parse} reported. Logging only:
+     * the values are not validated, and no result or exception is built from them.
+     *
+     * <p>The {@code Error} read is:
+     * <ul>
+     *   <li>the root, when the root element is a Web Tools {@code <Error>}, the form of
+     *       request-level faults such as an authorization failure;</li>
+     *   <li>the first {@code Error} child of the {@code Address}, when the root is
+     *       {@code AddressValidateResponse} holding exactly one {@code Address}.</li>
+     * </ul>
+     * Each value is the first such child's text with surrounding whitespace removed, read
+     * as {@link #parse parse} reads values, or {@code null} when the {@code Error} has no
+     * such child. Any other body, one that is empty, not well-formed or declares a DOCTYPE
+     * included, yields an empty {@link Optional}. The body is parsed by the same hardened
+     * builder as {@link #parse parse}, so nothing external is resolved, and a bad body never
+     * raises an exception.
+     *
+     * @param body the raw response body; {@code null} yields an empty {@link Optional}
+     * @return the {@code Error} element's texts, or empty when the body holds none
+     * @throws IllegalStateException if the JDK parser cannot be configured as required, a
+     *                               platform defect {@link #parse parse} reports first
+     */
+    Optional<ServiceError> serviceError(byte[] body) {
+        if (body == null || body.length == 0) {
+            return Optional.empty();
+        }
+        Document document;
+        try {
+            document = newHardenedBuilder().parse(new ByteArrayInputStream(body));
+        } catch (SAXException | IOException e) {
+            return Optional.empty();
+        }
+        Element root = document.getDocumentElement();
+        Element error;
+        if (ERROR.equals(root.getNodeName())) {
+            error = root;
+        } else if (RESPONSE_ROOT.equals(root.getNodeName())) {
+            List<Element> addresses = childElements(root, ADDRESS);
+            if (addresses.size() != 1) {
+                return Optional.empty();
+            }
+            List<Element> errors = childElements(addresses.get(0), ERROR);
+            if (errors.isEmpty()) {
+                return Optional.empty();
+            }
+            error = errors.get(0);
+        } else {
+            return Optional.empty();
+        }
+        return Optional.of(new ServiceError(firstChildText(error, NUMBER), firstChildText(error, DESCRIPTION)));
+    }
+
+    /**
      * Creates the XML writer behind {@link #requestDocument requestDocument} and
      * {@link #attributeValue attributeValue}. The JDK's own writer is used, rather than
      * whichever StAX provider happens to be on the classpath, so the empty-element form and
@@ -495,12 +554,29 @@ public final class UspsXmlCodec {
         return element.getTextContent().strip();
     }
 
+    /** The {@link #text text} of the first {@code name} child of {@code parent}, or {@code null} when it has none. */
+    private static String firstChildText(Element parent, String name) {
+        List<Element> found = childElements(parent, name);
+        return found.isEmpty() ? null : text(found.get(0));
+    }
+
     private static String clean(String value) {
         return value == null ? "" : value.strip();
     }
 
     private static AddressServiceUnavailableException fault(String kind) {
         return new AddressServiceUnavailableException(kind);
+    }
+
+    /**
+     * The texts of a USPS {@code Error} element, as {@link #serviceError serviceError}
+     * reads them for a log line. Neither is validated, and either can echo the request, its
+     * URL and credentials included, so callers redact, mask and escape them before logging.
+     *
+     * @param number      the {@code Number} text, stripped; {@code null} when the element is absent
+     * @param description the {@code Description} text, stripped; {@code null} when the element is absent
+     */
+    record ServiceError(String number, String description) {
     }
 
     /**

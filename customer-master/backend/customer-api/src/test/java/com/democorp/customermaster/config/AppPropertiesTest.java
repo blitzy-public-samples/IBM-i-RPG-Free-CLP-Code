@@ -9,11 +9,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.properties.bind.BindException;
 import org.springframework.boot.context.properties.bind.UnboundConfigurationPropertiesException;
 import org.springframework.boot.context.properties.bind.validation.BindValidationException;
 import org.springframework.boot.context.properties.source.ConfigurationProperty;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.convert.ConversionFailedException;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
@@ -111,11 +113,12 @@ final class AppPropertiesTest {
                             "customer-master.search.max-rows=2147483647")
                     .run(context -> {
                         BindValidationException failure = validationFailure(context);
+                        // The constraint code and its bound, not the validator's bundle message,
+                        // which is written in the JVM's default locale.
                         assertThat(failure.getValidationErrors().getAllErrors()).singleElement()
                                 .satisfies(error -> {
-                                    assertThat(error.getDefaultMessage())
-                                            .isEqualTo("must be less than or equal to 2147483646");
                                     assertThat(error.getCodes()).contains("Max.search.maxSize");
+                                    assertThat(error.getArguments()).contains(2147483646L);
                                 });
                     });
         }
@@ -139,8 +142,13 @@ final class AppPropertiesTest {
         @DisplayName("default-size 0 still fails the lower bound")
         void defaultSizeZeroFails() {
             runner.withPropertyValues("customer-master.search.default-size=0")
-                    .run(context -> assertThat(validationMessages(context))
-                            .contains("must be greater than or equal to 1"));
+                    .run(context -> assertThat(
+                                    validationFailure(context).getValidationErrors().getAllErrors())
+                            .anySatisfy(error -> {
+                                // The constraint code and its bound, locale independent as above.
+                                assertThat(error.getCodes()).contains("Min.search.defaultSize");
+                                assertThat(error.getArguments()).contains(1L);
+                            }));
         }
     }
 
@@ -264,6 +272,77 @@ final class AppPropertiesTest {
                         assertThat(context).hasNotFailed();
                         assertThat(context).doesNotHaveBean(AppProperties.class);
                     });
+        }
+    }
+
+    @Nested
+    @DisplayName("Empty values: a known key is never an unknown key; an empty lock-timeout takes "
+            + "its 5s default")
+    class EmptyValues {
+
+        @Test
+        @DisplayName("An empty customer-master.db.lock-timeout starts with the 5s default")
+        void emptyLockTimeoutStartsWithDefault() {
+            runner.withPropertyValues("customer-master.db.lock-timeout=")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        assertThat(context.getBean(AppProperties.class).db().lockTimeout())
+                                .isEqualTo(Duration.ofSeconds(5));
+                    });
+        }
+
+        @Test
+        @DisplayName("An empty DB_LOCK_TIMEOUT behind ${DB_LOCK_TIMEOUT:5s} starts with 5s")
+        void emptyLockTimeoutVariableStartsWithDefault() {
+            runner.withInitializer(context -> context.getEnvironment().getPropertySources()
+                            .replace(SYSTEM_ENVIRONMENT, new SystemEnvironmentPropertySource(
+                                    SYSTEM_ENVIRONMENT, Map.of("DB_LOCK_TIMEOUT", ""))))
+                    .withPropertyValues("customer-master.db.lock-timeout=${DB_LOCK_TIMEOUT:5s}")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        assertThat(context.getEnvironment()
+                                .getProperty("customer-master.db.lock-timeout")).isEmpty();
+                        assertThat(context.getBean(AppProperties.class).db().lockTimeout())
+                                .isEqualTo(Duration.ofSeconds(5));
+                    });
+        }
+
+        @Test
+        @DisplayName("An empty customer-master.search.max-size fails to convert, naming the key "
+                + "and the empty value, not as an unknown key")
+        void emptySearchKeyFailsConversion() {
+            runner.withPropertyValues("customer-master.search.max-size=")
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        Throwable cause = context.getStartupFailure();
+                        while (cause != null && !(cause instanceof BindException)) {
+                            cause = cause.getCause();
+                        }
+                        assertThat(cause).isInstanceOf(BindException.class)
+                                .hasCauseInstanceOf(ConversionFailedException.class);
+                        BindException failure = (BindException) cause;
+                        assertThat(failure.getName())
+                                .hasToString("customer-master.search.max-size");
+                        assertThat(failure.getProperty()).isNotNull();
+                        assertThat(failure.getProperty().getValue()).isEqualTo("");
+                        assertThat(context.getStartupFailure()).rootCause()
+                                .isNotInstanceOf(UnboundConfigurationPropertiesException.class);
+                    });
+        }
+
+        @Test
+        @DisplayName("A misspelt key with an empty value still fails, naming the key and origin")
+        void emptyTypoFails() {
+            runner.withPropertyValues("customer-master.db.lock-timout=")
+                    .run(context -> assertThat(unboundProperties(context)).singleElement()
+                            .satisfies(property -> {
+                                assertThat(property.getName())
+                                        .hasToString("customer-master.db.lock-timout");
+                                assertThat(property.getValue()).isEqualTo("");
+                                assertThat(property.getOrigin()).isNotNull();
+                                assertThat(property.getOrigin().toString())
+                                        .contains("customer-master.db.lock-timout");
+                            }));
         }
     }
 

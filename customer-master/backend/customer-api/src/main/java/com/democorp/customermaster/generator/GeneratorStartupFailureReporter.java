@@ -1,6 +1,7 @@
 package com.democorp.customermaster.generator;
 
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
+import com.democorp.customermaster.config.DataSourceSchemaGuard.InvalidSchemaException;
 import java.io.PrintStream;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
@@ -30,17 +31,21 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
  * {@code Cannot allocate CUSTMAST} or {@code Unknown option --<name>} do.
  *
  * <p><b>Why it exists.</b> The generator context needs the database while it starts: the JDBC dialect
- * is detected from a live connection, and {@code DataSourceCredentialsGuard} checks the credentials
- * before the pool exists. A wrong password, an unknown host, a refused port, a missing database or an
- * empty {@code DB_USER} therefore fails the context refresh, before {@link CustomerGeneratorRunner}
- * exists to print its line. Spring Boot would log {@code Application run failed} with a stack trace of
- * about 200 lines and the cause at its bottom.
+ * is detected from a live connection, and {@code DataSourceCredentialsGuard} and
+ * {@code DataSourceSchemaGuard} check the credentials and the schema settings before the pool exists. A
+ * wrong password, an unknown host, a refused port, a missing database, an empty {@code DB_USER} or an
+ * empty, blank or padded {@code DB_SCHEMA} therefore fails the context refresh, before
+ * {@link CustomerGeneratorRunner} exists to print its line. Spring Boot would log
+ * {@code Application run failed} with a stack trace of about 200 lines and the cause at its bottom.
  *
  * <p><b>What it reports.</b> Only in a context whose environment has profile
  * {@value CustomerGeneratorRunner#PROFILE} active, and only for a failure whose cause graph, including
- * {@link SQLException#getNextException()}, holds one of:
+ * {@link SQLException#getNextException()}, holds one of, in this order of precedence:
  * <ul>
- *   <li>a {@link MissingCredentialsException}: prints the guard's own message;</li>
+ *   <li>a {@link MissingCredentialsException}: prints the credentials guard's own message
+ *       ({@code Database credentials missing: …});</li>
+ *   <li>an {@link InvalidSchemaException}: prints the schema guard's own message
+ *       ({@code Database schema invalid: …});</li>
  *   <li>a {@link CannotGetJdbcConnectionException}, or an {@link SQLException} with SQLSTATE class
  *       {@code 08} (connection exception) or {@code 28} (invalid authorization): prints
  *       {@code Cannot connect to database <host:port>: <reason>}. The address is the authority of the
@@ -164,13 +169,17 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
      *
      * @param failure     the exception the start failed with, or {@code null}
      * @param environment the failed context's environment, source of {@value #URL_PROPERTY}
-     * @return the guard's message for missing credentials, {@code Cannot connect to database
-     *         [<authority>]: <reason>} for a connection failure, otherwise (and for {@code null}) empty
+     * @return the credentials guard's message for missing credentials, else the schema guard's message for
+     *         an invalid schema setting, else {@code Cannot connect to database [<authority>]: <reason>} for
+     *         a connection failure, otherwise (and for {@code null}) empty
      */
     static Optional<String> describe(Throwable failure, Environment environment) {
         final CauseScan scan = CauseScan.of(failure);
         if (scan.missingCredentials != null) {
             return Optional.of(CustomerGeneratorRunner.messageOf(scan.missingCredentials));
+        }
+        if (scan.invalidSchema != null) {
+            return Optional.of(CustomerGeneratorRunner.messageOf(scan.invalidSchema));
         }
         if (!scan.connectionFailure) {
             return Optional.empty();
@@ -266,6 +275,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
         /** The credentials guard's failure, if any. */
         private MissingCredentialsException missingCredentials;
 
+        /** The schema guard's failure, if any. */
+        private InvalidSchemaException invalidSchema;
+
         /** Whether the graph holds a connection failure. */
         private boolean connectionFailure;
 
@@ -332,6 +344,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
         private void inspect(Throwable current, int depth) {
             if (current instanceof MissingCredentialsException missing && missingCredentials == null) {
                 missingCredentials = missing;
+            }
+            if (current instanceof InvalidSchemaException invalid && invalidSchema == null) {
+                invalidSchema = invalid;
             }
             if (current instanceof CannotGetJdbcConnectionException) {
                 connectionFailure = true;

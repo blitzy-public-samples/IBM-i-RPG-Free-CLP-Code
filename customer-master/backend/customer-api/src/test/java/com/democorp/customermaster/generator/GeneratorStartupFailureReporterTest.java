@@ -9,6 +9,8 @@ import static org.mockito.Mockito.when;
 
 import com.democorp.customermaster.config.DataSourceCredentialsGuard;
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
+import com.democorp.customermaster.config.DataSourceSchemaGuard;
+import com.democorp.customermaster.config.DataSourceSchemaGuard.InvalidSchemaException;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.net.ConnectException;
@@ -27,6 +29,7 @@ import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootExceptionReporter;
 import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.JdbcConnectionDetails;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -45,12 +48,13 @@ import org.springframework.mock.env.MockEnvironment;
  * is left to Spring Boot.
  *
  * <p><b>Scenarios.</b> The failures a wrong {@code DB_PASSWORD}, an unknown {@code DB_HOST}, a refused
- * {@code DB_PORT}, a missing {@code DB_NAME} and an empty {@code DB_USER} raise, wrapped as Spring wraps
- * them during the context refresh; failures that are not about the database; the web context; a
- * {@code null} context; URLs whose query or user information carries a secret; cyclic and chained
- * cause graphs; the {@code META-INF/spring.factories} registration and its order ahead of
- * Spring Boot's {@code FailureAnalyzers}; and one start through {@link SpringApplication} with and without the
- * profile.
+ * {@code DB_PORT}, a missing {@code DB_NAME}, an empty {@code DB_USER} and an empty {@code DB_SCHEMA}
+ * raise, wrapped as Spring wraps them during the context refresh; the schema guard's failure on its own;
+ * the credentials guard's precedence over the schema guard; failures that are not about the database; the
+ * web context; a {@code null} context; URLs whose query or user information carries a secret; cyclic and
+ * chained cause graphs; the {@code META-INF/spring.factories} registration and its order ahead of
+ * Spring Boot's {@code FailureAnalyzers}; and starts through {@link SpringApplication} with and without the
+ * profile, one of them with the real {@link DataSourceSchemaGuard}.
  *
  * <p>Plain JUnit 5 and AssertJ over the reporter's package-private constructor, printing to a
  * {@link ByteArrayOutputStream}; no database and no Docker. The exceptions are built as pgjdbc and
@@ -163,6 +167,69 @@ final class GeneratorStartupFailureReporterTest {
         assertThat(missing.getMessage())
                 .startsWith("Database credentials missing: spring.datasource.username (environment variable DB_USER)")
                 .doesNotContain(SECRET, URL);
+    }
+
+    @Test
+    @DisplayName("empty DB_SCHEMA, wrapped as the context refresh wraps it: prints the schema guard's own message")
+    void invalidSchemaPrintsGuardMessage() {
+        InvalidSchemaException invalid = schemaGuardFailure();
+        RuntimeException failure = new BeanCreationException("dataSource", "Unsatisfied dependency",
+                new BeanCreationException("jdbcConnectionDetails", invalid.getMessage(), invalid));
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly(invalid.getMessage());
+        assertThat(invalid.getMessage())
+                .startsWith("Database schema invalid: spring.datasource.hikari.schema is empty or blank.")
+                .contains("environment variable DB_SCHEMA")
+                .doesNotContain(SECRET, URL);
+    }
+
+    @Test
+    @DisplayName("the schema guard's failure itself, unwrapped: the same one line")
+    void invalidSchemaAloneIsOneLine() {
+        InvalidSchemaException invalid = schemaGuardFailure();
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(invalid)).isTrue();
+
+        assertThat(printedLines()).containsExactly(invalid.getMessage());
+    }
+
+    @Test
+    @DisplayName("credentials and schema failures in one cause graph: the credentials line, in either order;"
+            + " a schema failure under a connection failure: the schema line")
+    void credentialsFailureTakesPrecedenceOverSchemaFailure() {
+        MissingCredentialsException missingBelow = credentialsGuardFailure();
+        InvalidSchemaException schemaAbove = schemaGuardFailure();
+        schemaAbove.initCause(missingBelow);
+        InvalidSchemaException schemaBelow = schemaGuardFailure();
+        MissingCredentialsException missingAbove = credentialsGuardFailure();
+        missingAbove.initCause(schemaBelow);
+        InvalidSchemaException underConnection = schemaGuardFailure();
+        GeneratorStartupFailureReporter reporter = reporter(URL, CustomerGeneratorRunner.PROFILE);
+
+        assertThat(reporter.reportException(new BeanCreationException("dataSource", "failed", schemaAbove))).isTrue();
+        assertThat(reporter.reportException(new BeanCreationException("dataSource", "failed", missingAbove))).isTrue();
+        assertThat(reporter.reportException(new BeanCreationException("jdbcDialect", "failed",
+                new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection", underConnection)))).isTrue();
+
+        assertThat(printedLines()).containsExactly(
+                missingBelow.getMessage(), missingAbove.getMessage(), underConnection.getMessage());
+        assertThat(missingBelow.getMessage()).startsWith("Database credentials missing: ");
+        assertThat(underConnection.getMessage()).startsWith("Database schema invalid: ");
+    }
+
+    @Test
+    @DisplayName("empty DB_SCHEMA outside the generator profile: left to Spring Boot")
+    void invalidSchemaOutsideGeneratorIsLeftToSpringBoot() {
+        InvalidSchemaException invalid = schemaGuardFailure();
+        RuntimeException failure = new BeanCreationException("dataSource", "Unsatisfied dependency",
+                new BeanCreationException("jdbcConnectionDetails", invalid.getMessage(), invalid));
+
+        assertThat(reporter(URL).reportException(failure)).isFalse();
+        assertThat(reporter(URL, "test").reportException(invalid)).isFalse();
+
+        assertThat(printedLines()).isEmpty();
     }
 
     @Test
@@ -313,6 +380,31 @@ final class GeneratorStartupFailureReporterTest {
 
     @Test
     @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("SpringApplication under the generator profile, the real schema guard and an empty pool schema:"
+            + " the guard's one line, no stack trace, rethrown")
+    void generatorStartWithEmptySchemaPrintsOneLine(CapturedOutput output) {
+        SpringApplication application =
+                quietApplication(DataSourceSchemaGuard.class, DataSourceAutoConfiguration.class);
+
+        assertThatThrownBy(() -> application.run("--spring.profiles.active=" + CustomerGeneratorRunner.PROFILE,
+                "--spring.datasource.url=" + URL, "--spring.datasource.username=customermaster",
+                "--spring.datasource.password=" + SECRET, "--spring.datasource.hikari.schema="))
+                .isInstanceOf(BeanCreationException.class)
+                .hasRootCauseInstanceOf(InvalidSchemaException.class);
+
+        List<String> lines = output.getOut().lines()
+                .filter(line -> line.startsWith("Database schema invalid: "))
+                .toList();
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0))
+                .startsWith("Database schema invalid: spring.datasource.hikari.schema is empty or blank.")
+                .contains("environment variable DB_SCHEMA");
+        assertThat(output.getAll())
+                .doesNotContain("Application run failed", "Caused by:", "\tat ", SECRET, "Cannot connect to database");
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
     @DisplayName("SpringApplication without the generator profile: Spring Boot's report is unchanged")
     void otherStartIsUnchanged(CapturedOutput output) {
         SpringApplication application = failingApplication();
@@ -391,12 +483,60 @@ final class GeneratorStartupFailureReporterTest {
      * @return the application
      */
     private static SpringApplication failingApplication() {
-        SpringApplication application = new SpringApplication(FailingDialectSource.class);
+        return quietApplication(FailingDialectSource.class);
+    }
+
+    /**
+     * Builds an application over the given sources with no web server, banner, startup log or shutdown
+     * hook.
+     *
+     * @param sources the primary sources
+     * @return the application
+     */
+    private static SpringApplication quietApplication(Class<?>... sources) {
+        SpringApplication application = new SpringApplication(sources);
         application.setWebApplicationType(WebApplicationType.NONE);
         application.setBannerMode(Banner.Mode.OFF);
         application.setLogStartupInfo(false);
         application.setRegisterShutdownHook(false);
         return application;
+    }
+
+    /**
+     * Raises the schema guard's failure for an empty {@code spring.datasource.hikari.schema}, the setting
+     * an empty {@code DB_SCHEMA} reaches, over connection details whose URL names a schema and must not
+     * appear.
+     *
+     * @return the guard's exception
+     */
+    private static InvalidSchemaException schemaGuardFailure() {
+        JdbcConnectionDetails details = mock(JdbcConnectionDetails.class);
+        when(details.getJdbcUrl()).thenReturn(URL);
+        MockEnvironment environment = environment(URL, CustomerGeneratorRunner.PROFILE);
+        environment.setProperty("spring.datasource.hikari.schema", "");
+        DataSourceSchemaGuard guard = new DataSourceSchemaGuard();
+        guard.setEnvironment(environment);
+        InvalidSchemaException invalid = catchThrowableOfType(InvalidSchemaException.class,
+                () -> guard.postProcessAfterInitialization(details, "jdbcConnectionDetails"));
+        assertThat(invalid).as("schema guard failure").isNotNull();
+        return invalid;
+    }
+
+    /**
+     * Raises the credentials guard's failure for an empty username.
+     *
+     * @return the guard's exception
+     */
+    private static MissingCredentialsException credentialsGuardFailure() {
+        JdbcConnectionDetails details = mock(JdbcConnectionDetails.class);
+        when(details.getUsername()).thenReturn("");
+        when(details.getPassword()).thenReturn(SECRET);
+        when(details.getJdbcUrl()).thenReturn(URL);
+        DataSourceCredentialsGuard guard = new DataSourceCredentialsGuard();
+        MissingCredentialsException missing = catchThrowableOfType(MissingCredentialsException.class,
+                () -> guard.postProcessAfterInitialization(details, "jdbcConnectionDetails"));
+        assertThat(missing).as("credentials guard failure").isNotNull();
+        return missing;
     }
 
     /**

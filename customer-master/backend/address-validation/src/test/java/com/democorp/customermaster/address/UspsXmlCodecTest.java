@@ -61,6 +61,11 @@ import org.xml.sax.SAXException;
  *       {@link AddressServiceUnavailableException}, without the JDK parser printing
  *       {@code [Fatal Error]} to standard error and without resolving any DOCTYPE
  *       entity.</li>
+ *   <li><b>Error texts for the fault log line.</b> {@code serviceError} reads the first
+ *       {@code Number} and {@code Description} of a root {@code <Error>} or of the one
+ *       {@code Address}'s first {@code Error}, stripped and unvalidated, {@code null} for
+ *       an absent element, and yields nothing for any other body, a DOCTYPE included,
+ *       without printing anything.</li>
  * </ul>
  *
  * <p><b>Test values.</b> Every address and credential is fictitious. The base row
@@ -507,6 +512,74 @@ class UspsXmlCodecTest {
                     .doesNotContain("root:")
                     .doesNotContain("file:");
         }
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Error texts read for the fault log line
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * Bodies holding a USPS {@code Error} element, each followed by the {@code Number} and
+     * {@code Description} texts {@code serviceError} must read, {@code null} for an absent
+     * element.
+     */
+    static Stream<Arguments> bodiesWithAnErrorElement() {
+        return Stream.of(
+                Arguments.of("root-error.xml", "-2147218662",
+                        "Authorization failure.  Perhaps username and/or password is incorrect."),
+                Arguments.of("error-address-not-found.xml", "-2147219401", "Address Not Found."),
+                Arguments.of("error-bad-number.xml", "80040B1A", "Invalid Address."),
+                Arguments.of("error-missing-description.xml", "-2147219401", null));
+    }
+
+    @ParameterizedTest(name = "{0} yields Number {1} and Description {2}")
+    @MethodSource("bodiesWithAnErrorElement")
+    @DisplayName("serviceError reads the Number and Description of a root <Error> or the Address's Error, unvalidated")
+    void serviceErrorReadsErrorElement(String name, String number, String description, CapturedOutput output)
+            throws IOException {
+        assertThat(codec.serviceError(fixture(name)))
+                .contains(new UspsXmlCodec.ServiceError(number, description));
+
+        assertNothingPrintedByParser(output);
+    }
+
+    @ParameterizedTest(name = "{0} yields no Error texts")
+    @ValueSource(strings = {
+        "success-zip4.xml",
+        "malformed.xml",
+        "doctype-xxe.xml",
+        "blank-city-no-error.xml",
+        "no-address.xml",
+        "two-addresses.xml"
+    })
+    @DisplayName("serviceError yields nothing for a body without a readable Error element, printed nowhere")
+    void serviceErrorIsEmptyWithoutErrorElement(String name, CapturedOutput output) throws IOException {
+        assertThat(codec.serviceError(fixture(name))).isEmpty();
+
+        assertNothingPrintedByParser(output);
+    }
+
+    @Test
+    @DisplayName("serviceError yields nothing for a null, empty or foreign-root body")
+    void serviceErrorIsEmptyForNoDocument() {
+        assertThat(codec.serviceError(null)).isEmpty();
+        assertThat(codec.serviceError(new byte[0])).isEmpty();
+        assertThat(codec.serviceError("<Other><Error><Number>1</Number></Error></Other>"
+                .getBytes(StandardCharsets.UTF_8))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("serviceError reads the first Number, Description and Error, and an empty element as blank")
+    void serviceErrorReadsFirstOccurrences() {
+        byte[] repeated = response(baseAddressWith(Map.of("City", ""))
+                + errorElement(element("Number", " 1 ") + element("Number", "2")
+                        + element("Description", " First. ") + element("Description", "Second."))
+                + errorOf("3", "clsAMS", "Third."));
+        byte[] rootWithoutChildren = "<Error><Source>USPSCOM::DoAuth</Source><Description/></Error>"
+                .getBytes(StandardCharsets.UTF_8);
+
+        assertThat(codec.serviceError(repeated)).contains(new UspsXmlCodec.ServiceError("1", "First."));
+        assertThat(codec.serviceError(rootWithoutChildren)).contains(new UspsXmlCodec.ServiceError(null, ""));
     }
 
     // ---------------------------------------------------------------------------------

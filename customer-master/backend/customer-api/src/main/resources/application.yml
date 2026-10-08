@@ -15,6 +15,9 @@
 spring:
   datasource:
     # The schema comes from DB_SCHEMA; no SQL script selects a library or schema.
+    # Only an unset DB_SCHEMA means customer_master. Set but empty or blank, or with a
+    # space or control character (tab, line break) at either end, it stops startup
+    # before any connection opens (config.DataSourceSchemaGuard).
     url: jdbc:postgresql://${DB_HOST:db}:${DB_PORT:5432}/${DB_NAME:customermaster}?currentSchema=${DB_SCHEMA:customer_master}
     # One role runs Flyway, the API and the generator, and owns custmast_id_seq.
     # No default: config.DataSourceCredentialsGuard stops startup when either is empty.
@@ -37,6 +40,11 @@ spring:
     schemas: ${DB_SCHEMA:customer_master}
     # V1-V4 only. Compose sets SPRING_FLYWAY_LOCATIONS to add classpath:db/seed (V5).
     locations: classpath:db/migration
+    # A misspelt or absent location (SPRING_FLYWAY_LOCATIONS=classpath:db/migratoin)
+    # stops startup with "Unable to resolve location ..." before Flyway touches the
+    # database. Flyway's default only logs it at DEBUG and migrates nothing, so the
+    # API would report ready with no schema.
+    fail-on-missing-locations: true
     # Lets a run without db/seed validate a database where the V5 seed was applied.
     # Flyway classes an applied V5 above the newest local V4 as "future", not
     # "missing", and setting this list replaces Flyway's default "*:future", so
@@ -104,6 +112,7 @@ springdoc:
 customer-master:
   db:
     # Lock wait of add and update transactions before 409 DEM1001.
+    # An empty DB_LOCK_TIMEOUT counts as unset: the 5s default applies.
     lock-timeout: ${DB_LOCK_TIMEOUT:5s}
   search:
     # Page size of the search list (the 12-row subfile page).

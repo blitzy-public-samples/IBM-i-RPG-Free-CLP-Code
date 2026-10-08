@@ -28,6 +28,16 @@ import org.springframework.stereotype.Component;
  * {@link AppProperties} does not bind, such as the misspelt {@code customer-master.db.lock-timout},
  * which would otherwise leave the default in force without a word.
  *
+ * <p><b>Known keys.</b> A key is known when the binder looks it up for {@code AppProperties}: each
+ * component of {@code AppProperties.Db} and {@code AppProperties.Search}, under any relaxed form
+ * ({@code lock-timeout}, {@code lockTimeout}, {@code lock_timeout}). A known key is never
+ * reported as unknown, whatever its value; what an empty value then does is the binder's business.
+ * An empty {@code customer-master.db.lock-timeout}, such as {@code DB_LOCK_TIMEOUT} set to nothing
+ * behind {@code ${DB_LOCK_TIMEOUT:5s}}, converts to no {@code Duration}, so its
+ * {@code @DefaultValue("5s")} applies. An empty {@code int} search component cannot convert, so
+ * startup fails with a binding error that names the key and the empty value. Every other key
+ * under a checked subtree is unknown, whether or not it has a value.
+ *
  * <p><b>Scope.</b> The check covers only the subtrees {@code AppProperties} binds, one per record
  * component: today {@code customer-master.db} and {@code customer-master.search}. The rest of the
  * {@code customer-master} prefix stays lenient, because {@code customer-master.address.*},
@@ -88,9 +98,17 @@ public class AppPropertiesUnknownKeyAdvisor implements ConfigurationPropertiesBi
     }
 
     /**
-     * Records every name bound under {@code AppProperties} and, when its root bind finishes,
-     * rejects the names under its subtrees that no source value was bound to. Holds the state of
-     * one bind, on one thread.
+     * Records every name the binder looks up for {@code AppProperties}, whatever value it then
+     * finds: present, empty or none. When the root bind finishes, rejects each source name under
+     * the owned subtrees that is not one of them. An empty value of a known name is therefore
+     * never reported as unknown; the binder alone decides whether it takes the default or fails
+     * conversion. Holds the state of one bind, on one thread.
+     *
+     * <p>The names are recorded in {@link #onStart}, which the binder calls for each name before
+     * it reads a value. {@code onSuccess} runs only for a non-null result, and an empty
+     * {@code Duration} converts to {@code null}; {@code onFinish} does not run for a name whose
+     * bind failed, such as an empty {@code int}, even when a parent handler supplies a result.
+     * Boot's strict mode collects its attempted names the same way.
      */
     static final class OwnedKeysBindHandler extends AbstractBindHandler {
 
@@ -98,8 +116,8 @@ public class AppPropertiesUnknownKeyAdvisor implements ConfigurationPropertiesBi
         private final Function<ConfigurationPropertySource, Boolean> sourceFilter =
                 new UnboundElementsSourceFilter();
 
-        /** Names the binder bound a value to, relaxed-form aware. */
-        private final Set<ConfigurationPropertyName> boundNames = new HashSet<>();
+        /** Names the binder looked up for {@code AppProperties}, relaxed-form aware. */
+        private final Set<ConfigurationPropertyName> knownNames = new HashSet<>();
 
         /** The subtrees checked; empty, so the handler is inert, unless binding AppProperties. */
         private List<ConfigurationPropertyName> ownedSubtrees = List.of();
@@ -117,22 +135,14 @@ public class AppPropertiesUnknownKeyAdvisor implements ConfigurationPropertiesBi
         public <T> Bindable<T> onStart(
                 ConfigurationPropertyName name, Bindable<T> target, BindContext context) {
             if (context.getDepth() == 0) {
-                boundNames.clear();
+                knownNames.clear();
                 ownedSubtrees = AppProperties.class.equals(target.getType().resolve())
                         ? subtreesOf(name)
                         : List.of();
+            } else if (!ownedSubtrees.isEmpty()) {
+                knownNames.add(name);
             }
             return super.onStart(name, target, context);
-        }
-
-        @Override
-        public Object onSuccess(
-                ConfigurationPropertyName name, Bindable<?> target, BindContext context,
-                Object result) {
-            if (!ownedSubtrees.isEmpty()) {
-                boundNames.add(name);
-            }
-            return super.onSuccess(name, target, context, result);
         }
 
         /**
@@ -161,8 +171,8 @@ public class AppPropertiesUnknownKeyAdvisor implements ConfigurationPropertiesBi
         }
 
         /**
-         * Collects, from every checked source, the names under an owned subtree that were not
-         * bound, keeping the highest-precedence source of a name given twice.
+         * Collects, from every checked source, the names under an owned subtree that the binder
+         * did not look up, keeping the highest-precedence source of a name given twice.
          *
          * @param context the root bind's context
          * @throws UnboundConfigurationPropertiesException if any such name exists
@@ -189,13 +199,13 @@ public class AppPropertiesUnknownKeyAdvisor implements ConfigurationPropertiesBi
         }
 
         /**
-         * Tells whether a source name lies under an owned subtree and received no binding.
+         * Tells whether a source name lies under an owned subtree and is not a known name.
          *
          * @param candidate a name a source holds
          * @return {@code true} for a key {@code AppProperties} should own but does not know
          */
         private boolean isUnboundOwnedName(ConfigurationPropertyName candidate) {
-            if (boundNames.contains(candidate)) {
+            if (knownNames.contains(candidate)) {
                 return false;
             }
             for (ConfigurationPropertyName subtree : ownedSubtrees) {

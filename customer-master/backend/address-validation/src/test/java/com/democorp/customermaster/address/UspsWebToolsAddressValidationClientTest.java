@@ -2,12 +2,16 @@ package com.democorp.customermaster.address;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
@@ -31,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -39,8 +44,14 @@ import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
@@ -66,24 +77,48 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  *       cut short, a refused connection, and a body one byte over
  *       {@value UspsWebToolsAddressValidationClient#MAX_BODY_BYTES} bytes, with and without
  *       {@code Content-Length}. A body of exactly that size is accepted.</li>
- *   <li>Codec faults on a 200 response: a Web Tools root {@code <Error>} and a malformed
- *       document.</li>
- *   <li>An address-level error ({@code Address Not Found.}), which is a normal result and
- *       is logged with its error number and documented description.</li>
+ *   <li>Request count: the timeout, HTTP 500, the redirect and the body cut short each
+ *       reach the endpoint once. A connection closed or reset after the request head and
+ *       before any response byte is one fault with one WARN line, while the JDK client
+ *       re-sends the request at most once, so the server sees one or two Verify
+ *       requests.</li>
+ *   <li>Codec faults on a 200 response: a Web Tools root {@code <Error>}, whose WARN line
+ *       carries its {@code Number} and {@code Description} while the exception message
+ *       names the kind of fault only; an {@code Error} the response rules reject (a
+ *       {@code Number} that is not an integer, a missing {@code Description}, logged as
+ *       {@code -}, and a {@code Source} of 31 characters), whose WARN line carries its
+ *       {@code Number} and {@code Description} too; and bodies without a readable
+ *       {@code Error} element (malformed, DOCTYPE, two {@code Address} elements, a blank
+ *       {@code City} without {@code Error}), whose WARN line carries the host, status and
+ *       reason only.</li>
+ *   <li>An address-level error, which is a normal result and is logged at INFO with its
+ *       {@code Number} and its {@code Description} as the service sent it, whatever its
+ *       text, an echo of the request aside (below); an empty {@code Description} logs as
+ *       empty.</li>
  *   <li>Log-line injection: a {@code Description} holding LF, CR LF, NEL, LINE SEPARATOR
  *       and PARAGRAPH SEPARATOR as character references is returned exactly as decoded,
- *       while the log shows one INFO line with the unlisted-description marker and its
- *       length, no forged line and none of those characters. {@code logSafe} escapes CR,
- *       LF, TAB, ESC, DEL, NEL, U+2028, U+2029, U+202E and a supplementary format
- *       character, and keeps ASCII and accented letters.</li>
- *   <li>Sensitive response text: a {@code Description} echoing a street, ZIP code, name and
- *       URL is returned unchanged and logged only as the marker with its length.</li>
+ *       while the log shows one INFO line carrying the description with those characters
+ *       escaped, no line forged from its text and none of those characters raw.
+ *       {@code logSafe} escapes CR, LF, TAB, ESC, DEL, NEL, U+2028, U+2029, U+202E and a
+ *       supplementary format character, and keeps ASCII and accented letters.</li>
+ *   <li>Credential echo: a {@code Description} that echoes the user id and password, in an
+ *       address-level error or a root {@code <Error>}, is logged with {@code ****} in their
+ *       place.</li>
  *   <li>Credential forms: with the password {@code p'&q}, the request carries the
  *       {@code PASSWORD} attribute exactly as {@link UspsXmlCodec#attributeValue} writes
  *       it, {@code p'&amp;q}; the mask removes that wire form, the raw form, the
  *       {@code &apos;} entity form and the URL encoding of each from the decoded document,
  *       the raw query and other text; and a {@code Description} echoing the wire form and
  *       its URL encoding leaves no form in the captured output.</li>
+ *   <li>Request echo: a {@code Description} echoing the request the fake received, as its
+ *       URL with the query percent-encoded or decoded, or as its decoded document, in an
+ *       address-level error or a root {@code <Error>}, is returned, or leaves the fault
+ *       message, as before, while its one log line carries
+ *       {@code [request URL]?[request query]} or {@code [request document]} in place of
+ *       the echo and the rest of the text as sent; the captured output then holds no base
+ *       URL, Verify query, request document or street. {@code redactRequest} replaces the
+ *       unclosed, entity-escaped, URL-encoded and {@code &amp;} forms, keeps other text,
+ *       and ends promptly on 64 KiB of adversarial input.</li>
  *   <li>Secret hygiene: in every case, success included, neither the captured output nor
  *       any exception message in the cause chain carries the {@code USERID} attribute name
  *       or a credential in its raw, XML-escaped or URL-encoded form. The captured output
@@ -96,7 +131,11 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
  * port, with a cached thread pool so a handler that waits on a latch blocks nothing else.
  * Each test installs its own handler for {@code /ShippingAPI.dll}; {@code /redirected}
  * counts the hits a followed redirect would make. The refused connection targets a
- * {@code 127.0.0.1} port held for the whole case by a bound socket that never listens.
+ * {@code 127.0.0.1} port held for the whole case by a bound socket that never listens. The
+ * dropped-connection cases use a raw {@link ServerSocket} on {@code 127.0.0.1}, since
+ * {@link HttpServer} cannot drop a connection unanswered: it reads each request head,
+ * counts it, then closes the socket or resets it with {@code SO_LINGER} 0. Every wait in
+ * them is bounded by the watchdog, and none sleeps.
  *
  * <p><b>Test values.</b> The credentials {@code TESTUSER123} and {@code pl&ce"holder} are
  * fictitious placeholders; the password carries {@code &} and {@code "} so that its
@@ -293,7 +332,7 @@ class UspsWebToolsAddressValidationClientTest {
         assertThat(result.errorDescription()).isEqualTo("Address Not Found.");
         assertThat(output.getAll().lines()
                         .anyMatch(line -> line.contains("errorNumber=-2147219401 errorDescription=Address Not Found.")))
-                .withFailMessage("captured output lacks the documented error number and description")
+                .withFailMessage("captured output lacks the error number and description")
                 .isTrue();
         assertNoCredentials(output, null);
     }
@@ -317,17 +356,24 @@ class UspsWebToolsAddressValidationClientTest {
         // The console ends each line with the platform separator; nothing else may break one.
         String captured = output.getAll().replace(System.lineSeparator(), "\n");
         List<String> lines = captured.lines().toList();
+        String escaped = "Address Not Found.\\u000AERROR forged entry one\\u000D\\u000A"
+                + "WARN forged entry two\\u0085INFO three\\u2028INFO four\\u2029end";
         assertThat(lines.stream().filter(line -> line.contains("USPS address not standardized")))
                 .singleElement(InstanceOfAssertFactories.STRING)
-                .contains("errorNumber=-2147219401 errorDescription=[unlisted, 89 characters]");
-        assertThat(lines).noneMatch(line -> line.contains("forged"));
+                .endsWith("errorNumber=-2147219401 errorDescription=" + escaped);
+        // The forged texts survive only inside that one line, never as entries of their own.
+        assertThat(lines.stream().filter(line -> line.contains("forged")))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains("USPS address not standardized");
+        assertThat(lines).noneMatch(line -> line.startsWith("ERROR forged") || line.startsWith("WARN forged")
+                || line.startsWith("INFO three") || line.startsWith("INFO four") || line.startsWith("end"));
         assertThat(captured).doesNotContain("\r", "\u0085", "\u2028", "\u2029");
         assertNoCredentials(output, null);
     }
 
     @Test
-    @DisplayName("an unlisted Description is logged as its length only, never as the text it echoes")
-    void unlistedDescriptionIsLoggedAsLengthOnly(CapturedOutput output) {
+    @DisplayName("an address-level Description is logged as the service sent it, whatever its text")
+    void addressErrorDescriptionIsLoggedAsSent(CapturedOutput output) {
         String description = "Address 123 MAIN ST, ANYTOWN CA 90210 for JOHN DOE see https://example.invalid/x";
         byte[] body = addressErrorBody(description);
         handler.set(exchange -> drainAndRespond(exchange, 200, body));
@@ -339,9 +385,51 @@ class UspsWebToolsAddressValidationClientTest {
 
         assertThat(result.standardized()).isFalse();
         assertThat(result.errorDescription()).isEqualTo(description);
-        String captured = output.getAll();
-        assertThat(captured).doesNotContain("MAIN ST", "90210", "JOHN DOE", "https://", "example.invalid");
-        assertThat(captured).contains("errorNumber=-2147219401 errorDescription=[unlisted, 80 characters]");
+        assertThat(capturedLines(output, "USPS address not standardized"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" INFO ")
+                .endsWith("status=200 errorNumber=-2147219401 errorDescription=" + description);
+        assertNoCredentials(output, null);
+    }
+
+    @Test
+    @DisplayName("an empty address-level Description is logged as empty")
+    void emptyAddressErrorDescriptionIsLoggedAsEmpty(CapturedOutput output) {
+        byte[] body = addressErrorBody("");
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorDescription()).isEmpty();
+        assertThat(capturedLines(output, "USPS address not standardized"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .endsWith("errorNumber=-2147219401 errorDescription=");
+        assertNoCredentials(output, null);
+    }
+
+    @Test
+    @DisplayName("an address-level Description echoing the user id and password is logged with **** in their place")
+    void addressErrorDescriptionEchoingCredentialsIsMasked(CapturedOutput output) {
+        // XML markup: the parsed Description is "No match for TESTUSER123 / pl&ce"holder."
+        byte[] body = addressErrorBody("No match for " + USER_ID + " / pl&amp;ce&quot;holder.");
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorDescription().equals("No match for " + USER_ID + " / " + PASSWORD + "."))
+                .withFailMessage("returned description is not the parsed Description")
+                .isTrue();
+        assertThat(capturedLines(output, "USPS address not standardized"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .endsWith("errorNumber=-2147219401 errorDescription=No match for **** / ****.");
         assertNoCredentials(output, null);
     }
 
@@ -398,6 +486,8 @@ class UspsWebToolsAddressValidationClientTest {
 
         assertTransportFault(thrown);
         assertThat(thrown).hasMessage("USPS address service I/O failure: HttpTimeoutException");
+        // A timed-out exchange is cancelled, never re-sent.
+        assertThat(endpointHits.get()).isEqualTo(1);
         assertNoCredentials(output, thrown);
     }
 
@@ -433,13 +523,156 @@ class UspsWebToolsAddressValidationClientTest {
     }
 
     @Test
-    @DisplayName("a Web Tools root <Error> on a 200 is a fault, not an address-error result")
+    @DisplayName("a Web Tools root <Error> on a 200 is a fault, logged with its Number and Description")
     void rootErrorDocumentIsFault(CapturedOutput output) throws IOException {
         byte[] body = fixture("root-error.xml");
         handler.set(exchange -> drainAndRespond(exchange, 200, body));
 
         Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
 
+        // The exception message names the kind of fault only; the USPS texts go to the log.
+        assertThat(thrown).hasMessage("response root is not AddressValidateResponse");
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" WARN ")
+                .endsWith("host=127.0.0.1 status=200 reason=response root is not AddressValidateResponse"
+                        + " errorNumber=-2147218662"
+                        + " errorDescription=Authorization failure.  Perhaps username and/or password is incorrect.");
+        assertNoCredentials(output, thrown);
+    }
+
+    @Test
+    @DisplayName("a root <Error> Description echoing the user id and password is logged with **** in their place")
+    void rootErrorDescriptionEchoingCredentialsIsMasked(CapturedOutput output) {
+        // XML markup: the parsed Description is "Authorization failure for TESTUSER123 / pl&ce"holder."
+        byte[] body = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Number>-2147218662</Number>"
+                + "<Description>Authorization failure for " + USER_ID + " / pl&amp;ce&quot;holder.</Description>"
+                + "<Source>USPSCOM::DoAuth</Source></Error>").getBytes(StandardCharsets.UTF_8);
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
+
+        assertThat(thrown).hasMessage("response root is not AddressValidateResponse");
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .endsWith(" errorNumber=-2147218662 errorDescription=Authorization failure for **** / ****.");
+        assertNoCredentials(output, thrown);
+    }
+
+    @ParameterizedTest(name = "an address-level Description echoing the {0} is logged with markers in its place")
+    @EnumSource(Echo.class)
+    @DisplayName("an address-level Description echoing the request is returned as sent and logged with markers")
+    void addressErrorDescriptionEchoingRequestIsRedacted(Echo echo, CapturedOutput output) {
+        String baseUrl = "http://127.0.0.1:" + port + ENDPOINT_PATH;
+        AtomicReference<String> echoed = new AtomicReference<>();
+        handler.set(exchange -> {
+            String text = echo.text(baseUrl, exchange.getRequestURI().getRawQuery());
+            echoed.set(text);
+            drainAndRespond(exchange, 200, addressErrorBody(xmlText(text)));
+        });
+
+        AddressValidationResult result;
+        try (UspsWebToolsAddressValidationClient client = client(NORMAL_READ_TIMEOUT)) {
+            result = client.validate(REQUEST);
+        }
+
+        assertThat(echoed.get().length()).isLessThanOrEqualTo(AddressValidationResult.ERROR_DESCRIPTION_WIDTH);
+        assertThat(result.standardized()).isFalse();
+        assertThat(result.errorNumber()).isEqualTo(-2147219401);
+        assertThat(result.errorDescription().equals(echoed.get()))
+                .withFailMessage("returned description is not the echoed text")
+                .isTrue();
+        assertNoRequestEcho(output, baseUrl);
+        assertThat(capturedLines(output, "USPS address not standardized"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" INFO ")
+                .endsWith("host=127.0.0.1 status=200 errorNumber=-2147219401 errorDescription=" + echo.logged());
+        assertNoCredentials(output, null);
+    }
+
+    @ParameterizedTest(name = "a root <Error> Description echoing the {0} is logged with markers in its place")
+    @EnumSource(Echo.class)
+    @DisplayName("a root <Error> Description echoing the request leaves the fault as it was and is logged with markers")
+    void rootErrorDescriptionEchoingRequestIsRedacted(Echo echo, CapturedOutput output) {
+        String baseUrl = "http://127.0.0.1:" + port + ENDPOINT_PATH;
+        AtomicReference<String> echoed = new AtomicReference<>();
+        handler.set(exchange -> {
+            String text = "Authorization failure. " + echo.text(baseUrl, exchange.getRequestURI().getRawQuery());
+            echoed.set(text);
+            byte[] body = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Number>-2147218662</Number>"
+                    + "<Description>" + xmlText(text) + "</Description>"
+                    + "<Source>USPSCOM::DoAuth</Source></Error>").getBytes(StandardCharsets.UTF_8);
+            drainAndRespond(exchange, 200, body);
+        });
+
+        Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
+
+        assertThat(echoed.get()).withFailMessage("the fake endpoint never received the request").isNotNull();
+        // The fault message is the codec's, as without the echo; the USPS texts go to the log only.
+        assertThat(thrown).hasMessage("response root is not AddressValidateResponse");
+        assertThat(thrown.getCause()).isNull();
+        assertNoRequestEcho(output, baseUrl);
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" WARN ")
+                .endsWith("host=127.0.0.1 status=200 reason=response root is not AddressValidateResponse"
+                        + " errorNumber=-2147218662 errorDescription=Authorization failure. " + echo.logged());
+        assertNoCredentials(output, thrown);
+    }
+
+    /**
+     * 200 bodies holding an {@code Error} the response rules reject, each named for the rule
+     * it breaks and followed by the fault message and the {@code errorNumber} and
+     * {@code errorDescription} log values the WARN line must end with.
+     */
+    static Stream<Arguments> errorRuleFaults() throws IOException {
+        byte[] longSource = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                + "<AddressValidateResponse><Address ID=\"0\">"
+                + "<Address2>8 ELMWOOD DR</Address2><City></City><State>CT</State><Zip5>06399</Zip5>"
+                + "<Error><Number>-2147219401</Number><Source>" + "S".repeat(31) + "</Source>"
+                + "<Description>Address Not Found.</Description></Error>"
+                + "</Address></AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
+        return Stream.of(
+                Arguments.of(Named.of("error-bad-number.xml, Number 80040B1A", fixture("error-bad-number.xml")),
+                        "Error Number is not an integer", "80040B1A", "Invalid Address."),
+                Arguments.of(Named.of("error-missing-description.xml", fixture("error-missing-description.xml")),
+                        "Error element Description is missing", "-2147219401", "-"),
+                Arguments.of(Named.of("a Source of 31 characters", longSource),
+                        "Error element Source exceeds 30 characters", "-2147219401", "Address Not Found."));
+    }
+
+    @ParameterizedTest(name = "{0} is a fault logged with its Number and Description")
+    @MethodSource("errorRuleFaults")
+    @DisplayName("an Error the response rules reject is a fault, logged with its Number and Description")
+    void errorRuleFaultIsLoggedWithNumberAndDescription(
+            byte[] body, String reason, String number, String description, CapturedOutput output) {
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
+
+        assertThat(thrown).hasMessage(reason);
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" WARN ")
+                .endsWith("status=200 reason=" + reason
+                        + " errorNumber=" + number + " errorDescription=" + description);
+        assertNoCredentials(output, thrown);
+    }
+
+    @ParameterizedTest(name = "{0} is a fault logged with host, status and reason only")
+    @ValueSource(strings = {"malformed.xml", "doctype-xxe.xml", "two-addresses.xml", "blank-city-no-error.xml"})
+    @DisplayName("a codec fault without a readable Error element is logged with host, status and reason only")
+    void codecFaultWithoutErrorElementIsLoggedWithReasonOnly(String name, CapturedOutput output) throws IOException {
+        byte[] body = fixture(name);
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
+
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" WARN ")
+                .endsWith("host=127.0.0.1 status=200 reason=" + thrown.getMessage())
+                .doesNotContain("errorNumber=", "errorDescription=");
         assertNoCredentials(output, thrown);
     }
 
@@ -540,6 +773,50 @@ class UspsWebToolsAddressValidationClientTest {
         Throwable thrown = validateExpectingFault(NORMAL_READ_TIMEOUT);
 
         assertTransportFault(thrown);
+        // Response bytes had arrived before the connection dropped, so the JDK client does
+        // not re-send the request.
+        assertThat(endpointHits.get()).isEqualTo(1);
+        assertNoCredentials(output, thrown);
+    }
+
+    @ParameterizedTest(name = "a connection {0} before any response byte is one fault, the request sent at most twice")
+    @EnumSource(Drop.class)
+    @DisplayName("a connection dropped before any response byte is one fault; the request is re-sent at most once")
+    void connectionDroppedBeforeResponseIsOneFault(Drop drop, CapturedOutput output)
+            throws IOException, InterruptedException, ExecutionException, TimeoutException {
+        AtomicInteger verifyRequests = new AtomicInteger();
+        Throwable thrown;
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            try (ServerSocket listener = new ServerSocket()) {
+                listener.bind(new InetSocketAddress("127.0.0.1", 0));
+                threads.execute(() -> acceptAndDrop(listener, drop, verifyRequests));
+                try (UspsWebToolsAddressValidationClient client = client(
+                        "http://127.0.0.1:" + listener.getLocalPort() + ENDPOINT_PATH, NORMAL_READ_TIMEOUT)) {
+                    Future<Throwable> call = threads.submit(() -> catchThrowable(() -> client.validate(REQUEST)));
+                    thrown = call.get(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS);
+                }
+            }
+        } finally {
+            // The listener is closed by now, which ends the accept loop.
+            threads.shutdownNow();
+            assertThat(threads.awaitTermination(WATCHDOG.toMillis(), TimeUnit.MILLISECONDS))
+                    .withFailMessage("the fake server or the call did not stop")
+                    .isTrue();
+        }
+
+        assertTransportFault(thrown);
+        assertThat(thrown.getMessage()).startsWith("USPS address service I/O failure: ");
+        // The server counts each request before dropping its connection, and the call ends
+        // only after the last drop, so the count is final here. The JDK client re-sends a GET
+        // once when the connection drops before any response byte, never more.
+        assertThat(verifyRequests.get())
+                .withFailMessage("the fake server received %s Verify requests, not 1 or 2", verifyRequests.get())
+                .isBetween(1, 2);
+        assertThat(capturedLines(output, "USPS address validation failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains(" WARN ")
+                .endsWith("host=127.0.0.1 reason=" + thrown.getMessage());
         assertNoCredentials(output, thrown);
     }
 
@@ -683,6 +960,66 @@ class UspsWebToolsAddressValidationClientTest {
         assertNoCredentials(output, null);
     }
 
+    @Test
+    @DisplayName("redactRequest replaces every written form of an echoed request and keeps all other text")
+    void redactRequestReplacesEveryEchoedForm() {
+        // A base URL with a query of its own, so the Verify query follows it after "&".
+        String baseUrl = "https://gw.example.invalid/ShippingAPI.dll?key=1";
+        Map<String, String> redactions = new LinkedHashMap<>();
+        redactions.put("Cut: <AddressValidateRequest USERID=\"X\"><Revision>1</Revision><Address ID=\"0\">"
+                + "<Address2>8 ELMWOOD DR", "Cut: [request document]");
+        redactions.put("Cut: &lt;AddressValidateRequest USERID=&quot;X&quot;&gt;&lt;Address2&gt;8 ELMWOOD DR",
+                "Cut: [request document]");
+        redactions.put("Sent &lt;AddressValidateRequest USERID=&quot;X&quot;&gt;&lt;/AddressValidateRequest&gt; twice",
+                "Sent [request document] twice");
+        redactions.put("<AddressValidateRequest>a</AddressValidateRequest> and "
+                + "<AddressValidateRequest>b</AddressValidateRequest>.", "[request document] and [request document].");
+        redactions.put("Doc <AddressValidateRequest USERID=\"X\">\n<Address2>8 ELMWOOD DR</Address2>\n"
+                + "</AddressValidateRequest> end", "Doc [request document] end");
+        // A value spelling the closing tag of the other form does not end the document.
+        redactions.put("<AddressValidateRequest PASSWORD=\"a&lt;/AddressValidateRequest&gt;b\">"
+                + "<Address2>8 ELMWOOD DR</Address2></AddressValidateRequest> end", "[request document] end");
+        redactions.put("&lt;AddressValidateRequest PASSWORD=&quot;a&amp;lt;/AddressValidateRequest&amp;gt;b&quot;&gt;"
+                + "&lt;Address2&gt;8 ELMWOOD DR&lt;/Address2&gt;&lt;/AddressValidateRequest&gt; end",
+                "[request document] end");
+        redactions.put("XML value %3CAddressValidateRequest+USERID%3D%22X%22%3E%3CAddress2%3E8+ELMWOOD+DR rejected",
+                "XML value [request document] rejected");
+        redactions.put("GET " + baseUrl + "&amp;API=Verify&amp;XML=%3CAddressValidateRequest+USERID%3D%22X%22%3E"
+                + "%3C%2FAddressValidateRequest%3E failed", "GET [request URL]&amp;[request query] failed");
+        redactions.put("API=Verify&amp;XML=<AddressValidateRequest USERID=\"X\"><Address2>8 ELMWOOD DR</Address2>"
+                + "</AddressValidateRequest>&amp;x=1 end", "[request query] end");
+        redactions.put("q API=Verify&XML=%3cAddressValidateRequest+USERID%3d%22X%22%3e", "q [request query]");
+        redactions.put("q API=Verify&XML=", "q [request query]");
+        redactions.put("Endpoint " + baseUrl + " is down", "Endpoint [request URL] is down");
+        List<String> unchanged = List.of(
+                "Address Not Found.",
+                "Address 123 MAIN ST, ANYTOWN CA 90210 see https://example.invalid/x",
+                "response root is not AddressValidateResponse",
+                "API=Other&XML=1 and AddressValidateRequest without its bracket",
+                "");
+
+        try (UspsWebToolsAddressValidationClient client = client(baseUrl, NORMAL_READ_TIMEOUT)) {
+            redactions.forEach((text, redacted) ->
+                    assertThat(client.redactRequest(text)).as(text).isEqualTo(redacted));
+            unchanged.forEach(text -> assertThat(client.redactRequest(text)).as(text).isEqualTo(text));
+            assertThat(client.redactRequest(null)).isEmpty();
+
+            // 64 KiB of input built to make a backtracking pattern explode: each must end at
+            // once. The watchdog only keeps a broken pattern from hanging the build.
+            assertTimeoutPreemptively(WATCHDOG, () -> {
+                assertThat(client.redactRequest(
+                        "<AddressValidateRequest" + "</AddressValidateRequest".repeat(2_700)))
+                        .isEqualTo("[request document]");
+                assertThat(client.redactRequest("&lt;AddressValidateRequest".repeat(2_500)))
+                        .isEqualTo("[request document]");
+                assertThat(client.redactRequest("API=Verify&XML=".repeat(4_300)))
+                        .isEqualTo("[request query]");
+                assertThat(client.redactRequest("%3CAddressValidateRequest ".repeat(2_500)))
+                        .isEqualTo("[request document] ".repeat(2_500));
+            });
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     /** Builds a client for the fake endpoint with the given read timeout. */
@@ -734,6 +1071,22 @@ class UspsWebToolsAddressValidationClientTest {
                 + "</Address></AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
     }
 
+    /** Escapes {@code &}, {@code <} and {@code >}, so that {@code text} can stand as XML element content. */
+    private static String xmlText(String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * Asserts that the captured output holds no part of a request the fake echoed: the base
+     * URL, the Verify query, the request document decoded or URL-encoded, or the street as
+     * the query or the document carries it. Failure messages name the form found, never the
+     * output, which would quote the echo.
+     */
+    private static void assertNoRequestEcho(CapturedOutput output, String baseUrl) {
+        assertAbsent(output.getAll(), "captured output", baseUrl, "ShippingAPI.dll?", "API=Verify",
+                "AddressValidateRequest", "%3CAddressValidateRequest", "8+ELMWOOD+DR", "8 ELMWOOD DR");
+    }
+
     /**
      * Returns the text between the quotes of the first attribute {@code name} in the decoded
      * request document, or an empty {@link Optional} when the document lacks a blank
@@ -752,6 +1105,16 @@ class UspsWebToolsAddressValidationClientTest {
             return Optional.empty();
         }
         return Optional.of(document.substring(valueStart, valueEnd));
+    }
+
+    /**
+     * The captured console lines that contain {@code marker}, in order. Lines are split on
+     * the platform separator the console appender ends each line with.
+     */
+    private static List<String> capturedLines(CapturedOutput output, String marker) {
+        return output.getAll().replace(System.lineSeparator(), "\n").lines()
+                .filter(line -> line.contains(marker))
+                .toList();
     }
 
     /**
@@ -840,6 +1203,96 @@ class UspsWebToolsAddressValidationClientTest {
         assertThat(document.contains(fragment))
                 .withFailMessage("decoded request document lacks %s", fragment)
                 .isTrue();
+    }
+
+    /**
+     * How the fake service echoes, inside a {@code Description}, the request it received,
+     * and the text the client must log in place of that echo.
+     */
+    enum Echo {
+        /** The request URL as received, its query percent-encoded. */
+        ENCODED_URL("Request URL: [request URL]?[request query]"),
+        /** The request URL with its query percent-decoded, so the document reads as XML. */
+        DECODED_URL("Request URL: [request URL]?[request query]"),
+        /** The decoded request document alone, with text on both sides. */
+        DECODED_DOCUMENT("Rejected [request document] as sent");
+
+        private final String logged;
+
+        Echo(String logged) {
+            this.logged = logged;
+        }
+
+        /** The echo text for a request to {@code baseUrl} whose raw query was {@code rawQuery}. */
+        String text(String baseUrl, String rawQuery) {
+            String decoded = URLDecoder.decode(rawQuery, StandardCharsets.UTF_8);
+            return switch (this) {
+                case ENCODED_URL -> "Request URL: " + baseUrl + "?" + rawQuery;
+                case DECODED_URL -> "Request URL: " + baseUrl + "?" + decoded;
+                case DECODED_DOCUMENT -> "Rejected " + decoded.substring(decoded.indexOf("XML=") + 4) + " as sent";
+            };
+        }
+
+        /** The text the log line must carry in place of the echo. */
+        String logged() {
+            return logged;
+        }
+    }
+
+    /** How the raw fake server ends a connection once it has read the request head. */
+    enum Drop {
+        /** A normal close: the client reads end of stream. */
+        CLOSED,
+        /** A close with {@code SO_LINGER} 0: the client reads a connection reset. */
+        RESET
+    }
+
+    /**
+     * Accepts connections on {@code listener} until it is closed. For each one it reads the
+     * request head, counts it in {@code verifyRequests} when its request line is the Verify
+     * {@code GET}, then drops the connection as {@code drop} says without sending a byte.
+     * Reads are bounded by {@link #WATCHDOG}, so a client that never sends its head cannot
+     * hold the loop.
+     */
+    private static void acceptAndDrop(ServerSocket listener, Drop drop, AtomicInteger verifyRequests) {
+        while (!listener.isClosed()) {
+            try (Socket connection = listener.accept()) {
+                connection.setSoTimeout((int) WATCHDOG.toMillis());
+                String head = readRequestHead(connection.getInputStream());
+                if (head.startsWith("GET " + ENDPOINT_PATH + "?API=Verify&XML=")) {
+                    verifyRequests.incrementAndGet();
+                }
+                if (drop == Drop.RESET) {
+                    // A zero linger time makes close() send RST instead of FIN.
+                    connection.setSoLinger(true, 0);
+                }
+            } catch (IOException closedOrDropped) {
+                // The listener was closed, which ends the loop, or one connection failed,
+                // which the client side reports.
+            }
+        }
+    }
+
+    /**
+     * Reads one request head, up to and including the blank line that ends it, at most
+     * 64 KiB, and returns it as ISO-8859-1 text; at end of stream it returns what arrived.
+     * Callers inspect its request line, which carries the credentials, and never print it.
+     */
+    private static String readRequestHead(InputStream in) throws IOException {
+        InputStream buffered = new BufferedInputStream(in);
+        ByteArrayOutputStream head = new ByteArrayOutputStream();
+        // Bytes of the terminating CR LF CR LF matched so far.
+        int matched = 0;
+        while (matched < 4 && head.size() < 65_536) {
+            int next = buffered.read();
+            if (next < 0) {
+                break;
+            }
+            head.write(next);
+            char expected = matched % 2 == 0 ? '\r' : '\n';
+            matched = next == expected ? matched + 1 : (next == '\r' ? 1 : 0);
+        }
+        return head.toString(StandardCharsets.ISO_8859_1);
     }
 
     /** Drains the request body, answers with {@code status} and {@code body}, and closes. */
