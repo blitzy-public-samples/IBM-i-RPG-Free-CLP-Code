@@ -11,10 +11,11 @@
 -- edit and add (CustomerRepository, CustomerIdAllocator) and the test-data
 -- generator (CustomerLoader, CustomerCopyWriter).
 --
--- Columns keep the source order and the source names in lowercase, with no
--- underscores, plus row_version last. CustomerCopyWriter's COPY and the V5
--- seed list them explicitly in this order, and Customer maps each one by name
--- with @Column, so they must not be reordered or renamed.
+-- Columns keep the source order of 5250_Subfile/Custmast2.sql for
+-- traceability, plus row_version last. Their names are the contract: the
+-- source names in lowercase, with no underscores, plus row_version.
+-- CustomerCopyWriter's COPY, the V5 seed and Customer's @Column mappings
+-- refer to each column by name, so no column may be renamed.
 --
 -- Intentional differences from the source (recorded in
 -- docs/deviations-and-open-questions.md):
@@ -87,9 +88,15 @@ CREATE TABLE custmast (
 --
 -- custmast_search_keyset uses the column collations and no operator class, so
 -- it matches ORDER BY name, city, state, custid and the keyset row comparison
--- (name, city, state, custid) > (:kName, :kCity, :kState, :kId): the first
--- page stops after 13 index entries, and a deep page costs the same as the
--- first. custid is the unique tiebreaker keyset pagination needs.
+-- (name, city, state, custid) > (:kName, :kCity, :kState, :kId), which is its
+-- index condition: a cursor page starts at the keyset position, with no
+-- OFFSET. custid is the unique tiebreaker keyset pagination needs. A search
+-- with no name, city or state filter walks this index in order from any keyset
+-- position and stops once 13 matching rows are found (the active = 'Y' filter
+-- can make it examine more entries), so a deep page of that walk costs what
+-- the first page costs. Name, city and state filters have no such bound (see
+-- CustomerSearchRepository): a literal name or city lead sorts a materialized
+-- candidate set; other filters can examine many entries before 13 match.
 
 CREATE INDEX custmast_name ON custmast (name varchar_pattern_ops);
 CREATE INDEX custmast_city ON custmast (city varchar_pattern_ops);

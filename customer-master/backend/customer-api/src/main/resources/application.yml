@@ -41,9 +41,9 @@ spring:
       data-source-properties:
         # Longest wait, in seconds, for PostgreSQL's answer on an open connection.
         # Hikari hands out a connection used in the last 500 ms without an
-        # aliveness check, and any connection can lose the database mid-query, so
-        # without this bound a request waited without end on a database that
-        # stopped answering. With it the read fails with an I/O error, Hikari
+        # aliveness check, and any connection can lose the database mid-query;
+        # without this bound a request waits without end on a database that
+        # stops answering. With it the read fails with an I/O error, Hikari
         # evicts the connection and the request answers 500 DEM9999 with an
         # errorId. The bound applies to each wait for PostgreSQL's answer, not
         # to the request. No legitimate answer takes longer than the lock
@@ -56,8 +56,10 @@ spring:
         # so a read behind a load lasts as long as the load holds its lock, and
         # 45 only bounds a database that stops answering. The frontend's nginx
         # waits up to 300 s for an API answer (proxy_read_timeout in
-        # frontend/nginx.conf), sized above the longest load, so the UI receives
-        # the API's own answer. A fixed value: no environment variable sets it.
+        # frontend/nginx.conf, which derives it): about ten times the lock hold
+        # expected of the largest load at the measured load rate, so the UI
+        # normally receives the API's own answer, and a longer wait gets
+        # nginx's 504 DEM9999. A fixed value: no environment variable sets it.
         socketTimeout: 45
         # Server-side TCP keepalives of each session. PostgreSQL ends a session
         # whose client vanished without closing its socket (a generator container
