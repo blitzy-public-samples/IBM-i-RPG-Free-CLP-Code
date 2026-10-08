@@ -52,8 +52,10 @@
  *   container needs outbound HTTPS.
  *
  * Linux bind-mount caveat
- *   The grafana/k6 image runs as uid 12345, so perf/results/ on the host must be writable by
- *   that uid (for example chmod o+w perf/results), or writing the summary file fails.
+ *   The grafana/k6 image runs as uid 12345, which cannot write perf/results/ on the host when the
+ *   checkout's user owns it, so the Compose k6 service runs as root (user "0:0"). A plain
+ *   docker run of the image needs --user 0:0, or perf/results/ writable by that uid (for example
+ *   chmod o+w perf/results), or writing the summary file fails.
  */
 
 import http from 'k6/http';

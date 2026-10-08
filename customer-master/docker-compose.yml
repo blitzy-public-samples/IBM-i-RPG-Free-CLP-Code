@@ -1,0 +1,217 @@
+# Customer Master: the whole stack from this folder in one command, with no manual step:
+#
+#   docker compose up --build                 (add -d --wait to return once all three are healthy)
+#
+#   UI   http://localhost:8080   (FRONTEND_PORT) nginx serving the React SPA; /api is proxied to app
+#   API  http://localhost:8081   (API_PORT)      Swagger UI at /swagger-ui.html; curl and host tools
+#
+# Default services, started in health order (db -> app -> frontend):
+#   db        PostgreSQL 18.6. The named volume pgdata keeps the data between runs.
+#   app       customer-api. On boot Flyway creates schema DB_SCHEMA and applies V1-V4 from
+#             db/migration, then the V5 seed (300 customers) from db/seed; a second `up` finds
+#             nothing to apply. This is the seed path of LOADCUST (SBMJOB RUNSQLSTM over
+#             custmast.sql); V1-V4 stand in for Custmast2.sql, States.sql and CRTDTAARA.
+#   frontend  nginx with the built SPA.
+#
+# Profiled services, started only on request; plain `up` and `up --wait` never start them:
+#   generator (tools)  docker compose --profile tools run --rm generator [--count=N]
+#                        [--start-id=XXXX] [--csz-file=/data/csz.csv] [--seed=L]
+#             The random path of LOADCUST2 -> LOADCUSTR. The SBMJOB batch job becomes a
+#             synchronous one-shot process whose exit code reports the outcome (0 loaded,
+#             1 failed). The ALCOBJ ... WAIT(5) guard and its "Cannot allocate CUSTMAST" message
+#             live in the generator itself (LOCK TABLE under a 5 s lock timeout). A load
+#             replaces every customer row, the seed included. Use `run`, not `up`: `up` would
+#             start it with no options and load the default 300 rows.
+#   k6        (perf)   docker compose --profile perf run --rm k6      after a 1,000,000-row load
+#   e2e       (e2e)    docker compose --profile e2e run --rm e2e      against the seed rows
+#
+# Configuration: every value is a ${VAR:-default} interpolation. .env.example documents each
+# variable; a .env next to this file overrides them. The defaults are demo-only, and the USPS
+# credentials (the USPS_ID / USPS_PWD data areas of USADRVAL) have none. The database
+# variables take effect on an empty pgdata volume only, because PostgreSQL initialises its
+# cluster once; `docker compose down -v` resets all data.
+
+# Datasource settings, shared by app and generator so both connect as the same role: the
+# role Flyway runs as owns custmast_id_seq, and the generator's ALTER SEQUENCE needs it.
+x-db-env: &db-env
+  DB_HOST: ${DB_HOST:-db}
+  DB_PORT: ${DB_PORT:-5432}
+  DB_NAME: ${DB_NAME:-customermaster}
+  DB_USER: ${DB_USER:-customermaster}
+  DB_PASSWORD: ${DB_PASSWORD:-customermaster-demo}
+  DB_SCHEMA: ${DB_SCHEMA:-customer_master}
+  DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:-5s}
+
+# HTTP Basic users (demo-only defaults): the API's customer-master.security.users, and the
+# sign-in of the e2e fixtures, so an override in .env reaches both sides.
+x-demo-users: &demo-users
+  CM_INQUIRY_USER: ${CM_INQUIRY_USER:-inquiry}
+  CM_INQUIRY_PASSWORD: ${CM_INQUIRY_PASSWORD:-inquiry-demo}
+  CM_MAINTENANCE_USER: ${CM_MAINTENANCE_USER:-sales}
+  CM_MAINTENANCE_PASSWORD: ${CM_MAINTENANCE_PASSWORD:-sales-demo}
+
+# One backend image, two uses: the API (default entrypoint) and the generator.
+x-app-build: &app-build
+  context: ./backend
+  dockerfile: Dockerfile
+
+# app and generator name the same image, so `up --build` refreshes the code the generator
+# runs too and `run generator` never starts a stale copy. The name carries the Compose
+# project (customer-master-app:local by default), so separate projects on one Docker host
+# never overwrite each other's build.
+x-app-image: &app-image ${COMPOSE_PROJECT_NAME:-customer-master}-app:local
+
+services:
+  db:
+    image: postgres:18.6
+    environment:
+      POSTGRES_DB: ${DB_NAME:-customermaster}
+      POSTGRES_USER: ${DB_USER:-customermaster}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-customermaster-demo}
+    # PostgreSQL 18 images keep PGDATA at /var/lib/postgresql/18/docker and declare the
+    # volume at /var/lib/postgresql; a mount at the older .../data path is refused.
+    volumes:
+      - pgdata:/var/lib/postgresql
+    # PostgreSQL's parallel query workers share memory through /dev/shm, and Docker's 64 MB
+    # default can run out on the 1,000,000-row data set; the postgres image documents this
+    # setting for Compose.
+    shm_size: 128mb
+    # No host port: the gates query it with `docker compose exec db psql ...`.
+    healthcheck:
+      # $$ defers expansion to the container shell. TCP to 127.0.0.1 skips the socket-only
+      # server the image runs while it initialises, so "ready" means the real server.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: *app-build
+    image: *app-image
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: [*db-env, *demo-users]
+      # Adds the V5 seed location to the V1-V4 migrations application.yml applies alone.
+      SPRING_FLYWAY_LOCATIONS: ${SPRING_FLYWAY_LOCATIONS:-classpath:db/migration,classpath:db/seed}
+      ADDRESS_VALIDATION_ENABLED: ${ADDRESS_VALIDATION_ENABLED:-true}
+      ADDRESS_VALIDATION_CLIENT: ${ADDRESS_VALIDATION_CLIENT:-stub}
+      # Non-secret USPS settings carry their default here too: Spring treats an empty
+      # variable as set, so a blank .env line would otherwise erase the application default.
+      USPS_BASE_URL: ${USPS_BASE_URL:-https://secure.shippingapis.com/ShippingAPI.dll}
+      USPS_CONNECT_TIMEOUT: ${USPS_CONNECT_TIMEOUT:-5s}
+      USPS_READ_TIMEOUT: ${USPS_READ_TIMEOUT:-10s}
+      # Credentials have no default; ADDRESS_VALIDATION_CLIENT=usps fails startup while
+      # USPS_USER_ID is empty. Set them in .env only.
+      USPS_USER_ID: ${USPS_USER_ID:-}
+      USPS_PASSWORD: ${USPS_PASSWORD:-}
+    ports:
+      - "${API_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      # Above the readiness probe's documented worst-case answer of about 9 s (pool borrow
+      # plus validations while the database is slow), so a slow but working database never
+      # counts as a failed check.
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    # nginx resolves app (proxy_pass http://app:8080) once at startup, so it starts after app.
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    # One CPU is ample for a static bundle and one proxy route, and the image sizes nginx's
+    # worker count from this limit; without one it starts a worker per host CPU (over a
+    # hundred on a large host). 1 is valid on every host, where a larger limit is refused on
+    # hosts with fewer CPUs.
+    cpus: 1
+    healthcheck:
+      # Healthy means nginx answers (/healthz) and the built index.html is served (/).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz && wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  generator:
+    profiles: ["tools"]
+    build: *app-build
+    image: *app-image
+    # `docker compose run` appends its arguments (--count=..., --start-id=..., --csz-file=...,
+    # --seed=...) after this entrypoint, so there is no `command`. The generator profile has
+    # no web server and never migrates: it waits for app, which has applied Flyway.
+    entrypoint: ["java", "-jar", "/app/app.jar", "--spring.profiles.active=generator"]
+    depends_on:
+      app:
+        condition: service_healthy
+    # Only the datasource and the generator options. No CM_*, ADDRESS_* or USPS_* values: the
+    # generator's non-web context binds no users and needs only the stub address default.
+    environment:
+      <<: *db-env
+      # Each option keeps its default here so a blank .env line never reaches Spring as "".
+      # A command-line flag still wins over its variable (application-generator.yml).
+      GENERATOR_COUNT: ${GENERATOR_COUNT:-300}
+      GENERATOR_START_ID: ${GENERATOR_START_ID:-}
+      GENERATOR_CSZ_FILE: ${GENERATOR_CSZ_FILE:-classpath:generator/csz-sample.csv}
+      GENERATOR_SEED: ${GENERATOR_SEED:-}
+    # A full city/state/ZIP CSV placed in ./data is read as --csz-file=/data/csz.csv
+    # (data/README.md); the files must be world-readable for the non-root image user.
+    volumes:
+      - ./data:/data:ro
+    restart: "no"
+
+  k6:
+    profiles: ["perf"]
+    image: grafana/k6:2.3.0
+    # Root, because the image's own user (uid 12345) cannot write the summary into the bind
+    # mount ./perf/results, which belongs to the checkout's owner.
+    user: "0:0"
+    # k6 calls customer-api directly inside the network, not through nginx.
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      K6_BASE_URL: ${K6_BASE_URL:-http://app:8080}
+      # The inquiry user, following an overridden CM_INQUIRY_USER unless K6_USER is set.
+      K6_USER: ${K6_USER:-${CM_INQUIRY_USER:-inquiry}}
+      K6_PASSWORD: ${K6_PASSWORD:-${CM_INQUIRY_PASSWORD:-inquiry-demo}}
+    volumes:
+      - ./perf:/perf
+    # The image's entrypoint is k6. The summary file is git-ignored.
+    command: ["run", "--summary-export=/perf/results/search-1m-summary.json", "/perf/k6/search-1m.js"]
+
+  e2e:
+    profiles: ["e2e"]
+    # Must equal @playwright/test in e2e/package.json (1.63.0).
+    image: mcr.microsoft.com/playwright:v1.63.0-noble
+    depends_on:
+      frontend:
+        condition: service_healthy
+    working_dir: /e2e
+    # Only ./e2e is mounted; the specs reach the API through the frontend origin. The
+    # anonymous volume keeps the container's Linux node_modules out of the host checkout.
+    volumes:
+      - ./e2e:/e2e
+      - /e2e/node_modules
+    environment:
+      <<: *demo-users
+      # nginx listens on port 80 inside the network (e2e/playwright.config.ts).
+      BASE_URL: ${BASE_URL:-http://frontend}
+      # Acceptance run: Playwright's forbidOnly rejects a stray test.only instead of
+      # silently running a subset of the specs.
+      CI: "true"
+    # Playwright's documented Docker settings for a stable Chromium.
+    ipc: host
+    init: true
+    command: ["sh", "-c", "npm ci && npx playwright test"]
+
+volumes:
+  # Reused by every `up`; removed by `docker compose down -v`.
+  pgdata: {}
