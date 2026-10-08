@@ -59,11 +59,15 @@ import org.springframework.security.web.SecurityFilterChain;
  *   <li>Strictness: a mistyped flag exits 1 with {@code Unknown option --<name>} and leaves the table
  *       and the id sequence untouched.</li>
  *   <li>The properties registration rule: no run has a {@code CM_*} variable or a
- *       {@code customer-master.security.*} property, and a run that adds user settings
- *       {@code UsersProperties} validation would reject still loads, because {@code SecurityConfig}, the
- *       only registrar of {@code UsersProperties}, is servlet-only and absent from the generator
- *       context. No run logs a web server, a {@code SecurityFilterChain} or a
- *       {@code customer-master.security.users} binding.</li>
+ *       {@code customer-master.security.*} property. No inherited JVM option variable
+ *       ({@code JDK_JAVA_OPTIONS}, {@code JAVA_TOOL_OPTIONS}, {@code _JAVA_OPTIONS}) reaches a child, so
+ *       no {@code -D} system property exists in it, and a run whose invoking environment carries such
+ *       variables, with {@code -D} count and security properties, still loads exactly its
+ *       {@code GENERATOR_COUNT}. A run that adds user settings {@code UsersProperties} validation would
+ *       reject still loads, because {@code SecurityConfig}, the only registrar of
+ *       {@code UsersProperties}, is servlet-only and absent from the generator context. No run logs a
+ *       web server, a {@code SecurityFilterChain}, a {@code customer-master.security.users} binding or
+ *       the JVM's {@code Picked up ...} echo of an option variable.</li>
  *   <li>The same rule inside one context: an {@link ApplicationContextRunner} over the generator
  *       profile's configuration holds no {@code UsersProperties}, {@code SecurityConfig} or
  *       {@code SecurityFilterChain}, and holds {@code AppProperties} and {@code GeneratorProperties}.</li>
@@ -73,8 +77,10 @@ import org.springframework.security.web.SecurityFilterChain;
  * migrated V1 to V4 into {@value #SCHEMA} and empties {@code custmast} and restarts
  * {@code custmast_id_seq} before every test. The child receives the container's address through
  * {@code DB_HOST}, {@code DB_PORT}, {@code DB_NAME}, {@code DB_USER}, {@code DB_PASSWORD} and
- * {@code DB_SCHEMA}, the variables {@code application.yml} reads; the generator profile disables
- * Flyway, so the child only loads data and never alters a schema object.
+ * {@code DB_SCHEMA}, the variables {@code application.yml} reads. The generator profile disables
+ * Flyway, so the child runs no migration. Each successful load truncates and reloads {@code custmast}
+ * and restarts {@code custmast_id_seq} in the same transaction; a rejected run, such as
+ * {@code --cuont=5}, changes neither.
  *
  * <p><b>Process handling.</b> The child's stdout and stderr go to one file per run in a
  * {@link TempDir}, never to an unread pipe on which the child could block. Every run is bounded by
@@ -124,26 +130,43 @@ class GeneratorProcessIT extends AbstractPostgresIT {
     /**
      * Inherited environment variables removed before a run, by name prefix. The plan names {@code CM_},
      * {@code CUSTOMER_MASTER_SECURITY_}, {@code SPRING_FLYWAY_}, {@code GENERATOR_} and
-     * {@code SPRING_DATASOURCE_}. {@code DB_} is removed as well, so a stray variable such as
-     * {@code DB_LOCK_TIMEOUT} in the developer's shell cannot change a run; every {@code DB_*} the child
-     * needs is set again by {@link #run(Map, String...)}.
+     * {@code SPRING_DATASOURCE_}; {@code CUSTOMER_MASTER_} covers {@code CUSTOMER_MASTER_SECURITY_} and
+     * also removes every other relaxed-binding form of a {@code customer-master.*} property, such as
+     * {@code CUSTOMER_MASTER_GENERATOR_COUNT}, which outranks the option bridge of
+     * {@code application-generator.yml} and would override both {@code GENERATOR_COUNT} and
+     * {@code --count}. {@code SPRING_CONFIG_} is removed because {@code SPRING_CONFIG_IMPORT},
+     * {@code SPRING_CONFIG_LOCATION} and {@code SPRING_CONFIG_ADDITIONAL_LOCATION} can load a file that
+     * carries {@code customer-master.security.*} properties. {@code DB_} is removed as well, so a stray
+     * variable such as {@code DB_LOCK_TIMEOUT} in the developer's shell cannot change a run; every
+     * {@code DB_*} the child needs is set again by {@link #run(Map, Map, String...)}.
      */
     private static final List<String> SCRUBBED_PREFIXES = List.of(
-            "CM_", "CUSTOMER_MASTER_SECURITY_", "SPRING_FLYWAY_", "GENERATOR_", "SPRING_DATASOURCE_", "DB_");
+            "CM_", "CUSTOMER_MASTER_", "SPRING_CONFIG_", "SPRING_FLYWAY_", "GENERATOR_", "SPRING_DATASOURCE_",
+            "DB_");
 
     /**
      * Inherited environment variables removed before a run, by exact name. {@code SPRING_APPLICATION_JSON}
      * is removed besides the planned {@code SPRING_PROFILES_ACTIVE}, because it could carry a
-     * {@code customer-master.security.*} property into the child, which every run must be free of.
+     * {@code customer-master.security.*} property into the child, which every run must be free of. The
+     * JVM option variables {@code JDK_JAVA_OPTIONS} (read by the {@code java} launcher),
+     * {@code JAVA_TOOL_OPTIONS} (read by every JVM) and {@code _JAVA_OPTIONS} (read by HotSpot) are
+     * removed because each one adds its options to the child's command line: a {@code -D} among them
+     * becomes a system property, which outranks the option bridge and could set a
+     * {@code customer-master.security.*} property, and the JVM echoes the variable as
+     * {@code Picked up ...}, which {@link #FORBIDDEN_LOG_TEXT} rejects.
      */
-    private static final Set<String> SCRUBBED_NAMES = Set.of("SPRING_PROFILES_ACTIVE", "SPRING_APPLICATION_JSON");
+    private static final Set<String> SCRUBBED_NAMES = Set.of("SPRING_PROFILES_ACTIVE", "SPRING_APPLICATION_JSON",
+            "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS");
 
     /**
      * Text no generator log may contain: a servlet container or reactive server start, a security filter
      * chain, or a user binding or validation message ({@code customer-master.security.users[0].role}).
+     * {@code Picked up } is the line the JVM prints when it reads {@code JDK_JAVA_OPTIONS},
+     * {@code JAVA_TOOL_OPTIONS} or {@code _JAVA_OPTIONS}, so its absence shows that no JVM option variable
+     * reached the run.
      */
-    private static final List<String> FORBIDDEN_LOG_TEXT =
-            List.of("Tomcat", "Netty started", "SecurityFilterChain", "customer-master.security.users");
+    private static final List<String> FORBIDDEN_LOG_TEXT = List.of(
+            "Tomcat", "Netty started", "SecurityFilterChain", "customer-master.security.users", "Picked up ");
 
     /** Matched case-insensitively: Spring Boot writes both "web server" and "Web server". */
     private static final String FORBIDDEN_LOG_TEXT_ANY_CASE = "web server";
@@ -286,6 +309,30 @@ class GeneratorProcessIT extends AbstractPostgresIT {
                 .isEqualTo(25);
     }
 
+    /**
+     * The inherited map stands for the shell that runs the build: {@code JDK_JAVA_OPTIONS},
+     * {@code JAVA_TOOL_OPTIONS} and {@code _JAVA_OPTIONS} carrying {@code -D} count and security
+     * properties, and {@code CUSTOMER_MASTER_GENERATOR_COUNT}. The scrub removes them all, so the child
+     * loads exactly the {@code GENERATOR_COUNT=40} rows and prints no {@code Picked up} line.
+     */
+    @Test
+    @DisplayName("Inherited JVM option and property variables never reach the child")
+    void inheritedJvmOptionAndPropertyVariablesNeverReachTheChild() {
+        RunResult result = run(
+                Map.of("JDK_JAVA_OPTIONS", "-Dcustomer-master.generator.count=41",
+                        "JAVA_TOOL_OPTIONS", "-Dcustomer-master.generator.count=42",
+                        "_JAVA_OPTIONS", "-Dcustomer-master.security.users[0].role=BOGUS",
+                        "CUSTOMER_MASTER_GENERATOR_COUNT", "44"),
+                Map.of("GENERATOR_COUNT", "40"));
+
+        assertSucceeded(result);
+        assertLoadedReport(result, 40, CustomerGeneratorRunner.DEFAULT_START);
+        assertThat(rowCount())
+                .as("rows loaded with GENERATOR_COUNT=40 under inherited count and security options; %s",
+                        result.describe())
+                .isEqualTo(40);
+    }
+
     @Test
     @DisplayName("The generator profile's context holds no security configuration and binds its own properties")
     void generatorContextHoldsNoSecurityConfiguration() {
@@ -309,22 +356,39 @@ class GeneratorProcessIT extends AbstractPostgresIT {
     }
 
     /**
-     * Starts the generator jar as a separate JVM and waits for it to exit.
-     *
-     * <p>The command is {@code <java.home>/bin/java -jar <app.jar> --spring.profiles.active=generator}
-     * followed by {@code args}; no {@code -D} system property is passed. The environment is the
-     * inherited one without the scrubbed variables ({@link #SCRUBBED_PREFIXES},
-     * {@link #SCRUBBED_NAMES}), plus the {@code DB_*} address of {@link #POSTGRES} and schema
-     * {@value #SCHEMA}, then {@code extraEnv}, which may override anything before it.
+     * Starts the generator jar as a separate JVM with the environment of this test JVM, and waits for it
+     * to exit; see {@link #run(Map, Map, String...)}.
      *
      * @param extraEnv variables added last, for example {@code GENERATOR_COUNT}
      * @param args     the generator options appended after the profile option
+     * @return the exit status and the whole combined output
+     * @throws AssertionError as {@link #run(Map, Map, String...)} does
+     */
+    private RunResult run(Map<String, String> extraEnv, String... args) {
+        return run(Map.of(), extraEnv, args);
+    }
+
+    /**
+     * Starts the generator jar as a separate JVM and waits for it to exit.
+     *
+     * <p>The command is {@code <java.home>/bin/java -jar <app.jar> --spring.profiles.active=generator}
+     * followed by {@code args}; no {@code -D} system property is passed, and because no JVM option
+     * variable survives the scrub, none reaches the child either. The environment is the inherited one,
+     * that of this test JVM plus {@code inheritedEnv}, without the scrubbed variables
+     * ({@link #SCRUBBED_PREFIXES}, {@link #SCRUBBED_NAMES}), plus the {@code DB_*} address of
+     * {@link #POSTGRES} and schema {@value #SCHEMA}, then {@code extraEnv}, which may override anything
+     * before it.
+     *
+     * @param inheritedEnv variables added before the scrub, standing for the shell that runs the build;
+     *                     a scrubbed one never reaches the child
+     * @param extraEnv     variables added last, for example {@code GENERATOR_COUNT}
+     * @param args         the generator options appended after the profile option
      * @return the exit status and the whole combined output
      * @throws AssertionError if the jar is missing, the process cannot start, the wait is interrupted,
      *                        or the process does not exit within {@value #PROCESS_TIMEOUT_SECONDS}
      *                        seconds (it is then killed and the message carries its log)
      */
-    private RunResult run(Map<String, String> extraEnv, String... args) {
+    private RunResult run(Map<String, String> inheritedEnv, Map<String, String> extraEnv, String... args) {
         List<String> command = new ArrayList<>();
         command.add(javaExecutable().toString());
         command.add("-jar");
@@ -339,6 +403,7 @@ class GeneratorProcessIT extends AbstractPostgresIT {
                 .redirectOutput(log.toFile());
 
         Map<String, String> environment = builder.environment();
+        environment.putAll(inheritedEnv);
         environment.keySet().removeIf(GeneratorProcessIT::isScrubbed);
         environment.put("DB_HOST", POSTGRES.getHost());
         environment.put("DB_PORT", String.valueOf(POSTGRES.getMappedPort(5432)));
@@ -471,8 +536,9 @@ class GeneratorProcessIT extends AbstractPostgresIT {
 
     /**
      * Asserts that a run's log comes from a started generator context: Spring Boot's startup line is
-     * present, and nothing shows a web server start, a {@code SecurityFilterChain} or a
-     * {@code customer-master.security.users} binding or validation message.
+     * present, and nothing shows a web server start, a {@code SecurityFilterChain}, a
+     * {@code customer-master.security.users} binding or validation message, or a JVM option variable
+     * the JVM picked up.
      *
      * @param result the run
      */

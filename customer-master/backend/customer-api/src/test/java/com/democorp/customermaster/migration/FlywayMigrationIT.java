@@ -1,7 +1,10 @@
 package com.democorp.customermaster.migration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +18,7 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.output.MigrateResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
 
 /**
  * Applies the Flyway migrations to a fresh, randomly named schema and checks what they create: V1 to V4
@@ -23,9 +27,11 @@ import org.junit.jupiter.api.Test;
  * <p><b>Why a random schema.</b> Test contexts apply {@code classpath:db/migration} only, to schema
  * {@code customer_master}, so this is the only test that sees the V5 seed. Each method migrates its own
  * schema {@code fmit_<uuid>} through a programmatic {@link Flyway} on the shared container, never
- * touches {@code customer_master}, never calls {@code clean()}, and drops its schema afterwards, so the
+ * writes to {@code customer_master}, never calls {@code clean()}, and drops its schema afterwards, so the
  * methods are independent and run in any order. A migration that hard-coded {@code customer_master} or
- * an IBM i library would fail here.
+ * an IBM i library would fail here. That includes the target of {@code custmast_state_fk}: the context's
+ * own schema already holds a {@code states} table with the same 58 codes, so the key is checked to
+ * reference {@code states (state)} of the generated schema, by catalog and by data.
  *
  * <p><b>Collation.</b> V1 defines {@code customer_sort} as the ICU root collation {@code und} with the
  * tailoring rule {@code &[before 1]\u03B1<0<1<2<3<4<5<6<7<8<9}, which puts the ASCII digits after every
@@ -55,8 +61,18 @@ class FlywayMigrationIT extends AbstractPostgresIT {
     /** The number of seed rows: Custmast.sql ids 1..300. */
     private static final int SEED_ROWS = 300;
 
+    /** A state code V2 does not load; one rolled-back check adds it to the generated schema only. */
+    private static final String SCHEMA_ONLY_STATE = "QQ";
+
+    /** A state code that no schema's {@code states} holds. */
+    private static final String UNKNOWN_STATE = "ZZ";
+
+    /** The SQLSTATE {@code foreign_key_violation}. */
+    private static final String FOREIGN_KEY_VIOLATION = "23503";
+
     @Test
-    @DisplayName("V1-V4 apply on an empty schema: collation, constraints, indexes, 58 states, sequence EEEF"
+    @DisplayName("V1-V4 apply on an empty schema: collation, constraints, schema-local state key, indexes,"
+            + " 58 states, sequence EEEF"
             + " (AAP 0.8.3, 0.3.3, 0.3.4; Custmast2.sql, States.sql, CRTDTAARA.clle, SRV_BASE36.RPGLE)")
     void migrationsV1toV4ApplyOnEmptySchema() {
         inFreshSchema((schema, result) -> {
@@ -65,10 +81,12 @@ class FlywayMigrationIT extends AbstractPostgresIT {
             assertCustomerSortComparisons(schema);
             assertPrimaryKeyRangeScanInRolledBackTransaction(schema);
             assertConstraints(schema);
+            assertStateForeignKeyStaysInSchema(schema);
+            assertStateForeignKeyChecksSchemaStatesInRolledBackTransactions(schema);
             assertIndexes(schema);
             assertStates(schema);
             assertThat(count("select count(*) from " + quoted(schema) + ".custmast"))
-                    .as("customers created by V1-V4, and left by the rolled-back range-scan check")
+                    .as("customers created by V1-V4, and left by the rolled-back range-scan and state-key checks")
                     .isZero();
             assertSequenceNeverCalled(schema);
         }, MIGRATION_LOCATION);
@@ -254,7 +272,8 @@ class FlywayMigrationIT extends AbstractPostgresIT {
     }
 
     /**
-     * Asserts the constraints of V2 and V3 by name, kind and table.
+     * Asserts the constraints of V2 and V3 by name, kind and table. The schema and columns that
+     * {@code custmast_state_fk} references are checked by {@link #assertStateForeignKeyStaysInSchema}.
      *
      * @param schema the migrated schema
      */
@@ -278,6 +297,104 @@ class FlywayMigrationIT extends AbstractPostgresIT {
                 .containsEntry("custmast_state_fk", "f custmast -> states")
                 .containsEntry("state_primary_key", "p states")
                 .containsEntry("state_name_unique", "u states");
+    }
+
+    /**
+     * Asserts from the catalog that {@code custmast_state_fk} is a foreign key from {@code custmast (state)}
+     * to {@code states (state)}, both in the migrated schema, and not to the {@code states} table of this
+     * context's own schema, which holds the same codes.
+     *
+     * @param schema the migrated schema
+     */
+    private void assertStateForeignKeyStaysInSchema(String schema) {
+        List<Long> contextStates = jdbcTemplate.queryForList(
+                "select t.oid::bigint from pg_class t join pg_namespace n on n.oid = t.relnamespace"
+                        + " where n.nspname = current_schema() and t.relname = 'states'",
+                Long.class);
+        assertThat(contextStates)
+                .as("states tables in the context's own schema, which make the target check discriminating")
+                .hasSize(1);
+
+        Map<String, Object> foreignKey = jdbcTemplate.queryForMap(
+                "select c.contype::text as kind, tn.nspname as table_schema, t.relname as table_name,"
+                        + " (select string_agg(a.attname::text, ',' order by k.ord)"
+                        + " from unnest(c.conkey) with ordinality k(num, ord)"
+                        + " join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.num) as columns,"
+                        + " rn.nspname as referenced_schema, r.relname as referenced_table,"
+                        + " (select string_agg(a.attname::text, ',' order by k.ord)"
+                        + " from unnest(c.confkey) with ordinality k(num, ord)"
+                        + " join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.num)"
+                        + " as referenced_columns,"
+                        + " c.confrelid::bigint as referenced_oid, to_regclass(?)::oid::bigint as schema_states_oid"
+                        + " from pg_constraint c"
+                        + " join pg_class t on t.oid = c.conrelid"
+                        + " join pg_namespace tn on tn.oid = t.relnamespace"
+                        + " join pg_class r on r.oid = c.confrelid"
+                        + " join pg_namespace rn on rn.oid = r.relnamespace"
+                        + " where tn.nspname = ? and c.conname = 'custmast_state_fk'",
+                quoted(schema) + ".states", schema);
+        assertThat(foreignKey)
+                .as("custmast_state_fk of schema %s", schema)
+                .containsEntry("kind", "f")
+                .containsEntry("table_schema", schema)
+                .containsEntry("table_name", "custmast")
+                .containsEntry("columns", "state")
+                .containsEntry("referenced_schema", schema)
+                .containsEntry("referenced_table", "states")
+                .containsEntry("referenced_columns", "state");
+        assertThat(foreignKey.get("schema_states_oid"))
+                .as("oid of %s.states", schema)
+                .isNotNull();
+        assertThat(foreignKey.get("referenced_oid"))
+                .as("oid of the table custmast_state_fk references")
+                .isEqualTo(foreignKey.get("schema_states_oid"))
+                .isNotEqualTo(contextStates.get(0));
+    }
+
+    /**
+     * Shows by data, in two transactions that are always rolled back, that {@code custmast_state_fk}
+     * checks the migrated schema's {@code states}: a customer may use a code that only that schema holds,
+     * which a key on the context's own {@code states} would reject, and a code that no schema holds fails
+     * with SQLSTATE {@value #FOREIGN_KEY_VIOLATION}. Nothing is written outside the migrated schema.
+     *
+     * @param schema the migrated schema
+     */
+    private void assertStateForeignKeyChecksSchemaStatesInRolledBackTransactions(String schema) {
+        String states = quoted(schema) + ".states";
+        String insertCustomer = "insert into " + quoted(schema) + ".custmast (custid, name, addr, city, state, zip)"
+                + " values (?, ?, '1 MAIN ST', 'SPRINGFIELD', ?, '90210')";
+        for (String code : List.of(SCHEMA_ONLY_STATE, UNKNOWN_STATE)) {
+            assertThat(count("select count(*) from states where state = ?", code))
+                    .as("rows with code %s in the context's own states", code)
+                    .isZero();
+            assertThat(count("select count(*) from " + states + " where state = ?", code))
+                    .as("rows with code %s in %s", code, states)
+                    .isZero();
+        }
+
+        assertThatCode(() -> transactionTemplate.executeWithoutResult(status -> {
+            status.setRollbackOnly();
+            jdbcTemplate.update("insert into " + states + " (state, name) values (?, ?)",
+                    SCHEMA_ONLY_STATE, "MIGRATION TEST STATE");
+            assertThat(jdbcTemplate.update(insertCustomer, "AAAA", "MIGRATION TEST AAAA", SCHEMA_ONLY_STATE))
+                    .as("customers inserted with state %s", SCHEMA_ONLY_STATE)
+                    .isOne();
+        }))
+                .as("a customer with state %s, which only %s holds", SCHEMA_ONLY_STATE, states)
+                .doesNotThrowAnyException();
+
+        Throwable rejected = catchThrowable(() -> transactionTemplate.executeWithoutResult(status -> {
+            status.setRollbackOnly();
+            jdbcTemplate.update(insertCustomer, "AAAB", "MIGRATION TEST AAAB", UNKNOWN_STATE);
+        }));
+        assertThat(rejected)
+                .as("a customer with state %s, which no states table holds", UNKNOWN_STATE)
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .rootCause()
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("custmast_state_fk")
+                .extracting(cause -> ((SQLException) cause).getSQLState())
+                .isEqualTo(FOREIGN_KEY_VIOLATION);
     }
 
     /**
