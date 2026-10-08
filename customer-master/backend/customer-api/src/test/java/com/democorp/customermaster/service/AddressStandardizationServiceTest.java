@@ -113,7 +113,7 @@ final class AddressStandardizationServiceTest {
 
     /**
      * Builds the module settings with an empty password: the cases built on it need no password. The
-     * DEM9898 redaction case builds its own settings with fictitious credentials.
+     * DEM9898 redaction cases build their own settings with fictitious credentials.
      */
     private static AddressValidationProperties props(
             boolean enabled, Client clientType, String baseUrl, String userId) {
@@ -393,6 +393,48 @@ final class AddressStandardizationServiceTest {
                                         .doesNotContain(encodedForms.toArray(String[]::new))
                                         .doesNotContain(password, "%26");
                             }
+                        });
+                assertThat(rejected.errorDescription()).isEqualTo(description);
+            }
+        }
+
+        @Test
+        @DisplayName("DEM9898 with a credential under four characters shows a documented description as sent and withholds any other whole")
+        void addressErrorWithShortCredentialShowsDocumentedDescriptionOrWithholds() {
+            // Fictitious one-character password, which "Address" holds twice and "Rejected pass s" three times.
+            AddressValidationProperties properties = new AddressValidationProperties(
+                    true, Client.STUB, new Usps(UNUSED_BASE_URL, "TESTUSER8", "s", TIMEOUT, TIMEOUT));
+            AddressStandardizationService service = service(client, properties);
+            Address in = new Address("1 NOWHERE LANE", "OLD LYME", "CT", "06371");
+            MessageCatalog catalog = new MessageCatalog();
+            List<Map.Entry<String, String>> shown = List.of(
+                    Map.entry("Address Not Found.", "Address Not Found."),
+                    Map.entry("Rejected pass s", "[description withheld]"));
+
+            for (Map.Entry<String, String> entry : shown) {
+                String description = entry.getKey();
+                String expected = entry.getValue();
+                AddressValidationResult rejected = AddressValidationResult.error(
+                        "", "", "", "", "", "", -2147219401, "clsAMS", description);
+                when(client.validate(any())).thenReturn(rejected);
+
+                assertThatThrownBy(() -> service.standardize(in))
+                        .as(description)
+                        .isInstanceOfSatisfying(CustomerValidationException.class, e -> {
+                            assertThat(e.code()).isEqualTo("DEM9898");
+                            assertThat(e.rule()).isEqualTo(CustomerValidationException.ADDRESS_RULE);
+                            assertThat(e.args()).containsExactly(expected);
+                            assertThat(e.errors()).containsExactly(
+                                    new FieldError("addr", "DEM9898"),
+                                    new FieldError("city", "DEM9898"),
+                                    new FieldError("state", "DEM9898"),
+                                    new FieldError("zip", "DEM9898"));
+                            // Rendered as the problem's detail and as each field message are.
+                            Object[] args = e.args().toArray();
+                            List<String> messages = new ArrayList<>();
+                            messages.add(catalog.text(e.code(), args));
+                            e.errors().forEach(error -> messages.add(catalog.text(error.code(), args)));
+                            assertThat(messages).hasSize(5).containsOnly("USPS: " + expected);
                         });
                 assertThat(rejected.errorDescription()).isEqualTo(description);
             }

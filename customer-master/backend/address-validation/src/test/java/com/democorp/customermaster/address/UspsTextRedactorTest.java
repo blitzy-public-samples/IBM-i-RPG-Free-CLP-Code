@@ -226,6 +226,101 @@ class UspsTextRedactorTest {
     }
 
     @Test
+    @DisplayName("redactDescription shows a documented description as sent although a short credential occurs in it; mask still masks it")
+    void redactDescriptionShowsDocumentedDescriptionsAsSent() {
+        // Fictitious one-character password, which "Address" holds twice.
+        UspsTextRedactor shortPassword = redactor(BASE_URL, USER_ID, "s");
+
+        assertThat(shortPassword.redactDescription("Address Not Found.")).isEqualTo("Address Not Found.");
+        // No 's' in it: masked as redact masks it, which changes nothing.
+        assertThat(shortPassword.redactDescription("Invalid City.")).isEqualTo("Invalid City.");
+        UspsWebToolsAddressValidationClient.DOCUMENTED_DESCRIPTIONS.forEach(documented ->
+                assertThat(shortPassword.redactDescription(documented)).as(documented).isEqualTo(documented));
+        // Log masking is unchanged: every occurrence is still masked.
+        assertThat(shortPassword.mask("Address Not Found.")).isEqualTo("Addre******** Not Found.");
+        assertThat(shortPassword.redact("Address Not Found.")).isEqualTo("Addre******** Not Found.");
+    }
+
+    @Test
+    @DisplayName("redactDescription withholds whole an undocumented description holding a short credential in any form mask matches")
+    void redactDescriptionWithholdsUndocumentedDescriptionHoldingShortCredential() {
+        // Fictitious credentials: a one-character password or user id.
+        UspsTextRedactor shortPassword = redactor(BASE_URL, USER_ID, "s");
+        UspsTextRedactor shortUserId = redactor(BASE_URL, "S", "");
+        // '<' differs in its raw, full-entity and URL-encoded forms; ';' encodes with a hex letter.
+        UspsTextRedactor angle = redactor(BASE_URL, USER_ID, "<");
+        UspsTextRedactor semicolon = redactor(BASE_URL, USER_ID, ";");
+        String withheld = UspsTextRedactor.DESCRIPTION_WITHHELD_MARKER;
+
+        assertThat(withheld).isEqualTo("[description withheld]");
+        assertThat(shortPassword.redactDescription("Rejected pass s")).isEqualTo(withheld);
+        assertThat(shortPassword.redactDescription("Rejected %73")).isEqualTo(withheld);
+        assertThat(shortUserId.redactDescription("Unknown user S")).isEqualTo(withheld);
+        assertThat(shortUserId.redactDescription("Unknown user %53")).isEqualTo(withheld);
+        assertThat(shortUserId.redactDescription("Invalid State Code.")).isEqualTo("Invalid State Code.");
+        assertThat(shortUserId.redactDescription("Rejected")).isEqualTo("Rejected");
+        assertThat(angle.redactDescription("Rejected &lt;")).isEqualTo(withheld);
+        assertThat(angle.redactDescription("Rejected %26lt%3B")).isEqualTo(withheld);
+        assertThat(angle.redactDescription("Rejected %3C")).isEqualTo(withheld);
+        assertThat(semicolon.redactDescription("Rejected a%3bb")).isEqualTo(withheld);
+        assertThat(semicolon.redactDescription("Rejected a%3Bb")).isEqualTo(withheld);
+        // mask, which the log lines use, still masks each occurrence in place.
+        assertThat(shortPassword.mask("Rejected pass s")).isEqualTo("Rejected pa******** ****");
+        assertThat(shortUserId.mask("Unknown user %53")).isEqualTo("Unknown user ****");
+    }
+
+    @Test
+    @DisplayName("a credential shorter than four code points is short: abc and two emoji are; abcd is masked as redact masks it")
+    void shortCredentialIsCountedInCodePoints() {
+        // Fictitious passwords. The two emoji are four chars but two code points.
+        String twoEmoji = "\uD83D\uDE00\uD83D\uDE01";
+        UspsTextRedactor three = redactor(BASE_URL, USER_ID, "abc");
+        UspsTextRedactor four = redactor(BASE_URL, USER_ID, "abcd");
+        UspsTextRedactor emoji = redactor(BASE_URL, USER_ID, twoEmoji);
+        String withheld = UspsTextRedactor.DESCRIPTION_WITHHELD_MARKER;
+
+        assertThat(UspsTextRedactor.SHORT_CREDENTIAL_CODE_POINTS).isEqualTo(4);
+        assertThat(twoEmoji).hasSize(4);
+        assertThat(twoEmoji.codePointCount(0, twoEmoji.length())).isEqualTo(2);
+        assertThat(three.redactDescription("x abc y")).isEqualTo(withheld);
+        assertThat(three.redactDescription("Address Not Found.")).isEqualTo("Address Not Found.");
+        assertThat(four.redactDescription("x abcd y")).isEqualTo("x **** y").isEqualTo(four.redact("x abcd y"));
+        assertThat(emoji.redactDescription("x " + twoEmoji + " y")).isEqualTo(withheld);
+        assertThat(emoji.redactDescription("x %F0%9F%98%80%f0%9f%98%81 y")).isEqualTo(withheld);
+        assertThat(emoji.mask("x " + twoEmoji + " y")).isEqualTo("x **** y");
+    }
+
+    @Test
+    @DisplayName("with no short credential redactDescription returns exactly what redact returns")
+    void redactDescriptionEqualsRedactWithoutShortCredential() {
+        String echo = "Rejected <AddressValidateRequest USERID=\"" + USER_ID + "\" PASSWORD=\"p'&amp;q\">"
+                + "</AddressValidateRequest> for " + USER_ID + " at " + BASE_URL;
+        List<String> texts = List.of(echo, "Address Not Found.", "Invalid City.",
+                "Rejected " + PASSWORD + " and " + URLEncoder.encode(PASSWORD, StandardCharsets.UTF_8), "");
+        // Blank credentials are ignored, never short.
+        UspsTextRedactor none = redactor(BASE_URL, "", "  ");
+
+        assertThat(redactor.redactDescription(echo)).isEqualTo("Rejected [request document] for **** at [request URL]");
+        texts.forEach(text -> assertThat(redactor.redactDescription(text)).as(text).isEqualTo(redactor.redact(text)));
+        assertThat(redactor.redactDescription(null)).isEmpty();
+        assertThat(none.redactDescription("No match for  /  .")).isEqualTo("No match for  /  .");
+    }
+
+    @Test
+    @DisplayName("redactDescription replaces the request echoes first: a short credential inside an echo alone is not withheld")
+    void redactDescriptionReplacesRequestEchoesFirst() {
+        // Fictitious one-character passwords: 'z' occurs in no marker, 's' in "[request document]".
+        UspsTextRedactor shortZ = redactor(BASE_URL, USER_ID, "z");
+        UspsTextRedactor shortS = redactor(BASE_URL, USER_ID, "s");
+        String echoZ = "Rejected <AddressValidateRequest USERID=\"" + USER_ID + "\" PASSWORD=\"z\">"
+                + "</AddressValidateRequest> at " + BASE_URL;
+        String echoS = "Rejected <AddressValidateRequest PASSWORD=\"s\"></AddressValidateRequest> pass s";
+
+        assertThat(shortZ.redactDescription(echoZ)).isEqualTo("Rejected [request document] at [request URL]");
+        assertThat(shortS.redactDescription(echoS)).isEqualTo(UspsTextRedactor.DESCRIPTION_WITHHELD_MARKER);
+    }
+
+    @Test
     @DisplayName("xmlEscape writes every predefined entity, the apostrophe included")
     void xmlEscapeWritesEveryPredefinedEntity() {
         assertThat(UspsTextRedactor.xmlEscape("a&b<c>d\"e'f")).isEqualTo("a&amp;b&lt;c&gt;d&quot;e&apos;f");

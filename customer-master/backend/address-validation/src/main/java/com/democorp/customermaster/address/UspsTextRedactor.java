@@ -14,8 +14,9 @@ import java.util.regex.Pattern;
 /**
  * Redacts text the USPS service sends back, such as an {@code Error} element's
  * {@code Number} or {@code Description}: the shared redactor for the log lines of
- * {@link UspsWebToolsAddressValidationClient} and for a USPS {@code Description} that
- * reaches a customer-facing message.
+ * {@link UspsWebToolsAddressValidationClient}, through {@link #redact redact}, and for a
+ * USPS {@code Description} that reaches a customer-facing message, through
+ * {@link #redactDescription redactDescription}.
  *
  * <p>{@link #redact redact} replaces each echo of the outbound request that
  * {@link #redactRequest redactRequest} recognizes with a marker, then {@link #mask masks}
@@ -23,9 +24,14 @@ import java.util.regex.Pattern;
  * unchanged. The recognized echo forms are literal ones, listed at
  * {@link #redactRequest redactRequest}; the client's log projection adds the steps that
  * keep every other form of URL and undocumented text out of the log.
+ * {@link #redactDescription redactDescription} returns what {@code redact} returns unless
+ * a credential shorter than {@value #SHORT_CREDENTIAL_CODE_POINTS} code points occurs in
+ * the description; it then shows a documented USPS description as sent and withholds any
+ * other whole, because masking a short credential in place garbles the text and reveals
+ * the credential.
  *
  * <p>Immutable and thread-safe: it holds only the configured base URL and the credential
- * pattern derived from the settings it is built from, and must itself never be logged.
+ * patterns derived from the settings it is built from, and must itself never be logged.
  */
 public final class UspsTextRedactor {
 
@@ -37,6 +43,16 @@ public final class UspsTextRedactor {
 
     /** Replaces each occurrence of the configured base URL. */
     static final String REQUEST_URL_MARKER = "[request URL]";
+
+    /**
+     * A credential shorter than this many Unicode code points is short: it occurs by chance
+     * in ordinary words, so {@link #redactDescription redactDescription} withholds a
+     * description that holds it rather than masking it in place.
+     */
+    static final int SHORT_CREDENTIAL_CODE_POINTS = 4;
+
+    /** Replaces, whole, a description that {@link #redactDescription redactDescription} withholds. */
+    public static final String DESCRIPTION_WITHHELD_MARKER = "[description withheld]";
 
     /**
      * An echoed request document, which carries the credentials and the customer address:
@@ -72,6 +88,12 @@ public final class UspsTextRedactor {
     private final Pattern secrets;
 
     /**
+     * The {@link #mask}-style pattern of every form of the {@link #shortCredentials short}
+     * credentials alone; {@code null} when none is short.
+     */
+    private final Pattern shortSecrets;
+
+    /**
      * Creates the redactor for the given settings.
      *
      * @param usps the USPS settings, already normalized and validated by their constructor;
@@ -82,6 +104,7 @@ public final class UspsTextRedactor {
         Objects.requireNonNull(usps, "usps");
         this.baseUrl = usps.baseUrl();
         this.secrets = secretPattern(secretForms(usps.userId(), usps.password()));
+        this.shortSecrets = secretPattern(secretForms(shortCredentials(usps.userId(), usps.password())));
     }
 
     /**
@@ -95,6 +118,44 @@ public final class UspsTextRedactor {
      */
     public String redact(String text) {
         return mask(redactRequest(text));
+    }
+
+    /**
+     * Returns a USPS {@code Description} as a customer-facing message may show it. Every
+     * recognized echo of the request is first {@link #redactRequest replaced} by its marker.
+     * When no {@link #shortCredentials short} credential, one shorter than
+     * {@value #SHORT_CREDENTIAL_CODE_POINTS} code points, then occurs in any form
+     * {@link #mask mask} matches, the result is masked and returned, exactly as
+     * {@link #redact redact} returns it. Otherwise the description is:
+     * <ul>
+     *   <li>returned as it stands when it is one of the
+     *       {@link UspsWebToolsAddressValidationClient#DOCUMENTED_DESCRIPTIONS documented}
+     *       USPS texts, such as {@code Address Not Found.} or {@code Invalid City.}: a fixed
+     *       text echoes nothing, so a short credential found in it is coincidence and
+     *       showing it reveals nothing;</li>
+     *   <li>replaced whole by {@value #DESCRIPTION_WITHHELD_MARKER} in every other case.</li>
+     * </ul>
+     *
+     * <p>The reason: a short credential occurs by chance in ordinary words. Masking each
+     * occurrence garbles the text, so that {@code Address Not Found.} with the password
+     * {@code s} would read {@code Addre******** Not Found.}, and the text left around each
+     * mask reveals the credential. Log lines are unaffected: {@link #redact redact} and
+     * {@link #mask mask} keep masking every occurrence.
+     *
+     * @param description the {@code Description} the USPS service sent; {@code null} reads
+     *                    as {@code ""}
+     * @return the masked description, a documented description as sent, or
+     *         {@value #DESCRIPTION_WITHHELD_MARKER}
+     */
+    public String redactDescription(String description) {
+        String redacted = redactRequest(description);
+        if (shortSecrets == null || !shortSecrets.matcher(redacted).find()) {
+            return mask(redacted);
+        }
+        if (UspsWebToolsAddressValidationClient.DOCUMENTED_DESCRIPTIONS.contains(redacted)) {
+            return redacted;
+        }
+        return DESCRIPTION_WITHHELD_MARKER;
     }
 
     /**
@@ -158,6 +219,27 @@ public final class UspsTextRedactor {
     }
 
     /**
+     * The short credentials: those not blank and shorter than
+     * {@value #SHORT_CREDENTIAL_CODE_POINTS} Unicode code points, each surrogate pair
+     * counting once, so a password of two emoji is short.
+     *
+     * @param credentials the configured credentials; a {@code null} one is skipped
+     * @return the short credentials, in their given order; empty when none is short
+     */
+    private static String[] shortCredentials(String... credentials) {
+        List<String> shortOnes = new ArrayList<>();
+        for (String credential : credentials) {
+            if (credential == null || credential.isBlank()) {
+                continue;
+            }
+            if (credential.codePointCount(0, credential.length()) < SHORT_CREDENTIAL_CODE_POINTS) {
+                shortOnes.add(credential);
+            }
+        }
+        return shortOnes.toArray(String[]::new);
+    }
+
+    /**
      * The forms in which a credential can appear in text before any URL encoding, which
      * {@link #mask} matches in every percent-encoding:
      * <ul>
@@ -190,8 +272,9 @@ public final class UspsTextRedactor {
     }
 
     /**
-     * Compiles the {@link #mask} pattern: an alternation over {@code forms}, in their order,
-     * of each form's {@link #encodings encodings}.
+     * Compiles a {@link #mask} pattern, of every credential or of the short ones alone: an
+     * alternation over {@code forms}, in their order, of each form's
+     * {@link #encodings encodings}.
      *
      * @param forms the credential forms, longest first
      * @return the pattern, or {@code null} when {@code forms} is empty

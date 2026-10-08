@@ -9,12 +9,10 @@
   AddressValidationClient bean. The dependency points one way only: this module
   must never depend on customer-api.
 
-  The response is read from a hardened DOM by walking its direct child
-  elements, with no XPath (the "USPS response reader" entry in
-  customer-master/docs/deviations-and-open-questions.md). XML needs only the
-  JDK java.xml module, HTTP only spring-web and the stub's JSON fixtures only
-  Spring Boot's JsonParserFactory, so no HTTP-client, XML or JSON library is
-  declared.
+  The response is read with XPath over a hardened DOM. XML needs only the JDK
+  java.xml module (StAX, DOM, XPath), HTTP only spring-web and the stub's JSON
+  fixtures only Spring Boot's JsonParserFactory, so no HTTP-client, XML or JSON
+  library is declared.
 
   No <build> section: a spring-boot-maven-plugin repackage would put classes
   under BOOT-INF/ and break customer-api's dependency on this jar.

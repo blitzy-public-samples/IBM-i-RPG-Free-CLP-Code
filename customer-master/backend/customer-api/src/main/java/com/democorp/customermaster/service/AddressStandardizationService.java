@@ -108,7 +108,9 @@ public class AddressStandardizationService {
      * @param properties   the bound {@code customer-master.address.*} settings:
      *                     {@link AddressValidationProperties#enabled()} decides whether the client
      *                     is called, and {@link AddressValidationProperties#usps()} configures the
-     *                     redactor of the DEM9898 description
+     *                     redactor of the DEM9898 description, which masks each configured
+     *                     credential or, for one shorter than four code points, withholds an
+     *                     undocumented description that holds it
      * @param clients      provider of the one {@link AddressValidationClient} bean, the stub by
      *                     default or the Web Tools client when {@code client=usps}; it is resolved
      *                     only when standardization is enabled, so a context without a client
@@ -216,14 +218,19 @@ public class AddressStandardizationService {
      * Builds the DEM9898 failure: the USPS description is the message argument, and the four
      * address fields are highlighted with {@code addr} first.
      *
-     * <p>The argument is the description as the shared {@link UspsTextRedactor} returns it: each
-     * echo of the request it recognizes and each configured credential in every form it masks are
-     * replaced by their markers, and all other text is kept as the service sent it. Neither the
-     * DEM9898 detail nor the four field messages can therefore carry a credential in those forms;
-     * {@code result} itself is left raw.
+     * <p>The argument is the description as the shared {@link UspsTextRedactor#redactDescription}
+     * returns it: each echo of the request it recognizes and each configured credential in every
+     * form it masks are replaced by their markers, and all other text is kept as the service sent
+     * it. A credential shorter than four code points is never masked in place, because it occurs by
+     * chance in ordinary words and the masks would garble the text and reveal it: when one occurs in
+     * the description, a documented USPS description such as {@code Address Not Found.} is shown as
+     * sent, since it echoes nothing, and any other description is replaced whole by
+     * {@value UspsTextRedactor#DESCRIPTION_WITHHELD_MARKER}. Neither the DEM9898 detail nor the four
+     * field messages can therefore carry a credential in those forms; {@code result} itself is left
+     * raw.
      */
     private CustomerValidationException addressNotStandardized(AddressValidationResult result) {
-        String description = redactor.redact(result.errorDescription());
+        String description = redactor.redactDescription(result.errorDescription());
         List<FieldError> errors = ADDRESS_FIELDS.stream()
                 .map(field -> new FieldError(field, ADDRESS_NOT_STANDARDIZED))
                 .toList();

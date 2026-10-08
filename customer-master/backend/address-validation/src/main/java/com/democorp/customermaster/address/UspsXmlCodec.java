@@ -18,6 +18,11 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.stream.XMLOutputFactory;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamWriter;
+import javax.xml.xpath.XPath;
+import javax.xml.xpath.XPathConstants;
+import javax.xml.xpath.XPathExpressionException;
+import javax.xml.xpath.XPathFactory;
+import javax.xml.xpath.XPathFactoryConfigurationException;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -38,7 +43,7 @@ import org.xml.sax.SAXParseException;
  * attributes and order with a StAX {@link XMLStreamWriter}, which escapes them, and
  * {@link #requestQuery requestQuery} adds the query prefix and URL encoding. The source
  * read the response through XMLTABLE [98-136]; {@link #parse parse} reads the same paths
- * from a hardened DOM.
+ * with XPath over a hardened DOM.
  *
  * <p><b>Response rules.</b> After the HTTP call and after each XMLTABLE the source tests
  * {@code SQLSTATE <> '00000'} and ends the program through SQLProblem
@@ -69,8 +74,12 @@ import org.xml.sax.SAXParseException;
  * 422 DEM9898. Every fault becomes 502 APP0502 downstream and is never turned into such
  * a result or into a 500.
  *
- * <p><b>Value reading.</b> Only direct children are examined, so element counts are
- * exact. An element's value is its text content with surrounding whitespace removed by
+ * <p><b>Value reading.</b> Elements are selected with XPath, as XMLTABLE selects them: the
+ * row paths {@code AddressValidateResponse/Address} [104] and
+ * {@code AddressValidateResponse/Address/Error} [127] are evaluated from the document,
+ * and each column path from its row element. Every step matches the element name exactly
+ * as written, prefix included, and every path uses the child axis only, so element counts
+ * are exact. An element's value is its text content with surrounding whitespace removed by
  * {@link String#strip()}; a missing or empty element reads {@code ""}, the
  * {@code default ' '} of the source columns. Widths are counted in Unicode code points
  * after the strip. Elements the source does not read ({@code DeliveryPoint},
@@ -87,9 +96,9 @@ import org.xml.sax.SAXParseException;
  * the same hardened parser; the client turns them into a log-safe projection before
  * logging and never puts them in an exception message.
  *
- * <p><b>Threading.</b> The class holds no mutable state. JAXP factories, builders and
- * writers are not thread-safe, so each call creates its own; one instance can be shared
- * by any number of threads.
+ * <p><b>Threading.</b> The class holds no mutable state. JAXP factories, builders, XPath
+ * evaluators and writers are not thread-safe, so each call creates its own; one instance
+ * can be shared by any number of threads.
  */
 public final class UspsXmlCodec {
 
@@ -109,6 +118,29 @@ public final class UspsXmlCodec {
     private static final String NUMBER = "Number";
     private static final String SOURCE = "Source";
     private static final String DESCRIPTION = "Description";
+
+    /**
+     * The response root, evaluated from the document.
+     *
+     * <p>Every path is built from {@link #step step}, which writes a name test as the
+     * predicate {@code *[name()='…']} rather than as a plain name such as {@code Address}.
+     * The DOM is not namespace-aware, and on such a DOM the JDK's XPath drops any prefix
+     * from an element's name before comparing it with a plain name, so {@code Address}
+     * would also select an {@code x:Address} and {@code /AddressValidateResponse} a
+     * {@code p:AddressValidateResponse} root. {@code name()} is the element's name as
+     * written, the string {@link Node#getNodeName()} returns, so each step selects exactly
+     * the elements of that name and the response rules count exactly those.
+     */
+    private static final String RESPONSE_PATH = "/" + step(RESPONSE_ROOT);
+
+    /** The source's success row path {@code AddressValidateResponse/Address} [USADRVAL.SQLRPGLE:104]. */
+    private static final String ADDRESS_ROWS = RESPONSE_PATH + "/" + step(ADDRESS);
+
+    /** The source's error row path {@code AddressValidateResponse/Address/Error} [USADRVAL.SQLRPGLE:127]. */
+    private static final String ERROR_ROWS = ADDRESS_ROWS + "/" + step(ERROR);
+
+    /** A Web Tools root {@code <Error>}, the form of request-level faults such as bad credentials. */
+    private static final String ROOT_ERROR_PATH = "/" + step(ERROR);
 
     /**
      * Lexical form of {@code xs:integer}, which the source's {@code Number integer}
@@ -271,44 +303,48 @@ public final class UspsXmlCodec {
      * <p>The parser is hardened: secure processing on, DOCTYPE declarations rejected,
      * external entities, external DTDs, external schemas and XInclude off, and a nesting
      * limit. A rejected DOCTYPE is reported as a fault and nothing it names is read. The
-     * parser's diagnostics go to a handler that prints nothing.
+     * parser's diagnostics go to a handler that prints nothing. Elements are then selected
+     * by an XPath evaluator with secure processing on, as described on this class.
      *
      * @param body the raw response body; the parser detects its encoding from the XML
      *             declaration or byte order mark (USPS sends UTF-8)
      * @return the standardized address or the address-level error
      * @throws AddressServiceUnavailableException for every fault; the message names the
      *                                            kind of fault and quotes no content
-     * @throws IllegalStateException              if the JDK parser cannot be configured as
-     *                                            required, which is a platform defect
+     * @throws IllegalStateException              if the JDK parser or XPath processor
+     *                                            cannot be configured as required, or one
+     *                                            of this class's fixed paths fails to
+     *                                            evaluate, which is a platform defect
      */
     public AddressValidationResult parse(byte[] body) {
         if (body == null || body.length == 0) {
             throw fault("response body is empty");
         }
-        Element root = parseDocument(body).getDocumentElement();
-        if (!RESPONSE_ROOT.equals(root.getNodeName())) {
+        Document document = parseDocument(body);
+        XPath xpath = newXPath();
+        if (select(xpath, RESPONSE_PATH, document).isEmpty()) {
             throw fault("response root is not " + RESPONSE_ROOT);
         }
 
-        List<Element> addresses = childElements(root, ADDRESS);
+        List<Element> addresses = select(xpath, ADDRESS_ROWS, document);
         if (addresses.size() != 1) {
             throw fault("response holds " + addresses.size() + " " + ADDRESS + " elements");
         }
         Element address = addresses.get(0);
 
-        String address1 = addressValue(address, ADDRESS1, AddressValidationRequest.ADDRESS1_WIDTH);
-        String address2 = addressValue(address, ADDRESS2, AddressValidationRequest.ADDRESS2_WIDTH);
-        String city = addressValue(address, CITY, AddressValidationRequest.CITY_WIDTH);
-        String state = addressValue(address, STATE, AddressValidationRequest.STATE_WIDTH);
-        String zip5 = addressValue(address, ZIP5, AddressValidationRequest.ZIP5_WIDTH);
-        String zip4 = addressValue(address, ZIP4, AddressValidationRequest.ZIP4_WIDTH);
+        String address1 = addressValue(xpath, address, ADDRESS1, AddressValidationRequest.ADDRESS1_WIDTH);
+        String address2 = addressValue(xpath, address, ADDRESS2, AddressValidationRequest.ADDRESS2_WIDTH);
+        String city = addressValue(xpath, address, CITY, AddressValidationRequest.CITY_WIDTH);
+        String state = addressValue(xpath, address, STATE, AddressValidationRequest.STATE_WIDTH);
+        String zip5 = addressValue(xpath, address, ZIP5, AddressValidationRequest.ZIP5_WIDTH);
+        String zip4 = addressValue(xpath, address, ZIP4, AddressValidationRequest.ZIP4_WIDTH);
 
         // "If a city was returned, assume it worked" [USADRVAL.SQLRPGLE:118-121].
         if (!city.isEmpty()) {
             return AddressValidationResult.success(address1, address2, city, state, zip5, zip4);
         }
 
-        List<Element> errors = childElements(address, ERROR);
+        List<Element> errors = select(xpath, ERROR_ROWS, document);
         if (errors.size() != 1) {
             throw fault("response with a blank City holds " + errors.size() + " " + ERROR + " elements");
         }
@@ -316,9 +352,9 @@ public final class UspsXmlCodec {
 
         // Number, Source and Description have no default in the source's XMLTABLE, so a
         // missing one is fetched as NULL without an indicator, which fails the statement.
-        String numberText = text(requiredChild(error, NUMBER));
-        String source = text(requiredChild(error, SOURCE));
-        String description = text(requiredChild(error, DESCRIPTION));
+        String numberText = text(requiredChild(xpath, error, NUMBER));
+        String source = text(requiredChild(xpath, error, SOURCE));
+        String description = text(requiredChild(xpath, error, DESCRIPTION));
 
         int number = parseNumber(numberText);
         requireWidth(ERROR, SOURCE, source, AddressValidationResult.ERROR_SOURCE_WIDTH);
@@ -352,8 +388,10 @@ public final class UspsXmlCodec {
      *
      * @param body the raw response body; {@code null} yields an empty {@link Optional}
      * @return the {@code Error} element's texts, or empty when the body holds none
-     * @throws IllegalStateException if the JDK parser cannot be configured as required, a
-     *                               platform defect {@link #parse parse} reports first
+     * @throws IllegalStateException if the JDK parser or XPath processor cannot be
+     *                               configured as required, or one of this class's fixed
+     *                               paths fails to evaluate, a platform defect
+     *                               {@link #parse parse} reports first
      */
     Optional<ServiceError> serviceError(byte[] body) {
         if (body == null || body.length == 0) {
@@ -365,16 +403,16 @@ public final class UspsXmlCodec {
         } catch (SAXException | IOException e) {
             return Optional.empty();
         }
-        Element root = document.getDocumentElement();
+        XPath xpath = newXPath();
+        List<Element> rootErrors = select(xpath, ROOT_ERROR_PATH, document);
         Element error;
-        if (ERROR.equals(root.getNodeName())) {
-            error = root;
-        } else if (RESPONSE_ROOT.equals(root.getNodeName())) {
-            List<Element> addresses = childElements(root, ADDRESS);
-            if (addresses.size() != 1) {
+        if (!rootErrors.isEmpty()) {
+            error = rootErrors.get(0);
+        } else if (!select(xpath, RESPONSE_PATH, document).isEmpty()) {
+            if (select(xpath, ADDRESS_ROWS, document).size() != 1) {
                 return Optional.empty();
             }
-            List<Element> errors = childElements(addresses.get(0), ERROR);
+            List<Element> errors = select(xpath, ERROR_ROWS, document);
             if (errors.isEmpty()) {
                 return Optional.empty();
             }
@@ -382,7 +420,8 @@ public final class UspsXmlCodec {
         } else {
             return Optional.empty();
         }
-        return Optional.of(new ServiceError(firstChildText(error, NUMBER), firstChildText(error, DESCRIPTION)));
+        return Optional.of(new ServiceError(
+                firstChildText(xpath, error, NUMBER), firstChildText(xpath, error, DESCRIPTION)));
     }
 
     /**
@@ -469,11 +508,30 @@ public final class UspsXmlCodec {
     }
 
     /**
+     * Creates the XPath evaluator that selects the response elements, with secure
+     * processing on.
+     *
+     * <p>The JDK's own factory is requested, as for the DOM builder, rather than whichever
+     * XPath provider happens to be on the classpath, so the feature is guaranteed to be
+     * supported and the {@code name()} steps compare names as {@link #RESPONSE_PATH}
+     * describes.
+     */
+    private static XPath newXPath() {
+        XPathFactory factory = XPathFactory.newDefaultInstance();
+        try {
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        } catch (XPathFactoryConfigurationException e) {
+            throw new IllegalStateException("the JDK XPath processor cannot be configured securely", e);
+        }
+        return factory.newXPath();
+    }
+
+    /**
      * Reads one optional {@code Address} child: {@code ""} when absent, a fault when it
      * occurs more than once or exceeds its {@code USAdrValDS} width.
      */
-    private static String addressValue(Element address, String name, int width) {
-        List<Element> found = childElements(address, name);
+    private static String addressValue(XPath xpath, Element address, String name, int width) {
+        List<Element> found = select(xpath, step(name), address);
         if (found.size() > 1) {
             throw fault(ADDRESS + " element " + name + " occurs more than once");
         }
@@ -483,8 +541,8 @@ public final class UspsXmlCodec {
     }
 
     /** Returns the single {@code name} child of {@code error}; a fault when absent or repeated. */
-    private static Element requiredChild(Element error, String name) {
-        List<Element> found = childElements(error, name);
+    private static Element requiredChild(XPath xpath, Element error, String name) {
+        List<Element> found = select(xpath, step(name), error);
         if (found.isEmpty()) {
             throw fault(ERROR + " element " + name + " is missing");
         }
@@ -513,14 +571,36 @@ public final class UspsXmlCodec {
         }
     }
 
-    /** Direct element children of {@code parent} named {@code name}, in document order. */
-    private static List<Element> childElements(Element parent, String name) {
-        NodeList children = parent.getChildNodes();
-        List<Element> found = new ArrayList<>(1);
-        for (int i = 0; i < children.getLength(); i++) {
-            Node child = children.item(i);
-            if (child.getNodeType() == Node.ELEMENT_NODE && name.equals(child.getNodeName())) {
-                found.add((Element) child);
+    /**
+     * One child-axis step selecting the elements named exactly {@code name}; see
+     * {@link #RESPONSE_PATH} for why it is a {@code name()} predicate. Every name passed
+     * is one of this class's constants, none of which holds an apostrophe.
+     */
+    private static String step(String name) {
+        return "*[name()='" + name + "']";
+    }
+
+    /**
+     * The elements {@code path} selects from {@code context}, in document order.
+     *
+     * <p>Every path is one of this class's fixed expressions, so a failure to evaluate one
+     * is a platform defect, never a property of the response: it is raised as an
+     * {@link IllegalStateException}, not as a fault, and is not chained, because the
+     * processor's message is not under this class's control.
+     */
+    private static List<Element> select(XPath xpath, String path, Node context) {
+        NodeList nodes;
+        try {
+            nodes = (NodeList) xpath.evaluate(path, context, XPathConstants.NODESET);
+        } catch (XPathExpressionException e) {
+            throw new IllegalStateException(
+                    "could not evaluate a USPS response path (" + e.getClass().getSimpleName() + ")");
+        }
+        // Every path ends in an element step, so every node selected is an Element.
+        List<Element> found = new ArrayList<>(nodes.getLength());
+        for (int i = 0; i < nodes.getLength(); i++) {
+            if (nodes.item(i) instanceof Element element) {
+                found.add(element);
             }
         }
         return found;
@@ -535,8 +615,8 @@ public final class UspsXmlCodec {
     }
 
     /** The {@link #text text} of the first {@code name} child of {@code parent}, or {@code null} when it has none. */
-    private static String firstChildText(Element parent, String name) {
-        List<Element> found = childElements(parent, name);
+    private static String firstChildText(XPath xpath, Element parent, String name) {
+        List<Element> found = select(xpath, step(name), parent);
         return found.isEmpty() ? null : text(found.get(0));
     }
 

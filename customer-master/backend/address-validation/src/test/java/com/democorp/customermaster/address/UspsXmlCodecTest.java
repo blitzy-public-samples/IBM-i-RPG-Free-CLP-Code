@@ -485,6 +485,74 @@ class UspsXmlCodecTest {
     }
 
     /**
+     * Bodies whose root or row is named other than exactly as the source's row paths write
+     * it, or sits below the row's place, each followed by the fault it must raise. The JDK's
+     * XPath would match a plain name test against the part after a prefix, so each case
+     * fails if the codec's steps stop matching names exactly as written.
+     */
+    static Stream<Arguments> bodiesWithoutAnExactlyNamedRow() {
+        return Stream.of(
+                Arguments.of(Named.of("an Address written as the prefixed x:Address",
+                                ("<AddressValidateResponse><x:Address xmlns:x=\"urn:x\" ID=\"0\">"
+                                        + baseAddress() + "</x:Address></AddressValidateResponse>")
+                                        .getBytes(StandardCharsets.UTF_8)),
+                        "response holds 0 Address elements"),
+                Arguments.of(Named.of("an Address nested inside another element of the root",
+                                ("<AddressValidateResponse><Wrapper><Address ID=\"0\">"
+                                        + baseAddress() + "</Address></Wrapper></AddressValidateResponse>")
+                                        .getBytes(StandardCharsets.UTF_8)),
+                        "response holds 0 Address elements"),
+                Arguments.of(Named.of("the root written as the prefixed p:AddressValidateResponse",
+                                ("<p:AddressValidateResponse xmlns:p=\"urn:p\"><Address ID=\"0\">"
+                                        + baseAddress() + "</Address></p:AddressValidateResponse>")
+                                        .getBytes(StandardCharsets.UTF_8)),
+                        "response root is not AddressValidateResponse"),
+                Arguments.of(Named.of("a blank City whose only Error is the prefixed x:Error",
+                                response(baseAddressWith(Map.of("City", "")) + prefixedBaseError())),
+                        "response with a blank City holds 0 Error elements"));
+    }
+
+    @ParameterizedTest(name = "{0} is the service fault \"{1}\"")
+    @MethodSource("bodiesWithoutAnExactlyNamedRow")
+    @DisplayName("a path step matches the element name exactly as written, so a prefixed or nested row is a fault")
+    void rejectsRowNotNamedExactlyAsThePath(byte[] body, String fault, CapturedOutput output) {
+        assertThatThrownBy(() -> codec.parse(body))
+                .isInstanceOf(AddressServiceUnavailableException.class)
+                .hasMessage(fault);
+
+        assertNothingPrintedByParser(output);
+    }
+
+    @Test
+    @DisplayName("a prefixed x:Address and a nested Address beside the one Address are not counted: a success")
+    void ignoresPrefixedAndNestedAddressBesideTheRow() {
+        byte[] body = ("<AddressValidateResponse>"
+                + "<x:Address xmlns:x=\"urn:x\" ID=\"1\">" + baseAddress() + "</x:Address>"
+                + "<Address ID=\"0\">" + baseAddress() + "</Address>"
+                + "<Wrapper><Address ID=\"2\">" + baseAddress() + "</Address></Wrapper>"
+                + "</AddressValidateResponse>").getBytes(StandardCharsets.UTF_8);
+
+        AddressValidationResult result = codec.parse(body);
+
+        assertThat(result.standardized()).isTrue();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234", 0, "", ""));
+    }
+
+    @Test
+    @DisplayName("a prefixed x:City inside a valid Address is not City, so City reads blank and its Error is read")
+    void ignoresPrefixedCityInsideTheRow() {
+        byte[] body = response(element("Address2", "8 ELMWOOD DR")
+                + "<x:City xmlns:x=\"urn:x\">OLD HAVEN</x:City>" + baseError());
+
+        AddressValidationResult result = codec.parse(body);
+
+        assertThat(result.standardized()).isFalse();
+        assertThat(result).isEqualTo(new AddressValidationResult(
+                "", "8 ELMWOOD DR", "", "", "", "", ADDRESS_NOT_FOUND, "clsAMS", "Address Not Found."));
+    }
+
+    /**
      * Bodies holding a USPS {@code Error} element, each followed by the {@code Number} and
      * {@code Description} texts {@code serviceError} must read, {@code null} for an absent
      * element.
@@ -548,6 +616,23 @@ class UspsXmlCodecTest {
         assertThat(codec.serviceError(rootWithoutChildren)).contains(new UspsXmlCodec.ServiceError(null, ""));
     }
 
+    /** Bodies whose only USPS {@code Error} is written as the prefixed {@code x:Error}. */
+    static Stream<Named<byte[]>> bodiesWithOnlyAPrefixedError() {
+        return Stream.of(
+                Named.of("a prefixed root x:Error", prefixedBaseError().getBytes(StandardCharsets.UTF_8)),
+                Named.of("a blank-City Address holding a prefixed x:Error",
+                        response(baseAddressWith(Map.of("City", "")) + prefixedBaseError())));
+    }
+
+    @ParameterizedTest(name = "{0} yields no Error texts")
+    @MethodSource("bodiesWithOnlyAPrefixedError")
+    @DisplayName("serviceError matches Error exactly as written, so a prefixed x:Error yields nothing")
+    void serviceErrorIgnoresPrefixedError(byte[] body, CapturedOutput output) {
+        assertThat(codec.serviceError(body)).isEmpty();
+
+        assertNothingPrintedByParser(output);
+    }
+
     /**
      * Asserts that the codec let no parser diagnostic reach the console: the JDK's
      * default error handler prints {@code [Fatal Error]} lines to standard error.
@@ -596,6 +681,15 @@ class UspsXmlCodecTest {
     /** The base error document's one {@code Error}: -2147219401, clsAMS, Address Not Found. */
     private static String baseError() {
         return errorOf("-2147219401", "clsAMS", "Address Not Found.");
+    }
+
+    /**
+     * The base error's children inside an {@code Error} written as the prefixed
+     * {@code x:Error}, which no path of the codec names.
+     */
+    private static String prefixedBaseError() {
+        return "<x:Error xmlns:x=\"urn:x\">" + element("Number", "-2147219401") + element("Source", "clsAMS")
+                + element("Description", "Address Not Found.") + "</x:Error>";
     }
 
     /** An {@code Error} holding {@code Number}, {@code Source} and {@code Description}, in that order. */
