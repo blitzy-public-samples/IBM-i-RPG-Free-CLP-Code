@@ -41,6 +41,13 @@
  * - The confirmation keys of edit and add, Tab and Shift+Tab at a
  *   confirmation, 409 DEM1001 and 409 DEM1002 (the comparison window).
  * - F5 reloads in edit (fields and version) and clears in add; DEM0599.
+ * - While a review, reload or save is pending the form is read-only, typing
+ *   changes nothing and the key bar disables the keys that do nothing then
+ *   (F12 on the form still closes); the response then lands on the values
+ *   it was sent for, and focus stays inside the window.
+ * - The "Last Change … by …" stamp of a record a user changed stays on the
+ *   window from the form to the edit confirmation; a `*SYSTEM*` record and
+ *   add show none.
  * - The working State in edit (stored `CA`) and in add (blank), read from
  *   the review result (`stateAccepted`) and never from which field failed.
  *
@@ -65,7 +72,7 @@
  * returns the bare code).
  */
 import type { ReactNode } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -87,6 +94,7 @@ import { CustomerDetailDialog } from './CustomerDetailDialog';
 import type { CustomerDetailDialogProps, DetailMode } from './CustomerDetailDialog';
 import { CUSTOMER_FORM_FIELDS } from './CustomerForm';
 import type { CustomerFieldName } from './CustomerForm';
+import { formatChangeStamp } from './formatChangeStamp';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -304,6 +312,10 @@ interface RenderOptions {
 interface RenderedDialog {
   user: UserEvent;
   onClose: CloseMock;
+  /** The test's query client, to wait until no read is in flight. */
+  queryClient: QueryClient;
+  /** Renders again with `open` set, as the caller does: false closes the window, true opens it afresh. */
+  setOpen: (open: boolean) => void;
 }
 
 /**
@@ -317,7 +329,7 @@ function renderDialog({ mode, custId, onClose = vi.fn<CustomerDetailDialogProps[
   traffic.length = 0;
   const user = userEvent.setup();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const screens = (open: boolean) => (
     <QueryClientProvider client={queryClient}>
       <MessageCatalogProvider>
         <ToastProvider>
@@ -325,15 +337,23 @@ function renderDialog({ mode, custId, onClose = vi.fn<CustomerDetailDialogProps[
             <MemoryRouter>
               <AuthProvider initialSession={{ username: MAINTENANCE_USER.username, roles: ['MAINTENANCE'] }}>
                 <CatalogProbe />
-                <CustomerDetailDialog open mode={mode} custId={custId} onClose={onClose} />
+                <CustomerDetailDialog open={open} mode={mode} custId={custId} onClose={onClose} />
               </AuthProvider>
             </MemoryRouter>
           </KeyedScreens>
         </ToastProvider>
       </MessageCatalogProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { user, onClose };
+  const { rerender } = render(screens(true));
+  return {
+    user,
+    onClose,
+    queryClient,
+    setOpen: (open) => {
+      rerender(screens(open));
+    },
+  };
 }
 
 /** What {@link openDialog} returns. */
@@ -541,6 +561,112 @@ describe('CustomerDetailDialog', () => {
       expect(valuesOf(dialog)).toEqual(BLANK);
       expect(inputOf(dialog, 'name')).toHaveAttribute('readonly');
       expect(onClose).not.toHaveBeenCalled();
+    });
+
+    describe('the opening read, when the window closes before it answers', () => {
+      /** What {@link renderWhileReading} returns: the rendered window and its held reads. */
+      interface ReadingDialog extends RenderedDialog {
+        /** The reads held so far, in arrival order. */
+        held: readonly (() => void)[];
+        /** Lets the held read at `index` answer 404 DEM0599. */
+        release: (index: number) => void;
+      }
+
+      /**
+       * Holds every `GET /api/customers/:custId` until released, then answers
+       * it 404 DEM0599, as for a row deleted meanwhile. Renders the window and
+       * waits until the catalog has loaded and the opening read is held, with
+       * no window shown yet.
+       */
+      async function renderWhileReading(mode: 'display' | 'edit'): Promise<ReadingDialog> {
+        const held: (() => void)[] = [];
+        server.use(
+          http.get<{ custId: string }>('/api/customers/:custId', async ({ params }) => {
+            await new Promise<void>((resolve) => {
+              held.push(resolve);
+            });
+            return problem(404, 'DEM0599', { instance: `/api/customers/${params.custId}` });
+          }),
+        );
+        const rendered = renderDialog({ mode, custId: STORED.custId });
+        await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+        await waitFor(() => expect(held).toHaveLength(1));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        const release = (index: number): void => {
+          const answer = held[index];
+          if (answer === undefined) {
+            throw new Error(`No read #${index} is held`);
+          }
+          answer();
+        };
+        return { ...rendered, held, release };
+      }
+
+      /**
+       * Waits until only `inFlight` reads are still pending, then lets
+       * whatever the settled reads published render, so an empty alert region
+       * is observed and not raced.
+       */
+      async function settleReads(queryClient: QueryClient, inFlight: number): Promise<void> {
+        await waitFor(() => expect(queryClient.isFetching()).toBe(inFlight));
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        });
+      }
+
+      it.each([
+        ['display', 'Escape'],
+        ['edit', 'F12'],
+      ] as const)('%s: a read answering DEM0599 after %s closed the window shows no alert', async (mode, key) => {
+        const { user, onClose, queryClient, setOpen, release } = await renderWhileReading(mode);
+
+        await user.keyboard(`{${key}}`);
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(onClose).toHaveBeenCalledWith();
+        setOpen(false);
+        release(0);
+        await settleReads(queryClient, 0);
+
+        expect(alertRegion()).toBeEmptyDOMElement();
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      });
+
+      it('a read answering DEM0599 while the window stays open shows the alert and opens on blank fields', async () => {
+        const { onClose, queryClient, release } = await renderWhileReading('display');
+
+        release(0);
+        await settleReads(queryClient, 0);
+
+        expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1);
+        const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
+        expect(valuesOf(dialog)).toEqual(BLANK);
+        expect(onClose).not.toHaveBeenCalled();
+      });
+
+      it('a reopening while the closed window still reads sends its own read, and only that read alerts', async () => {
+        const { user, onClose, queryClient, setOpen, held, release } = await renderWhileReading('display');
+
+        await user.keyboard('{Escape}');
+        setOpen(false);
+        setOpen(true);
+        await waitFor(() => expect(held).toHaveLength(2));
+        expect(sent('GET', CUSTOMER_PATH)).toHaveLength(2);
+
+        // The closed window's read answers first: nothing is shown for it.
+        release(0);
+        await settleReads(queryClient, 1);
+        expect(alertRegion()).toBeEmptyDOMElement();
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+        // The open window's read answers: its DEM0599, once, and the blank window.
+        release(1);
+        await settleReads(queryClient, 0);
+        expect(within(alertRegion()).getAllByText('Customer deleted. Exit & redo search.')).toHaveLength(1);
+        const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.display });
+        expect(valuesOf(dialog)).toEqual(BLANK);
+        expect(onClose).toHaveBeenCalledTimes(1);
+      });
     });
   });
 
@@ -899,6 +1025,194 @@ describe('CustomerDetailDialog', () => {
   });
 
   // -------------------------------------------------------------------------
+  // PageUp and PageDown: n/a in the detail window (AAP 0.3.8 keyboard table)
+  // -------------------------------------------------------------------------
+
+  describe('PageUp and PageDown (n/a in every phase)', () => {
+    const PAGING_KEYS = ['PageUp', 'PageDown'] as const;
+    type PagingKey = (typeof PAGING_KEYS)[number];
+
+    /**
+     * Presses `key` on the focused element, as a user does, and reports
+     * whether its browser default (paging, scrolling, moving the caret) was
+     * prevented. The keydown is observed in the window's capture phase, ahead
+     * of the key scope's document listener, and read once dispatch is over.
+     */
+    async function pressPaging(user: UserEvent, key: PagingKey): Promise<boolean> {
+      const pressed: KeyboardEvent[] = [];
+      const observe = (event: KeyboardEvent): void => {
+        if (event.key === key) {
+          pressed.push(event);
+        }
+      };
+      window.addEventListener('keydown', observe, true);
+      try {
+        await user.keyboard(`{${key}}`);
+      } finally {
+        window.removeEventListener('keydown', observe, true);
+      }
+      expect(pressed).toHaveLength(1);
+      return pressed.every((event) => event.defaultPrevented);
+    }
+
+    /** Asserts that the alert region holds exactly one message: DEM0003 "Key is not active now". */
+    function expectKeyNotActiveOnce(): void {
+      const region = alertRegion();
+      expect(region.children).toHaveLength(1);
+      expect(within(region).getByText('Key is not active now')).toBeInTheDocument();
+    }
+
+    it.each(PAGING_KEYS)('display: %s shows DEM0003 once, is not paged natively and the window stays as it was', async (key) => {
+      const { user, dialog, onClose } = await openDialog('display');
+
+      expect(await pressPaging(user, key)).toBe(true);
+
+      expectKeyNotActiveOnce();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog', { name: DIALOG_NAMES.display })).toBe(dialog);
+      expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
+      expect(inputOf(dialog, 'name')).toHaveAttribute('readonly');
+
+      // The window still answers its own keys, and the paging key sent nothing.
+      await user.keyboard('{F12}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledWith();
+      expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([`GET ${CUSTOMER_PATH}`]);
+    });
+
+    it.each(PAGING_KEYS)('edit form: %s shows DEM0003 once and keeps the typed entries on the form, sending nothing', async (key) => {
+      const { user, dialog, onClose } = await openDialog('edit');
+      await retype(user, dialog, 'name', 'paged name co');
+      const typed: FieldValues = { ...fieldsOf(STORED), name: 'PAGED NAME CO' };
+      expect(valuesOf(dialog)).toEqual(typed);
+
+      expect(await pressPaging(user, key)).toBe(true);
+
+      expectKeyNotActiveOnce();
+      expect(queryConfirmation(dialog)).not.toBeInTheDocument();
+      expect(valuesOf(dialog)).toEqual(typed);
+      expect(inputOf(dialog, 'name')).not.toHaveAttribute('readonly');
+      expect(inputOf(dialog, 'name')).toHaveFocus();
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Enter then reviews exactly the typed entries; the paging key sent nothing before it.
+      await reviewToConfirmation(user, dialog, 'DEM0000');
+      expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([
+        `GET ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+      ]);
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([{ purpose: 'EDIT', ...typed }]);
+    });
+
+    it.each(PAGING_KEYS)('add form: %s shows DEM0003 once and keeps the typed entries on the form, sending nothing', async (key) => {
+      const { user, dialog, onClose } = await openDialog('add');
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      expect(valuesOf(dialog)).toEqual(NEW_CUSTOMER);
+
+      expect(await pressPaging(user, key)).toBe(true);
+
+      expectKeyNotActiveOnce();
+      expect(queryConfirmation(dialog)).not.toBeInTheDocument();
+      expect(valuesOf(dialog)).toEqual(NEW_CUSTOMER);
+      expect(inputOf(dialog, 'name')).not.toHaveAttribute('readonly');
+      expect(traffic).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Enter then reviews exactly the typed entries; the paging key sent nothing before it.
+      await reviewToConfirmation(user, dialog, 'DEM0009');
+      expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([`POST ${REVIEW_PATH}`]);
+      expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([{ purpose: 'ADD', ...NEW_CUSTOMER }]);
+    });
+
+    it.each(PAGING_KEYS)('edit confirmation: %s shows DEM0003 once and leaves the confirmation shown, with no update', async (key) => {
+      const { user, dialog, onClose } = await openDialog('edit');
+      await retype(user, dialog, 'name', 'paged name co');
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+      const confirmed = valuesOf(panel);
+
+      expect(await pressPaging(user, key)).toBe(true);
+
+      expectKeyNotActiveOnce();
+      expect(queryConfirmation(dialog)).toBe(panel);
+      expect(valuesOf(panel)).toEqual(confirmed);
+      expect(panel).toHaveFocus();
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Enter then commits exactly the confirmed values with the version read;
+      // the paging key sent nothing before it.
+      const saved: CustomerResponse = { ...STORED, ...confirmed, version: STORED.version + 1 };
+      answerUpdate(() => HttpResponse.json(saved));
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ saved });
+      expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([
+        `GET ${CUSTOMER_PATH}`,
+        `POST ${REVIEW_PATH}`,
+        `PUT ${CUSTOMER_PATH}`,
+      ]);
+      expect(await bodiesOf<CustomerUpdateRequest>('PUT', CUSTOMER_PATH)).toEqual([
+        { ...confirmed, version: STORED.version },
+      ]);
+    });
+
+    it.each(PAGING_KEYS)('add confirmation: %s shows DEM0003 once and leaves the confirmation shown, with no add', async (key) => {
+      const { user, dialog, onClose } = await openDialog('add');
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0009');
+
+      expect(await pressPaging(user, key)).toBe(true);
+
+      expectKeyNotActiveOnce();
+      expect(queryConfirmation(dialog)).toBe(panel);
+      expect(valuesOf(panel)).toEqual(NEW_CUSTOMER);
+      expect(panel).toHaveFocus();
+      expect(sent('POST', ADD_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+
+      // Enter then adds exactly the confirmed values; the paging key sent nothing before it.
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ added: true });
+      expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([`POST ${REVIEW_PATH}`, `POST ${ADD_PATH}`]);
+      expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
+    });
+
+    it.each(PAGING_KEYS)('while the opening read is pending: %s is swallowed with no message, no close and no native paging', async (key) => {
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.get(CUSTOMER_PATH, async () => {
+          await held;
+          return HttpResponse.json({ ...STORED });
+        }),
+      );
+      const { user, onClose } = renderDialog({ mode: 'edit', custId: STORED.custId });
+      try {
+        await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+        await waitFor(() => expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+        expect(await pressPaging(user, key)).toBe(true);
+
+        expect(alertRegion()).toBeEmptyDOMElement();
+        expect(onClose).not.toHaveBeenCalled();
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      } finally {
+        release();
+      }
+
+      // The window then opens on the stored record, read once.
+      const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.edit });
+      expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // F5 on the form (MTNCUSTR :209-216, :284-287)
   // -------------------------------------------------------------------------
 
@@ -957,6 +1271,80 @@ describe('CustomerDetailDialog', () => {
       expect(inputOf(dialog, 'name')).toHaveFocus();
       expect(alertRegion()).toBeEmptyDOMElement();
       expect(traffic).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Change stamp (FillScreenFields :340-363, run again at the edit
+  // confirmation :221-225)
+  // -------------------------------------------------------------------------
+
+  describe('change stamp', () => {
+    /** The stamp line of `record` as the window shows it, built by the one formatter. */
+    function stampLineOf(record: CustomerResponse): string {
+      const text = formatChangeStamp(record.chgTime, record.chgUser);
+      if (text === null) {
+        throw new Error(`formatChangeStamp hides the stamp of ${record.custId}`);
+      }
+      return `Last Change ${text}`;
+    }
+
+    /** Every "Last Change …" line inside `scope`. */
+    function stampLinesIn(scope: HTMLElement): HTMLElement[] {
+      return within(scope).queryAllByText(/^Last Change /);
+    }
+
+    it('a record a user changed shows "Last Change … by <user>" on the form and the same line at the edit confirmation', async () => {
+      const stamped: CustomerResponse = { ...STORED, chgTime: '2026-10-05T14:03:09Z', chgUser: MAINTENANCE_USER.username };
+      served = stamped;
+      const stampLine = stampLineOf(stamped);
+      expect(stampLine.endsWith(` by ${MAINTENANCE_USER.username}`)).toBe(true);
+      const { user, dialog } = await openDialog('edit');
+
+      // The form: one stamp line, after the nine fields.
+      const formStamp = within(dialog).getByText(stampLine);
+      expect(stampLinesIn(dialog)).toEqual([formStamp]);
+      expect(formStamp.tagName).toBe('P');
+      expect(formStamp).toHaveClass('change-stamp');
+      expect(formStamp.previousElementSibling).toContainElement(inputOf(dialog, 'corpPhone'));
+
+      await retype(user, dialog, 'name', 'stamped name co');
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+
+      // The confirmation: the identical line, once in the window, inside the
+      // panel and after its nine fields, as on the form.
+      const confirmStamp = within(panel).getByText(stampLine);
+      expect(stampLinesIn(dialog)).toEqual([confirmStamp]);
+      expect(confirmStamp.tagName).toBe('P');
+      expect(confirmStamp).toHaveClass('change-stamp');
+      expect(confirmStamp.previousElementSibling).toContainElement(inputOf(panel, 'corpPhone'));
+    });
+
+    it('a *SYSTEM* record shows no stamp on the form or at the edit confirmation', async () => {
+      expect(STORED.chgUser).toBe('*SYSTEM*');
+      expect(formatChangeStamp(STORED.chgTime, STORED.chgUser)).toBeNull();
+      const { user, dialog } = await openDialog('edit');
+
+      expect(stampLinesIn(dialog)).toEqual([]);
+
+      await retype(user, dialog, 'name', 'system name co');
+      await reviewToConfirmation(user, dialog, 'DEM0000');
+
+      expect(stampLinesIn(dialog)).toEqual([]);
+    });
+
+    it('add shows no stamp on the form or at the confirmation: there is no stored record', async () => {
+      // A stamped stored row must not leak into add, which reads no record.
+      served = { ...STORED, chgTime: '2026-10-05T14:03:09Z', chgUser: MAINTENANCE_USER.username };
+      const { user, dialog } = await openDialog('add');
+
+      expect(stampLinesIn(dialog)).toEqual([]);
+
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      await reviewToConfirmation(user, dialog, 'DEM0009');
+
+      expect(stampLinesIn(dialog)).toEqual([]);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(0);
     });
   });
 
@@ -1078,6 +1466,209 @@ describe('CustomerDetailDialog', () => {
       await cancelStatePrompt(user, dialog);
 
       expect(inputOf(dialog, 'state')).toHaveValue('CA');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // While a request is pending (review, F5 reload, save)
+  // -------------------------------------------------------------------------
+
+  describe('while a request is pending', () => {
+    /** A gate a handler awaits, so its request stays pending until the test opens it. */
+    interface Gate {
+      opened: Promise<void>;
+      open: () => void;
+    }
+
+    /** A closed {@link Gate}. */
+    function closedGate(): Gate {
+      let open: () => void = () => undefined;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { opened, open };
+    }
+
+    /** One key-bar button of the window, by its legend. */
+    function keyButton(dialog: HTMLElement, legend: string): HTMLElement {
+      const bar = within(dialog).getByRole('toolbar', { name: 'Function keys' });
+      return within(bar).getByRole('button', { name: legend });
+    }
+
+    /**
+     * Asserts the protected form of a pending request: every input
+     * read-only, Name keeping `name` whether typed into or changed before a
+     * render could protect it, Enter, F4 and F5 disabled and F12 enabled.
+     */
+    async function expectProtectedForm(user: UserEvent, dialog: HTMLElement, name: string): Promise<void> {
+      for (const input of within(dialog).getAllByRole('textbox')) {
+        expect(input).toHaveAttribute('readonly');
+      }
+      const nameInput = inputOf(dialog, 'name');
+      await user.type(nameInput, 'zzz');
+      expect(nameInput).toHaveValue(name);
+      // A change event bypasses `readonly`, as a keystroke that lands before
+      // the read-only render would: the draft still does not change.
+      fireEvent.change(nameInput, { target: { value: 'TYPED WHILE PENDING' } });
+      expect(nameInput).toHaveValue(name);
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh']) {
+        expect(keyButton(dialog, legend)).toBeDisabled();
+      }
+      expect(keyButton(dialog, 'F12=Cancel')).toBeEnabled();
+    }
+
+    it('a pending review protects the form and disables Enter, F4 and F5; the confirmation then shows the reviewed values', async () => {
+      const gate = closedGate();
+      const reviewed: FieldValues = { ...fieldsOf(STORED), name: 'NEW NAME CO' };
+      server.use(
+        http.post(REVIEW_PATH, async () => {
+          await gate.opened;
+          return reviewPassed('EDIT', reviewed);
+        }),
+      );
+      const { user, dialog } = await openDialog('edit');
+      await retype(user, dialog, 'name', 'new name co');
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(keyButton(dialog, 'Enter')).toBeDisabled());
+
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      await expectProtectedForm(user, dialog, 'NEW NAME CO');
+      expect(queryConfirmation(dialog)).not.toBeInTheDocument();
+
+      gate.open();
+
+      const panel = await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+      expect(valuesOf(panel)).toEqual(reviewed);
+      await within(statusRegion()).findByText(messageText('DEM0000'));
+      await waitFor(() => expect(panel).toHaveFocus());
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
+        expect(keyButton(dialog, legend)).toBeEnabled();
+      }
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+    });
+
+    it('F12 and the F12=Cancel button still close the window while a review is pending', async () => {
+      const gate = closedGate();
+      server.use(
+        http.post(REVIEW_PATH, async () => {
+          await gate.opened;
+          return reviewPassed('EDIT', fieldsOf(STORED));
+        }),
+      );
+      const { user, dialog, onClose } = await openDialog('edit');
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(keyButton(dialog, 'Enter')).toBeDisabled());
+
+      await user.keyboard('{F12}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenLastCalledWith();
+      await user.click(keyButton(dialog, 'F12=Cancel'));
+      expect(onClose).toHaveBeenCalledTimes(2);
+      expect(onClose).toHaveBeenLastCalledWith();
+
+      // The harness keeps the window rendered after onClose; let the review land.
+      gate.open();
+      await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+    });
+
+    it('a pending F5 reload protects the form and disables Enter, F4 and F5; the form then shows the reloaded values, editable', async () => {
+      const { user, dialog } = await openDialog('edit');
+      const reloaded: CustomerResponse = { ...STORED, name: 'NIBH RELOADED CO', chgUser: 'other-user', version: 4 };
+      const gate = closedGate();
+      server.use(
+        http.get<{ custId: string }>('/api/customers/:custId', async () => {
+          await gate.opened;
+          return HttpResponse.json({ ...reloaded });
+        }),
+      );
+      await retype(user, dialog, 'city', 'bangor');
+
+      await user.keyboard('{F5}');
+      await waitFor(() => expect(keyButton(dialog, 'F5=Refresh')).toBeDisabled());
+
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(2);
+      await expectProtectedForm(user, dialog, STORED.name);
+      expect(inputOf(dialog, 'city')).toHaveValue('BANGOR');
+
+      gate.open();
+
+      await waitFor(() => expect(inputOf(dialog, 'name')).toHaveValue('NIBH RELOADED CO'));
+      expect(valuesOf(dialog)).toEqual(fieldsOf(reloaded));
+      for (const { field } of CUSTOMER_FORM_FIELDS) {
+        expect(inputOf(dialog, field)).not.toHaveAttribute('readonly');
+      }
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
+        expect(keyButton(dialog, legend)).toBeEnabled();
+      }
+      await waitFor(() => expect(inputOf(dialog, 'name')).toHaveFocus());
+      await user.type(inputOf(dialog, 'city'), 'x');
+      expect(inputOf(dialog, 'city')).toHaveValue(`${reloaded.city}X`);
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(2);
+    });
+
+    it('a key-bar Enter pressed from the keyboard leaves focus inside the window, also after a 502 that moves none', async () => {
+      const gate = closedGate();
+      server.use(
+        http.post(REVIEW_PATH, async () => {
+          await gate.opened;
+          return problem(502, 'APP0502');
+        }),
+      );
+      const { user, dialog } = await openDialog('edit');
+      const enterKey = keyButton(dialog, 'Enter');
+      act(() => enterKey.focus());
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(enterKey).toBeDisabled());
+
+      // The window body, the form's key container, holds focus meanwhile.
+      await waitFor(() => expect(document.activeElement).toHaveAttribute('aria-busy', 'true'));
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+      gate.open();
+
+      await within(alertRegion()).findByText(messageText('APP0502'));
+      await waitFor(() => expect(enterKey).toBeEnabled());
+      const focused = document.activeElement as HTMLElement;
+      expect(dialog).toContainElement(focused);
+      expect(focused).not.toBe(document.body);
+      // Enter on the window body is a command: it reviews again.
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(sent('POST', REVIEW_PATH)).toHaveLength(2));
+    });
+
+    it('a pending save disables all four keys at the confirmation; a 503 then leaves the confirmation focused', async () => {
+      const gate = closedGate();
+      answerReview(() => reviewPassed('EDIT', fieldsOf(STORED)));
+      server.use(
+        http.put('/api/customers/:custId', async () => {
+          await gate.opened;
+          return problem(503, 'APP0503');
+        }),
+      );
+      const { user, dialog, onClose } = await openDialog('edit');
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+      const enterKey = keyButton(dialog, 'Enter');
+      act(() => enterKey.focus());
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(enterKey).toBeDisabled());
+
+      for (const legend of ['Enter', 'F4=Prompt+', 'F5=Refresh', 'F12=Cancel']) {
+        expect(keyButton(dialog, legend)).toBeDisabled();
+      }
+      await waitFor(() => expect(panel).toHaveFocus());
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
+
+      gate.open();
+
+      await within(alertRegion()).findByText(messageText('APP0503'));
+      await waitFor(() => expect(enterKey).toBeEnabled());
+      expect(queryConfirmation(dialog)).toBe(panel);
+      expect(panel).toHaveFocus();
+      expect(onClose).not.toHaveBeenCalled();
     });
   });
 

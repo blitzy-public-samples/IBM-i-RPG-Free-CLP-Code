@@ -20,6 +20,11 @@
  *   'Last Change' SD_CHGTIME 'by' SD_CHGUSER, non-display unless
  *     indicator 61                     "Last Change … by …", or nothing
  *
+ * The stamp line is {@link ChangeStampLine}, exported for the confirmation
+ * panel too: FillScreenFields also runs for the edit confirmation
+ * (5250_Subfile/MTNCUSTR.SQLRPGLE:221-225), so the stored record's stamp
+ * stays on the window in both phases.
+ *
  * Each input field's indicator-driven display attributes become props of
  * the shared FormField rather than indicators:
  *   - DSPATR(RI), reverse image on error, and DSPATR(PC), cursor on error:
@@ -179,6 +184,29 @@ export interface CustomerChangeStamp {
   chgUser: string;
 }
 
+/** Props of {@link ChangeStampLine}. */
+export interface ChangeStampLineProps {
+  /**
+   * The stored customer's change stamp, or `null`/absent when there is no
+   * stored record (add mode, a row no longer found).
+   */
+  stamp?: CustomerChangeStamp | null;
+}
+
+/**
+ * The "Last Change … by …" line: MTNCUSTD row 13, which FillScreenFields
+ * fills for the editable window and again for the edit confirmation
+ * (5250_Subfile/MTNCUSTR.SQLRPGLE:221-225,340-363). It is the one stamp
+ * renderer, shared by this form and the confirmation panel, so both phases
+ * show the same text in the same place. It renders nothing when
+ * `formatChangeStamp` yields no text: no stamp, a `*SYSTEM*` or blank user,
+ * or a missing or unparseable time, as indicator 61 off hides the line.
+ */
+export function ChangeStampLine({ stamp }: ChangeStampLineProps) {
+  const stampText = stamp ? formatChangeStamp(stamp.chgTime, stamp.chgUser) : null;
+  return stampText !== null ? <p className="change-stamp">Last Change {stampText}</p> : null;
+}
+
 /** Props of {@link CustomerForm}. */
 export interface CustomerFormProps {
   /**
@@ -220,17 +248,18 @@ export interface CustomerFormProps {
   initialFocusField?: CustomerFieldName;
   /**
    * The stored customer's change stamp, or `null`/absent (add mode, a row
-   * no longer found). The stamp line renders only when `formatChangeStamp`
-   * yields text, so it is hidden for `*SYSTEM*` or blank users, as
-   * MTNCUSTD's indicator 61 hides it.
+   * no longer found). The stamp line, {@link ChangeStampLine}, renders only
+   * when `formatChangeStamp` yields text, so it is hidden for `*SYSTEM*` or
+   * blank users, as MTNCUSTD's indicator 61 hides it. The confirmation panel
+   * takes the same stamp, so the line survives the switch to confirmation.
    */
   stamp?: CustomerChangeStamp | null;
 }
 
 /**
  * The detail fields. Renders the protected Customer Id, then the nine data
- * fields in screen order, then the "Last Change … by …" line when the stamp
- * is visible.
+ * fields in screen order, then the "Last Change … by …" line
+ * ({@link ChangeStampLine}) when the stamp is visible.
  */
 export function CustomerForm({
   idPrefix,
@@ -274,8 +303,6 @@ export function CustomerForm({
     };
   }
 
-  const stampText = stamp ? formatChangeStamp(stamp.chgTime, stamp.chgUser) : null;
-
   return (
     <div className="customer-form">
       <FormField
@@ -302,7 +329,7 @@ export function CustomerForm({
           inputRef={bindInput(field)}
         />
       ))}
-      {stampText !== null ? <p className="change-stamp">Last Change {stampText}</p> : null}
+      <ChangeStampLine stamp={stamp} />
     </div>
   );
 }

@@ -25,7 +25,8 @@
  * Flows (MTNCUSTD enables CF04, CA05 and CA12 only, :33-35):
  * - **Display** (:181-191). Every field protected; one screen I/O, so Enter,
  *   F4, F5 and F12 (Escape) all close the window. F4 opens no picker and F5
- *   reloads nothing.
+ *   reloads nothing. Every other function key, and PageUp or PageDown, shows
+ *   DEM0003 and the window stays.
  * - **Edit** (:195-247). Enter reviews; a passed review shows the
  *   confirmation with DEM0000. F5 re-reads the record (a vanished row shows
  *   DEM0599 and clears the form). F4 on State opens the State picker, F4
@@ -38,6 +39,11 @@
  *   with the entries kept.
  * - **Keys MTNCUSTD does not enable** (F3, F6, …) show DEM0003 and change
  *   nothing, standing in for the workstation's own rejection.
+ * - **PageUp and PageDown** are n/a in every phase (display, form and
+ *   confirmation): they show DEM0003 and change nothing, with no close, no
+ *   phase change, no draft change and no request, and the browser neither
+ *   pages nor scrolls; a confirmation stays shown. Shift+PageUp and
+ *   Shift+PageDown are chords and stay native.
  *
  * Working State (F04Prompt :364-382, Edit_SD_STATE :488-500). The State
  * picker is called with the program's working STATE, which is then always
@@ -80,7 +86,7 @@
  * />
  * ```
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { CUSTOMER_FIELD_NAMES, customersApi } from '../../api/customers';
@@ -135,9 +141,14 @@ export interface CustomerDetailDialogProps {
   /** The customer to display or change; absent in add mode. */
   custId?: string;
   /**
-   * Called once when the window should close: F12/Escape, any key in
-   * display mode, or a successful commit with its {@link DetailCloseResult}.
-   * The caller closes the window by setting `open` to false.
+   * Called once when the window should close:
+   * - Enter, F4, F5, F12 or Escape in display mode; every other key there
+   *   (F3, PageUp, PageDown, …) shows DEM0003 and the window stays;
+   * - F12 or Escape on the edit or add form, or while the stored customer is
+   *   still being read (at a confirmation they re-read or clear instead);
+   * - a successful commit, with its {@link DetailCloseResult}.
+   * Called without an argument unless a commit succeeded. The caller closes
+   * the window by setting `open` to false.
    */
   onClose: (result?: DetailCloseResult) => void;
 }
@@ -295,16 +306,38 @@ function DetailSession({ mode, custId, onClose }: SessionProps) {
  * in display mode. The read is not repeated behind the user's back: no
  * retry, no refetch on focus or reconnect, and nothing kept once the window
  * closes; F5 in edit mode is the one way to read again.
+ *
+ * Each opening owns its read. The query key carries an id of this opening,
+ * so reopening the same customer while an earlier read is still pending
+ * sends a request of its own instead of joining the closed window's. A read
+ * that settles after its window closed (F12 or Escape while it was pending)
+ * presents nothing, so no late DEM0599 or other alert reaches the screen now
+ * displayed; it still rejects, so the query settles and is then dropped.
+ * The request itself is not aborted: StrictMode's simulated unmount would
+ * cancel it and the remount send a second one.
  */
 function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId: string }) {
   const { present } = useProblemPresenter();
+  const opening = useId();
+  // Read only in the query function, never during render. Setting true again
+  // on mount keeps StrictMode's simulated unmount and remount working.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const query = useQuery({
-    queryKey: ['customers', 'detail', custId],
+    queryKey: ['customers', 'detail', custId, opening],
     queryFn: async (): Promise<CustomerResponse> => {
       try {
         return await customersApi.get(custId);
       } catch (error) {
-        present(error);
+        // Shown only while this opening is mounted; after a close the screen now displayed did not ask for it.
+        if (mounted.current) {
+          present(error);
+        }
         throw error;
       }
     },
@@ -329,14 +362,17 @@ function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId
  * shown yet. It sits on top of the screen beneath from the moment the user
  * asked for the window, so a key pressed during the read can never reach the
  * search list (no second option processing, no second window). F12 and
- * Escape close; Enter and every other function key are ignored, because
- * nothing is displayed for them to act on. Removed as soon as the read
- * settles and the window takes over with its own scope.
+ * Escape close; Enter, PageUp, PageDown and every other function key are
+ * ignored, because nothing is displayed for them to act on, so paging never
+ * scrolls the screen beneath either. Removed as soon as the read settles and
+ * the window takes over with its own scope.
  */
 function PendingScope({ onClose }: Pick<SessionProps, 'onClose'>) {
   useFunctionKeys(
     {
       Enter: ignoreKey,
+      PageUp: ignoreKey,
+      PageDown: ignoreKey,
       F12: () => onClose(),
     },
     { onUnbound: ignoreKey },
@@ -363,12 +399,20 @@ interface ConflictState {
   current: CustomerResponse;
 }
 
-/** The four keys MTNCUSTD offers (Enter, CF04, CA05, CA12), each with the handler of the current phase. */
+/**
+ * The window's keys, each with the handler of the current phase: the four
+ * keys MTNCUSTD offers (Enter, CF04, CA05, CA12), plus PageUp and PageDown,
+ * on which MTNCUSTR never acts. The paging keys are n/a in every phase
+ * (display, form and confirmation): they are bound, so the browser neither
+ * pages nor scrolls, to the DEM0003 answer, which changes nothing.
+ */
 interface DetailKeys {
   Enter: () => void;
   F4: () => void;
   F5: () => void;
   F12: () => void;
+  PageUp: () => void;
+  PageDown: () => void;
 }
 
 /** Props of the window body: the session props plus the record read on opening, if any. */
@@ -406,6 +450,10 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
+  // A review, reload or write is pending: the rendered side of `inFlight`.
+  // It protects the editable form (read-only) and disables every key-bar
+  // entry whose handler ignores a press meanwhile, so nothing is typed or
+  // pressed that the response would silently replace or swallow.
   const [busy, setBusy] = useState(false);
   // Bumped whenever the form is reloaded, cleared or shown again after the
   // confirmation; as the form's key it remounts the form, which re-applies
@@ -417,8 +465,10 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const nameRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLDivElement | null>(null);
-  // A request is in flight. Read by the key handlers, so a second Enter or
-  // click before the next render can never send a second PUT or POST.
+  // A request is in flight. Read by the key handlers and by `changeField`,
+  // so a second Enter or click before the next render can never send a
+  // second PUT or POST, and a keystroke that lands before the read-only form
+  // renders never changes the draft the response is about to replace.
   const inFlight = useRef(false);
   // The window is still mounted. A response that arrives after the window
   // closed (F12 while a request was pending) is dropped: no state, no toast.
@@ -463,8 +513,17 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     };
   }
 
-  /** Records one keyed field value; FormField has already uppercased it. */
+  /**
+   * Records one keyed field value; FormField has already uppercased it.
+   * While a review or reload is in flight the change is ignored: the form is
+   * rendered read-only then, and this synchronous guard also covers a
+   * keystroke that arrives before that render, so the response never
+   * replaces text the user typed meanwhile.
+   */
   function changeField(field: CustomerFieldName, value: string): void {
+    if (inFlight.current) {
+      return;
+    }
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
@@ -478,7 +537,11 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     return true;
   }
 
-  /** Marks the request as finished. */
+  /**
+   * Marks the request as finished. It runs in the same continuation as the
+   * response's own state updates, so React batches them into one render: the
+   * form turns editable again in the very render that shows the response.
+   */
   function finish(): void {
     inFlight.current = false;
     if (alive.current) {
@@ -739,7 +802,9 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // --- Key handlers ----------------------------------------------------------
   // Every handler that starts a request, or changes what a pending request
   // will land on, does nothing while one is in flight; F12 on the form always
-  // closes. Requests are gated once more by `begin`.
+  // closes. Requests are gated once more by `begin`. While one is in flight
+  // the key bar shows exactly those keys disabled (Enter, F4 and F5 on the
+  // form; all four at the confirmation), and the form is read-only.
 
   /** Enter on the form: review the draft. */
   function enterOnForm(): void {
@@ -807,15 +872,26 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   let keys: DetailKeys;
   if (mode === 'display') {
     // One protected screen I/O: whichever enabled key returns closes the window.
-    keys = { Enter: close, F4: close, F5: close, F12: close };
+    keys = { Enter: close, F4: close, F5: close, F12: close, PageUp: keyNotActive, PageDown: keyNotActive };
   } else if (!confirming) {
-    keys = { Enter: enterOnForm, F4: promptOnForm, F5: refreshOnForm, F12: close };
+    keys = {
+      Enter: enterOnForm,
+      F4: promptOnForm,
+      F5: refreshOnForm,
+      F12: close,
+      PageUp: keyNotActive,
+      PageDown: keyNotActive,
+    };
   } else {
+    // The paging keys answer DEM0003 and leave the confirmation shown, unlike
+    // the enabled-but-inactive F4 (notActiveAtConfirm), which returns to the form.
     keys = {
       Enter: enterAtConfirm,
       F4: notActiveAtConfirm,
       F5: mode === 'edit' ? cancelAtConfirm : notActiveAtConfirm,
       F12: cancelAtConfirm,
+      PageUp: keyNotActive,
+      PageDown: keyNotActive,
     };
   }
 
@@ -830,13 +906,39 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   });
 
   // The visible legend (MTNCUSTR BldFkeyText :638-649), each entry calling
-  // the very handler its key runs.
+  // the very handler its key runs. An entry is disabled exactly while its
+  // handler ignores a press because a request is in flight; F12 on the form
+  // closes even then, so the window can always be cancelled.
   const keyBar: FunctionKeyBarItem[] = [
-    { key: 'F4', label: 'F4=Prompt+', onPress: keys.F4 },
-    { key: 'F5', label: 'F5=Refresh', onPress: keys.F5 },
-    { key: 'F12', label: 'F12=Cancel', onPress: keys.F12 },
-    { key: 'Enter', label: 'Enter', onPress: keys.Enter },
+    { key: 'F4', label: 'F4=Prompt+', onPress: keys.F4, disabled: busy },
+    { key: 'F5', label: 'F5=Refresh', onPress: keys.F5, disabled: busy },
+    { key: 'F12', label: 'F12=Cancel', onPress: keys.F12, disabled: busy && confirming },
+    { key: 'Enter', label: 'Enter', onPress: keys.Enter, disabled: busy },
   ];
+
+  // A key-bar entry pressed from the keyboard (Tab to it, then Space or
+  // Enter) holds focus as the request it starts disables it. A disabled
+  // button cannot keep focus usefully, and a browser may drop it to <body>,
+  // where Enter is no command and Tab starts outside the window. The phase's
+  // key container takes focus instead, so Enter, the function keys and the
+  // Tab trap keep working. Where the response moves focus itself (the
+  // confirmation panel, a reloaded form's Name, the first field in error),
+  // that move follows and wins; a failure that moves nothing leaves focus
+  // here, inside the window.
+  useEffect(() => {
+    if (!busy) {
+      return;
+    }
+    const container = confirming ? confirmRef.current : bodyRef.current;
+    const active = document.activeElement;
+    const dropped =
+      active === null ||
+      active === document.body ||
+      (active instanceof HTMLElement && bodyRef.current?.contains(active) === true && active.matches(':disabled'));
+    if (container !== null && dropped) {
+      container.focus();
+    }
+  }, [busy, confirming]);
 
   // --- Render --------------------------------------------------------------
 
@@ -860,6 +962,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
             values={reviewed}
             standardized={standardized}
             containerRef={confirmRef}
+            stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
           />
         ) : (
           <CustomerForm
@@ -868,7 +971,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
             custId={record?.custId ?? custId ?? ''}
             values={draft}
             onChange={editable ? changeField : keepDisplayedValue}
-            readOnly={!editable}
+            readOnly={!editable || busy}
             errors={errors}
             inputRef={bindInput}
             initialFocusField={editable ? (firstErrorField ?? 'name') : undefined}

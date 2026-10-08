@@ -29,7 +29,14 @@
  *   - FillScreenFields: the protected Customer Id (blank in add mode, until
  *     the server assigns one), then the nine data fields in screen order,
  *     with the labels of `CUSTOMER_FORM_FIELDS`, the one label table shared
- *     with the editable form and the conflict comparison.
+ *     with the editable form and the conflict comparison, then the stored
+ *     record's "Last Change … by …" stamp (MTNCUSTR.SQLRPGLE:340-363). A
+ *     review changes no stamp, so the panel takes the same `stamp` the form
+ *     shows and renders it through the form's `ChangeStampLine`, with the
+ *     same text and place. The edit confirmation of a record a user changed
+ *     keeps the line; the add confirmation has no stored record (add clears
+ *     CUSTMAST_ds, :251-254), so it shows none, and a `*SYSTEM*` or blank
+ *     user hides it, as indicator 61 does.
  *   - SndSflMsg('DEM0000' | 'DEM0009'): not rendered here. The dialog
  *     publishes the review's `notice.message` as a `status` toast, which is
  *     the message-subfile equivalent; rendering it here as well would show
@@ -65,13 +72,15 @@
  *   values={reviewed}
  *   standardized={standardized}
  *   containerRef={confirmRef}
+ *   stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
  * />
  */
 import { useEffect } from 'react';
 import type { RefObject } from 'react';
 import type { CustomerFields } from '../../api/customers';
 import { FormField } from '../../components/FormField';
-import { CUSTOMER_FORM_FIELDS } from './CustomerForm';
+import { CUSTOMER_FORM_FIELDS, ChangeStampLine } from './CustomerForm';
+import type { CustomerChangeStamp } from './CustomerForm';
 
 /** The SD_CUSTID length: a customer id is four base-36 characters. */
 const CUSTOMER_ID_LENGTH = 4;
@@ -111,12 +120,21 @@ export interface ConfirmationPanelProps {
    * `useFunctionKeys` as `containerRef`, so Enter on the container commits.
    */
   containerRef: RefObject<HTMLDivElement | null>;
+  /**
+   * The stored customer's change stamp, the same one the editable form
+   * shows, or `null`/absent (add mode, a row no longer found). The line
+   * renders through `ChangeStampLine` only when `formatChangeStamp` yields
+   * text, so it is hidden for `*SYSTEM*` or blank users, as MTNCUSTD's
+   * indicator 61 hides it.
+   */
+  stamp?: CustomerChangeStamp | null;
 }
 
 /**
  * The protected confirmation fields. Renders, inside one labelled group, the
  * "Address standardized." line when it applies, the Customer Id, then the
- * nine reviewed data fields in screen order, all read-only.
+ * nine reviewed data fields in screen order, all read-only, then the
+ * "Last Change … by …" line when the stamp is visible.
  */
 export function ConfirmationPanel({
   idPrefix,
@@ -124,6 +142,7 @@ export function ConfirmationPanel({
   values,
   standardized,
   containerRef,
+  stamp,
 }: ConfirmationPanelProps) {
   // Focus the panel once it is in the DOM, so Enter commits and Tab starts
   // from the panel. The effect only moves focus and sets no state; it runs
@@ -169,6 +188,7 @@ export function ConfirmationPanel({
           readOnly
         />
       ))}
+      <ChangeStampLine stamp={stamp} />
     </div>
   );
 }
