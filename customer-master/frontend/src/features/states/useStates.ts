@@ -28,8 +28,11 @@
  *   development, StrictMode also aborts the initial load at its simulated
  *   unmount and starts it again on remount; the aborted load reports nothing.
  * - Errors are not presented here: each failure of a current request is
- *   passed unchanged, once, to the latest `onError`. The 401 handling of
- *   `api/client.ts` signs out on every 401, current or not.
+ *   passed unchanged, once, to the latest `onError`. Every 401 a state
+ *   request receives goes through `api/client.ts` to `AuthProvider`'s 401
+ *   handler, whether or not this hook still reports it. That handler signs
+ *   out unless the 401 refused a sign-in trial's credentials or a
+ *   `superseded` identity, one a sign-out or newer sign-in already replaced.
  * - Requires a `QueryClientProvider` above the calling component.
  *
  * @example

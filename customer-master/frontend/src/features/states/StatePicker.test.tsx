@@ -642,6 +642,74 @@ describe('StatePicker', () => {
       expect(onCancel).not.toHaveBeenCalled();
       expect(stateRequests).toHaveLength(1);
     });
+
+    it('a rejected option keeps its DEM0004 text as its description after the alert clears; a blank option and Enter drop both', async () => {
+      const byName = await serverRows('', 'name');
+      // The rejected row is on the last page, the page a blank Enter shows
+      // (PMTSTATER:334-341), so it stays in view when that Enter drops the rejection.
+      const lastStart = Math.floor((byName.length - 1) / PAGE_SIZE) * PAGE_SIZE;
+      const lastPage = byName.slice(lastStart);
+      const rejectedRow = rowAt(byName, lastStart + 1);
+      const otherRow = rowAt(byName, lastStart);
+      const text = messageText('DEM0004', ['X']);
+      expect(text).toBe('X is not a valid option at this time.');
+
+      const { user, dialog, table, filter } = await openPicker();
+
+      /** The option field of `row`, which must be on the page in view. */
+      function optionFor(row: StateResponse): HTMLElement {
+        return within(dialog).getByRole('textbox', { name: `Option for ${row.name}` });
+      }
+
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(dataRows(table)).toEqual(lastPage));
+
+      await user.type(optionFor(rejectedRow), 'x');
+      await user.keyboard('{Enter}');
+
+      expect(await within(alertRegion()).findByText(text)).toBeInTheDocument();
+      const option = optionFor(rejectedRow);
+      expect(option).toHaveAttribute('aria-invalid', 'true');
+      const descriptionId = option.getAttribute('aria-describedby') ?? '';
+      expect(descriptionId).toBe(`${option.id}-error`);
+      const description = document.getElementById(descriptionId);
+      expect(description?.textContent).toBe(text);
+      expect(description).toHaveClass('visually-hidden');
+      expect(option).toHaveAccessibleDescription(text);
+      expect(optionFor(otherRow)).not.toHaveAttribute('aria-invalid');
+      expect(optionFor(otherRow)).not.toHaveAttribute('aria-describedby');
+
+      // A click is the next user action, which clears the alert.
+      await user.click(filter);
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(optionFor(rejectedRow)).toHaveAttribute('aria-invalid', 'true');
+      expect(optionFor(rejectedRow)).toHaveAttribute('aria-describedby', descriptionId);
+      expect(document.getElementById(descriptionId)?.textContent).toBe(text);
+
+      // Rows are keyed by page slot: the description follows the rejected row, not its slot.
+      await user.keyboard('{PageUp}');
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(lastStart - PAGE_SIZE, lastStart)));
+      const described = within(table)
+        .getAllByRole('textbox')
+        .filter((input) => input.hasAttribute('aria-invalid') || input.hasAttribute('aria-describedby'));
+      expect(described).toEqual([]);
+      expect(document.getElementById(descriptionId)).toBeNull();
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(dataRows(table)).toEqual(lastPage));
+      expect(optionFor(rejectedRow)).toHaveAttribute('aria-describedby', descriptionId);
+      expect(optionFor(rejectedRow)).toHaveAccessibleDescription(text);
+
+      await user.clear(optionFor(rejectedRow));
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(optionFor(rejectedRow)).not.toHaveAttribute('aria-invalid'));
+      expect(optionFor(rejectedRow)).not.toHaveAttribute('aria-describedby');
+      expect(document.getElementById(descriptionId)).toBeNull();
+      expect(dataRows(table)).toEqual(lastPage);
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(stateRequests).toHaveLength(1);
+    });
   });
 
   describe('paging', () => {
@@ -679,6 +747,51 @@ describe('StatePicker', () => {
       await user.keyboard('{PageUp}');
       expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE));
       expect(stateRequests).toHaveLength(1);
+    });
+
+    it('a click on plain picker text focuses its key container, where Enter still shows the last six-row page; the container is never a tab stop', async () => {
+      const byName = await serverRows('', 'name');
+      expect(byName).toHaveLength(58);
+      const lastStart = Math.floor((byName.length - 1) / PAGE_SIZE) * PAGE_SIZE;
+      expect(lastStart).toBe(54);
+
+      const { user, dialog, table, filter } = await openPicker();
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(0, PAGE_SIZE)));
+      // The key scope's container: the window's one child, holding the filter, the list and the key bar.
+      const container = dialog.firstElementChild;
+      if (!(container instanceof HTMLElement)) {
+        throw new Error('The picker window renders no content container');
+      }
+      expect(container).toContainElement(filter);
+      expect(container).toContainElement(table);
+      // A Name cell holds plain text, no control, so the press focuses its nearest focusable ancestor.
+      const nameCell = within(table).getByRole('cell', { name: rowAt(byName, 0).name });
+      expect(nameCell.children).toHaveLength(0);
+
+      await user.click(nameCell);
+
+      expect(container).toHaveFocus();
+      expect(container).not.toBe(dialog);
+      expect(container).toHaveAttribute('tabindex', '-1');
+
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(dataRows(table)).toEqual(byName.slice(lastStart)));
+      expect(dataRows(table)).toEqual([54, 55, 56, 57].map((index) => rowAt(byName, index)));
+      expect(within(dialog).getByText('Bottom')).toBeInTheDocument();
+      expect(within(dialog).queryByText('More...')).not.toBeInTheDocument();
+      expect(stateRequests).toHaveLength(1);
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(container).toHaveFocus();
+
+      // Not in the tab order: Tab leaves it for the first stop, the filter,
+      // and Shift+Tab from there wraps to the window's last stop, not back to it.
+      await user.tab();
+      expect(filter).toHaveFocus();
+      await user.tab({ shift: true });
+      expect(container).not.toHaveFocus();
+      expect(filter).not.toHaveFocus();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
     });
   });
 

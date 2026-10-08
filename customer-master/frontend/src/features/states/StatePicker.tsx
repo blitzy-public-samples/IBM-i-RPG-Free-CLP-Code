@@ -95,7 +95,7 @@ const FILTER_ID = 'state-picker-name';
 /** `Init` sets SortbyName (PMTSTATER:443-448). */
 const INITIAL_QUERY: StateQuery = { nameContains: '', sort: 'name' };
 
-const NO_INVALID: ReadonlySet<string> = new Set<string>();
+const NO_INVALID: Readonly<Record<string, string>> = Object.freeze({});
 
 /** SC_SORTED: SortbyName / SortbyCode (PMTSTATER:121-122). */
 const SORT_LABEL: Readonly<Record<StateSort, string>> = { name: 'Name', code: 'Code' };
@@ -173,8 +173,9 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   // By state code. Survives paging, as SF_OPT stayed in its subfile record,
   // and is dropped on every reload (SflClear).
   const [options, setOptions] = useState<Record<string, string>>({});
-  // Rejected codes, shown in reverse image: DSPATR(RI), indicator 81 (PMTSTATED:58).
-  const [invalid, setInvalid] = useState<ReadonlySet<string>>(NO_INVALID);
+  // Rejected codes, shown in reverse image: DSPATR(RI), indicator 81 (PMTSTATED:58),
+  // each with the DEM0004 text it was rejected with.
+  const [invalid, setInvalid] = useState<Readonly<Record<string, string>>>(NO_INVALID);
   // The first row in view, 0-based: SC_CSR_RCD less one.
   const [pageStart, setPageStart] = useState(0);
   const [filterError, setFilterError] = useState<string | undefined>(undefined);
@@ -302,15 +303,17 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
       return;
     }
 
-    // Invalid options: one DEM0004 per row in list order, every one marked,
-    // the page of the first shown and its input focused (:312-329). The
-    // values stay in their inputs to be checked again (SFLNXTCHG). flushSync
-    // renders the page before focus moves, so the input exists to receive it.
-    for (const entry of rejected) {
-      publish({ kind: 'alert', text: format('DEM0004', [entry.option]) });
+    // Invalid options: one DEM0004 per row in list order, every one marked
+    // and described by its text, the page of the first shown and its input
+    // focused (:312-329). The values stay in their inputs to be checked again
+    // (SFLNXTCHG). flushSync renders the page before focus moves, so the
+    // input exists to receive it.
+    const errors = rejected.map((entry) => [entry.code, format('DEM0004', [entry.option])] as const);
+    for (const [, text] of errors) {
+      publish({ kind: 'alert', text });
     }
     flushSync(() => {
-      setInvalid(new Set(rejected.map((entry) => entry.code)));
+      setInvalid(Object.fromEntries(errors));
       setPageStart(pageStartOf(first.index));
     });
     optionInputs.current.get(first.code)?.focus();
@@ -400,7 +403,12 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
 
   return (
     <Dialog open labelledBy={`${HEADER_ID}-title`} initialFocusRef={filterRef} className="state-picker">
-      <div ref={containerRef}>
+      {/*
+        tabIndex -1: the div is the key scope's container, so a click on its
+        plain text gives it focus and Enter stays a command there; it is never
+        a tab stop.
+      */}
+      <div ref={containerRef} tabIndex={-1}>
         {/* SH_FUNCT is never assigned by PMTSTATER, so the function line stays blank. */}
         <ScreenHeader id={HEADER_ID} title="USA States" functionText="" user={username ?? undefined} />
         <FormField
@@ -442,52 +450,65 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
             </tr>
           </thead>
           <tbody ref={tableBodyRef}>
-            {pageRows.map((row, slot) => (
-              <tr key={slot}>
-                <td>
-                  <label htmlFor={optionIdOf(row.state)} className="visually-hidden">
-                    {`Option for ${row.name}`}
-                  </label>
-                  <input
-                    id={optionIdOf(row.state)}
-                    type="text"
-                    maxLength={OPTION_LENGTH}
-                    size={OPTION_LENGTH}
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={options[row.state] ?? ''}
-                    onChange={(event) => changeOption(row.state, event.target.value)}
-                    aria-invalid={invalid.has(row.state) ? 'true' : undefined}
-                    ref={(element) => {
-                      if (element === null) {
-                        return undefined;
-                      }
-                      const inputs = optionInputs.current;
-                      inputs.set(row.state, element);
-                      return () => {
-                        if (inputs.get(row.state) === element) {
-                          inputs.delete(row.state);
+            {pageRows.map((row, slot) => {
+              // Ids derive from the code, so they follow the row in view, not its slot.
+              const optionId = optionIdOf(row.state);
+              const error = invalid[row.state] ?? '';
+              const errorId = `${optionId}-error`;
+              return (
+                <tr key={slot}>
+                  <td>
+                    <label htmlFor={optionId} className="visually-hidden">
+                      {`Option for ${row.name}`}
+                    </label>
+                    <input
+                      id={optionId}
+                      type="text"
+                      maxLength={OPTION_LENGTH}
+                      size={OPTION_LENGTH}
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={options[row.state] ?? ''}
+                      onChange={(event) => changeOption(row.state, event.target.value)}
+                      aria-invalid={error !== '' ? 'true' : undefined}
+                      aria-describedby={error !== '' ? errorId : undefined}
+                      ref={(element) => {
+                        if (element === null) {
+                          return undefined;
                         }
-                      };
-                    }}
-                    data-option-input=""
-                  />
-                </td>
-                <td>{row.state}</td>
-                <td>{row.name}</td>
-                <td>
-                  {/*
-                    The hidden name completes the accessible name "Select <Name>";
-                    the separating space stays outside the span, because accessible
-                    name computation trims an element's own text.
-                  */}
-                  <button type="button" onClick={() => onSelect(row.state)}>
-                    Select{' '}
-                    <span className="visually-hidden">{row.name}</span>
-                  </button>
-                </td>
-              </tr>
-            ))}
+                        const inputs = optionInputs.current;
+                        inputs.set(row.state, element);
+                        return () => {
+                          if (inputs.get(row.state) === element) {
+                            inputs.delete(row.state);
+                          }
+                        };
+                      }}
+                      data-option-input=""
+                    />
+                    {/* The rejection, kept after its alert clears, so returning to the field explains it. */}
+                    {error !== '' ? (
+                      <span id={errorId} className="visually-hidden">
+                        {error}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td>{row.state}</td>
+                  <td>{row.name}</td>
+                  <td>
+                    {/*
+                      The hidden name completes the accessible name "Select <Name>";
+                      the separating space stays outside the span, because accessible
+                      name computation trims an element's own text.
+                    */}
+                    <button type="button" onClick={() => onSelect(row.state)}>
+                      Select{' '}
+                      <span className="visually-hidden">{row.name}</span>
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {/*
