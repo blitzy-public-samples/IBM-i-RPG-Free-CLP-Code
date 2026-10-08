@@ -238,7 +238,7 @@ class GeneratorProcessIT extends AbstractPostgresIT {
     }
 
     @Test
-    @DisplayName("A mistyped flag exits 1 with 'Unknown option' and leaves the table and the sequence untouched")
+    @DisplayName("A mistyped flag exits 1 with 'Unknown option' and the usage line, leaving table and sequence untouched")
     void unknownOptionExitsOneAndChangesNothing() {
         jdbcTemplate.update(PRELOAD_SQL);
         long countBefore = rowCount();
@@ -251,6 +251,7 @@ class GeneratorProcessIT extends AbstractPostgresIT {
                 .isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
         assertThat(result.output()).as("output of --cuont=5; %s", result.describe())
                 .contains("Unknown option --cuont")
+                .containsSubsequence("Unknown option --cuont", CustomerGeneratorRunner.USAGE)
                 .doesNotContainPattern(LOADED_REPORT);
         assertGeneratorLog(result);
         assertThat(rowCount()).as("row count after --cuont=5; %s", result.describe()).isEqualTo(countBefore);

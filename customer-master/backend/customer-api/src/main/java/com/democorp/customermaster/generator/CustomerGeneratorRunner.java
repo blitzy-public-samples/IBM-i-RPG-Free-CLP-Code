@@ -60,10 +60,11 @@ import org.springframework.stereotype.Component;
  * <p><b>Strict options.</b> Only the four flags, the fully qualified properties of
  * {@link #QUALIFIED_OPTIONS} and {@code --spring.*} are accepted, so a mistyped option cannot silently
  * fall back to its default: any other option prints {@code Unknown option --<name>}, and a non-option
- * argument {@code Unknown option <arg>} ({@link #firstUnknownOption(ApplicationArguments)}). Spring
- * Boot's {@code --debug}, {@code --trace} and {@code --logging.*} are rejected too; logging is tuned
- * through {@code LOGGING_LEVEL_*} environment variables instead. A generator option given without a
- * value prints {@code Option --<name> requires a value}
+ * argument {@code Unknown option <arg>} ({@link #firstUnknownOption(ApplicationArguments)}), each
+ * followed by the {@link #USAGE} line, so {@code --help} prints {@code Unknown option --help} and that
+ * line. Spring Boot's {@code --debug}, {@code --trace} and {@code --logging.*} are rejected too;
+ * logging is tuned through {@code LOGGING_LEVEL_*} environment variables instead. A generator option
+ * given without a value prints {@code Option --<name> requires a value}
  * ({@link #firstValuelessOption(ApplicationArguments)}).
  *
  * <p><b>Steps.</b> {@code executeSteps} checks the options, the start id
@@ -78,7 +79,7 @@ import org.springframework.stereotype.Component;
  * {@code Loaded <n> customers <first>..<last> in <s> s}, for example
  * {@code Loaded 500 customers B000..B1EV in 0.4 s}; {@value #EXIT_FAILURE} after printing one line for
  * the failure, such as {@code Cannot allocate CUSTMAST} when the loader's 5-second {@code lock_timeout}
- * expires.
+ * expires; an unknown option or argument adds the {@link #USAGE} line below that line.
  *
  * <p><b>Failure contract.</b> {@link #execute(ApplicationArguments)} reports every failure the steps
  * raise as a {@link RuntimeException} with one printed line and status {@value #EXIT_FAILURE}; an
@@ -135,6 +136,23 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
 
     /** The line LOADCUST and LOADCUST2 send when CUSTMAST cannot be allocated within 5 seconds. */
     public static final String LOCK_FAILURE_MESSAGE = "Cannot allocate CUSTMAST";
+
+    /**
+     * The one line printed after {@code Unknown option --<name>} or {@code Unknown option <arg>}, and so
+     * after {@code Unknown option --help}, since the strict options accept no help flag: the four flags
+     * with their ranges and defaults, the {@code GENERATOR_*} variables each can come from instead, and
+     * an example. The bounds, the automatic start ids and the bundled sample come from the constants
+     * that enforce them; {@code 300} is the default of {@link GeneratorProperties#count()} and of the
+     * {@code count} bridge in {@code application-generator.yml}.
+     */
+    public static final String USAGE = "Usage:"
+            + " [--count=N] (1.." + GeneratorProperties.MAX_COUNT + ", default 300)"
+            + " [--start-id=XXXX] (4 characters of A-Z and 0-9; default " + DEFAULT_START + ", or "
+            + LARGE_LOAD_START + " above " + AUTO_AAAA_THRESHOLD + " rows)"
+            + " [--csz-file=LOCATION] (default " + GeneratorProperties.DEFAULT_CSZ_FILE
+            + "; a full file in ./data is /data/csz.csv) [--seed=L] (default random);"
+            + " each flag can instead come from GENERATOR_COUNT, GENERATOR_START_ID, GENERATOR_CSZ_FILE or"
+            + " GENERATOR_SEED, and the flag wins; for example --count=1000000";
 
     /**
      * The four flat flags the option bridge in {@code application-generator.yml} maps to
@@ -207,7 +225,10 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
 
     private final Clock clock;
 
-    /** Receives the one outcome line; {@code System.out} in production. */
+    /**
+     * Receives the outcome line, and the {@link #USAGE} line after an unknown option; {@code System.out}
+     * in production.
+     */
     private final PrintStream out;
 
     /** The status of the last {@link #run(ApplicationArguments)}, reported through {@link #getExitCode()}. */
@@ -340,9 +361,11 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
         Objects.requireNonNull(args, "args");
 
         // 1. Strict options, before any work: unknown options and arguments first, then valueless ones.
+        // An unknown one prints its cause first and then the usage line naming what is accepted.
         Optional<String> unknown = firstUnknownOption(args);
         if (unknown.isPresent()) {
-            return fail("Unknown option " + unknown.get());
+            report("Unknown option " + unknown.get());
+            return fail(USAGE);
         }
         Optional<String> valueless = firstValuelessOption(args);
         if (valueless.isPresent()) {

@@ -43,10 +43,16 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * replace the table. It prints {@code Unknown option --<name>} and exits 1 before any work, with or
  * without a value.
  *
+ * <p><b>Usage guidance.</b> Every unknown option or argument, {@code --help} included since the strict
+ * options accept no help flag, is followed by exactly one {@link CustomerGeneratorRunner#USAGE} line
+ * naming the four flags, their {@code GENERATOR_*} variables, ranges, defaults and an example; a
+ * valueless option prints its one line only.
+ *
  * <p><b>What stays accepted.</b> An explicitly empty value such as {@code --seed=} still selects its
  * default (an empty start id is the automatic start, an empty seed is random), each accepted qualified
  * property with a value proceeds to the load, a bare {@code --spring.*} option is not judged, and an
- * unknown option still prints {@code Unknown option --<name>}, ahead of any missing value.
+ * unknown option still prints {@code Unknown option --<name>} and the usage line, ahead of any missing
+ * value.
  *
  * <p>The runner is built through its package-private constructor with mocked collaborators and a
  * captured output stream, so the options are judged exactly as the runner receives them from
@@ -141,7 +147,7 @@ class CustomerGeneratorRunnerOptionsTest {
         int status = runner.execute(new DefaultApplicationArguments("--seed", "--cuont=5"));
 
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
-        assertThat(printedLines()).containsExactly("Unknown option --cuont");
+        assertThat(printedLines()).containsExactly("Unknown option --cuont", CustomerGeneratorRunner.USAGE);
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
     }
 
@@ -151,7 +157,7 @@ class CustomerGeneratorRunnerOptionsTest {
         int status = runner.execute(new DefaultApplicationArguments("--seed", "500"));
 
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
-        assertThat(printedLines()).containsExactly("Unknown option 500");
+        assertThat(printedLines()).containsExactly("Unknown option 500", CustomerGeneratorRunner.USAGE);
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
     }
 
@@ -161,8 +167,38 @@ class CustomerGeneratorRunnerOptionsTest {
         int status = runner.execute(new DefaultApplicationArguments(PROFILE_OPTION, "--cuont=5"));
 
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
-        assertThat(printedLines()).containsExactly("Unknown option --cuont");
+        assertThat(printedLines()).containsExactly("Unknown option --cuont", CustomerGeneratorRunner.USAGE);
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("--help is not an option: it prints Unknown option --help and the usage line, and does nothing")
+    void helpIsUnknownAndPrintsTheUsageLine() {
+        int status = runner.execute(new DefaultApplicationArguments(PROFILE_OPTION, "--help"));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).containsExactly("Unknown option --help", CustomerGeneratorRunner.USAGE);
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("the usage line names the four flags, their variables, ranges, defaults and an example")
+    void usageLineNamesTheOptions() {
+        assertThat(CustomerGeneratorRunner.USAGE)
+                .startsWith("Usage: ")
+                .isEqualTo(CustomerGeneratorRunner.oneLine(CustomerGeneratorRunner.USAGE))
+                .doesNotContain("\n", "\r")
+                .contains("[--count=N]", "[--start-id=XXXX]", "[--csz-file=LOCATION]", "[--seed=L]")
+                .contains("GENERATOR_COUNT", "GENERATOR_START_ID", "GENERATOR_CSZ_FILE", "GENERATOR_SEED",
+                        "the flag wins")
+                .contains("1.." + GeneratorProperties.MAX_COUNT, "(1..1679616, default 300)")
+                .contains("default 1001, or AAAA above 385245 rows")
+                .contains("default " + GeneratorProperties.DEFAULT_CSZ_FILE, "classpath:generator/csz-sample.csv",
+                        "/data/csz.csv")
+                .contains("(default random)")
+                .contains("--count=1000000");
+        assertThat(CustomerGeneratorRunner.FLAGS)
+                .allSatisfy(flag -> assertThat(CustomerGeneratorRunner.USAGE).contains("[--" + flag + "="));
     }
 
     /**
@@ -197,7 +233,7 @@ class CustomerGeneratorRunnerOptionsTest {
         int status = runner.execute(new DefaultApplicationArguments(args));
 
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
-        assertThat(printedLines()).containsExactly("Unknown option --" + name);
+        assertThat(printedLines()).containsExactly("Unknown option --" + name, CustomerGeneratorRunner.USAGE);
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
     }
 
@@ -208,7 +244,8 @@ class CustomerGeneratorRunnerOptionsTest {
                 PROFILE_OPTION, "--count=5", "--customer-master.generator.cuont"));
 
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
-        assertThat(printedLines()).containsExactly("Unknown option --customer-master.generator.cuont");
+        assertThat(printedLines()).containsExactly(
+                "Unknown option --customer-master.generator.cuont", CustomerGeneratorRunner.USAGE);
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
     }
 

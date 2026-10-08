@@ -30,7 +30,8 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
 /**
  * Reports a generator start that fails for want of its database as one line, keeping the generator
  * CLI's contract: every failure exits with status 1 and prints one line naming its cause, as
- * {@code Cannot allocate CUSTMAST} or {@code Unknown option --<name>} do.
+ * {@code Cannot allocate CUSTMAST} or {@code Unknown option --<name>} do; an unknown option adds only
+ * the {@link CustomerGeneratorRunner#USAGE} line below its cause.
  *
  * <p><b>Why it exists.</b> The generator context needs the database while it starts: the JDBC dialect
  * is detected from a live connection, {@code DataSourceCredentialsGuard} and
