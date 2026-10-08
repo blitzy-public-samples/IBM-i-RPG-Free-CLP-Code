@@ -11,6 +11,13 @@ customer-master:
       - username: maint2
         password: maint2-pw
         role: MAINTENANCE
+      # Passwords of exactly 72 UTF-8 bytes, the most BCrypt verifies: ASCII, then 24 three-byte characters.
+      - username: limit-ascii
+        password: "limit-ascii-pw-012345678901234567890123456789012345678901234567890123456"
+        role: MAINTENANCE
+      - username: limit-multibyte
+        password: "€€€€€€€€€€€€€€€€€€€€€€€€"
+        role: MAINTENANCE
   address:
     enabled: true
     client: stub

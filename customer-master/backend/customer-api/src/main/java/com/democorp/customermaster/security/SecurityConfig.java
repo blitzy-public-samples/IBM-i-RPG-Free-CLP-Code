@@ -5,6 +5,7 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -27,6 +28,9 @@ import org.springframework.lang.Nullable;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchyImpl;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.config.ObjectPostProcessor;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -40,6 +44,9 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.security.web.authentication.AuthenticationConverter;
+import org.springframework.security.web.authentication.www.BasicAuthenticationConverter;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.util.function.SingletonSupplier;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.DefaultCorsProcessor;
@@ -48,29 +55,18 @@ import org.springframework.web.servlet.handler.AbstractHandlerMapping;
 /**
  * The security configuration of the Customer Master web API: stateless HTTP Basic authentication
  * against the configured users, the two roles and their hierarchy, the request authorization rules,
- * and the {@code application/problem+json} bodies of 401 and 403.
- *
- * <p><b>What it replaces.</b> The IBM i application authenticated nobody. PMTCUSTR took its mode as a
- * caller-asserted parameter ({@code pParmType char(1)}: I, M or S) and passed MTNCUSTR a function
- * code ({@code pMaintain char(1)}); PMTCUSTR itself notes that in production it "would be called from
- * a tested menu or some program that enforced security". Here that security is enforced by the API,
- * not only by the user interface: {@code I} becomes {@link Role#INQUIRY}, {@code M} becomes
- * {@link Role#MAINTENANCE}, and {@code S} is not a role but the customer picker context, open to every
- * authenticated user, because Selection only reads customers and returns an id.
+ * and the {@code application/problem+json} bodies of 401 and 403. The API, not only the user interface,
+ * enforces the roles; {@link Role} records how the source's caller-asserted modes became them.
  *
  * <p><b>Authorization rules</b>, evaluated in this order; the first match decides:
- * <table>
- *   <caption>Request rules</caption>
- *   <tr><th>Request</th><th>Required</th></tr>
- *   <tr><td>any ERROR dispatch (the container's forward to {@code /error})</td><td>none</td></tr>
- *   <tr><td>{@code GET} {@link #PUBLIC_GET_PATHS}: messages, health, API docs, Swagger UI</td>
- *       <td>none</td></tr>
- *   <tr><td>{@code GET} {@link #INQUIRY_GET_PATHS}: session, customer search and detail, states</td>
- *       <td>{@code INQUIRY}</td></tr>
- *   <tr><td>{@code POST} {@link #MAINTENANCE_POST_PATHS} and {@code PUT}
- *       {@link #MAINTENANCE_PUT_PATHS}: review, add, change</td><td>{@code MAINTENANCE}</td></tr>
- *   <tr><td>any other request</td><td>authenticated; an unknown path then answers 404</td></tr>
- * </table>
+ * <ol>
+ *   <li>any ERROR dispatch: permitted;</li>
+ *   <li>{@code GET} {@link #PUBLIC_GET_PATHS}: permitted;</li>
+ *   <li>{@code GET} {@link #INQUIRY_GET_PATHS}: {@code INQUIRY};</li>
+ *   <li>{@code POST} {@link #MAINTENANCE_POST_PATHS} and {@code PUT} {@link #MAINTENANCE_PUT_PATHS}:
+ *       {@code MAINTENANCE};</li>
+ *   <li>any other request: authenticated; an unknown path then answers 404.</li>
+ * </ol>
  * {@code MAINTENANCE} implies {@code INQUIRY} through {@link #roleHierarchy()}, so a maintenance user
  * passes every inquiry rule while an inquiry user never passes a maintenance rule.
  *
@@ -85,20 +81,17 @@ import org.springframework.web.servlet.handler.AbstractHandlerMapping;
  * credentials. CSRF protection is therefore disabled: no cookie or session carries authority, so a
  * forged cross-site request has nothing to ride on. There is no CORS configuration, because the
  * browser reaches the API only from the same origin (nginx in Compose, the Vite proxy in development),
- * so no cross-origin request is ever granted. Spring MVC itself rejects an authenticated cross-origin
- * preflight and a request whose {@code Origin} header cannot be parsed; every handler mapping answers
- * those with 403 {@code APP0403} problem+json from {@link ProblemCorsProcessor}, which
- * {@link #problemCorsProcessorInstaller(ObjectProvider)} installs, instead of Spring's plain-text
- * {@code Invalid CORS request}. An anonymous preflight never gets that far: it is answered 401 like any
- * anonymous request to a protected path.
- * Logout and the request cache are disabled too: there is no session to end and no login page to
- * return to, and the default logout filter would otherwise answer {@code POST /logout} with a redirect
- * rather than letting an unknown path reach the 404 of the MVC layer. The default security headers
- * stay in place.
+ * so no cross-origin request is ever granted. The cross-origin requests Spring MVC itself rejects are
+ * answered 403 {@code APP0403} problem+json by {@link ProblemCorsProcessor}, which
+ * {@link #problemCorsProcessorInstaller(ObjectProvider)} installs on every handler mapping. An
+ * anonymous preflight never gets that far: it is answered 401 like any anonymous request to a
+ * protected path. Logout and the request cache are disabled too: there is no session to end and no
+ * login page to return to, and the default logout filter would otherwise answer {@code POST /logout}
+ * with a redirect rather than letting an unknown path reach the 404 of the MVC layer. The default
+ * security headers stay in place.
  *
- * <p><b>401 and 403 bodies.</b> One {@link ProblemAuthenticationEntryPoint} serves both the Basic
- * filter (missing or bad credentials) and the exception translation filter (an anonymous request to a
- * protected path), so the two answer identically: 401 {@code APP0401} "Sign in required.". A
+ * <p><b>401 and 403 bodies.</b> One {@link ProblemAuthenticationEntryPoint} answers missing or bad
+ * credentials and an anonymous request to a protected path alike: 401 {@code APP0401}. A
  * {@code WWW-Authenticate: Basic realm="customer-master"} challenge is added only when the request
  * carries no {@value #X_REQUESTED_WITH} header: the SPA always sends
  * {@code X-Requested-With: XMLHttpRequest}, so the browser never shows its native sign-in prompt,
@@ -189,7 +182,6 @@ public class SecurityConfig {
      * Creates the configuration. Spring instantiates it; it holds no state.
      */
     public SecurityConfig() {
-        // All collaborators arrive as bean-method parameters.
     }
 
     /**
@@ -282,7 +274,17 @@ public class SecurityConfig {
                 .csrf(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
-                .httpBasic(basic -> basic.authenticationEntryPoint(entryPoint))
+                // The strict converter turns a Basic header without its space separator, and a
+                // password longer than BCrypt verifies, into the same 401 as bad credentials.
+                .httpBasic(basic -> basic
+                        .authenticationEntryPoint(entryPoint)
+                        .withObjectPostProcessor(new ObjectPostProcessor<BasicAuthenticationFilter>() {
+                            @Override
+                            public <O extends BasicAuthenticationFilter> O postProcess(O filter) {
+                                filter.setAuthenticationConverter(new StrictBasicAuthenticationConverter());
+                                return filter;
+                            }
+                        }))
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(entryPoint)
                         .accessDeniedHandler(accessDenied))
@@ -375,6 +377,67 @@ public class SecurityConfig {
             }
             problems.write(response, problems.create(HttpStatus.UNAUTHORIZED, CODE_UNAUTHORIZED,
                     List.of(), request.getRequestURI()));
+        }
+    }
+
+    /**
+     * Reads HTTP Basic credentials through Spring's {@link BasicAuthenticationConverter} but rejects,
+     * with {@link BadCredentialsException}, two inputs Spring accepts, so the Basic filter answers them
+     * 401 {@code APP0401} through {@link ProblemAuthenticationEntryPoint}:
+     * <ul>
+     *   <li>a header starting with {@code Basic} that does not continue with a space, such as
+     *       {@code Basic!<token>} or {@code Basic<TAB><token>}: Spring decodes whatever follows the sixth
+     *       character, so a malformed header would still sign in;</li>
+     *   <li>a password over {@value UsersProperties#MAX_PASSWORD_BYTES} UTF-8 bytes: BCrypt verifies only
+     *       that many, so a longer password would match on its prefix.</li>
+     * </ul>
+     * Everything else stays Spring's: no header or another scheme yields {@code null} and the request
+     * stays anonymous, the scheme name is case-insensitive, and an empty, undecodable or colon-less
+     * token is rejected. No exception message carries the username or the password. The only state is
+     * the stateless delegate, so one instance serves every request.
+     */
+    static final class StrictBasicAuthenticationConverter implements AuthenticationConverter {
+
+        /** The scheme name, matched case-insensitively. */
+        private static final String SCHEME = "Basic";
+
+        /** Decodes the token as UTF-8 and attaches the web authentication details. */
+        private final BasicAuthenticationConverter delegate;
+
+        /** Creates the converter over Spring's default Basic decoding. */
+        StrictBasicAuthenticationConverter() {
+            this.delegate = new BasicAuthenticationConverter();
+        }
+
+        /**
+         * Reads the Basic credentials of one request.
+         *
+         * @param request the request
+         * @return the unauthenticated username and password, or {@code null} when the request carries no
+         *     {@code Authorization} header or one of another scheme
+         * @throws BadCredentialsException when the header is Basic but malformed, or the password is
+         *     longer than {@value UsersProperties#MAX_PASSWORD_BYTES} UTF-8 bytes
+         */
+        @Override
+        @Nullable
+        public UsernamePasswordAuthenticationToken convert(HttpServletRequest request) {
+            String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+            if (header == null) {
+                return null;
+            }
+            String trimmed = header.trim();
+            if (!trimmed.regionMatches(true, 0, SCHEME, 0, SCHEME.length())) {
+                return null;
+            }
+            if (trimmed.length() > SCHEME.length() && trimmed.charAt(SCHEME.length()) != ' ') {
+                throw new BadCredentialsException("Basic authentication scheme is not followed by a space");
+            }
+            UsernamePasswordAuthenticationToken token = delegate.convert(request);
+            if (token != null && token.getCredentials() instanceof String password
+                    && password.getBytes(StandardCharsets.UTF_8).length > UsersProperties.MAX_PASSWORD_BYTES) {
+                throw new BadCredentialsException("Basic authentication password is too long for BCrypt");
+            }
+            return token;
         }
     }
 

@@ -19,61 +19,43 @@ import org.springframework.validation.annotation.Validated;
 
 /**
  * The HTTP Basic users of the Customer Master API, bound from {@value #PREFIX} and validated when
- * the web application starts.
- *
- * <p><b>What it replaces.</b> The IBM i application authenticated nobody. Its mode was a parameter
- * asserted by the caller, and PMTCUSTR notes that in production it "would be called from a tested
- * menu or some program that enforced security". Every write was stamped with the job's user
- * profile: MTNCUSTR assigns {@code CURR_USER} to {@code CHGUSER}, and the column is
- * {@code ChgUser varchar(18) not null DEFAULT USER}. The target configures its users here, each with
- * exactly one {@link Role}, and stamps the authenticated principal into {@code chguser}.
+ * the web application starts. Each user holds exactly one {@link Role}, whose documentation records how
+ * the source's modes became roles, and its username is the change stamp {@link CurrentUser#name()}
+ * reports.
  *
  * <p><b>Binding.</b> {@code application.yml} declares one inquiry and one maintenance user whose
  * username and password come from the {@code CM_INQUIRY_*} and {@code CM_MAINTENANCE_*} environment
  * variables with empty defaults, so the web application refuses to start until they are supplied.
  * This record carries no default user and no password; local values come from Compose or from the
  * test profile.
- * <pre>{@code
- * customer-master:
- *   security:
- *     users:
- *       - username: ${CM_MAINTENANCE_USER:}
- *         password: ${CM_MAINTENANCE_PASSWORD:}
- *         role: MAINTENANCE
- * }</pre>
  *
- * <p><b>Rules that bind every layer.</b> Any violation fails startup with a
- * {@code BindValidationException} naming the property:
+ * <p><b>Guards.</b> Any violation fails startup with a {@code BindValidationException} naming the
+ * property:
  * <ul>
- *   <li>At least one user is configured.</li>
- *   <li>A username is 1 to {@value #MAX_USERNAME_LENGTH} characters, because it is written verbatim
- *       into {@code custmast.chguser varchar(18)}, the width the source column had.</li>
- *   <li>A username matches {@value #USERNAME_PATTERN}: no blanks, no {@code *}, nothing outside
- *       ASCII letters, digits, {@code .}, {@code _} and {@code -}.</li>
- *   <li>No username is {@value #SYSTEM_USER}, the stamp of the seed rows and of the test-data
- *       generator. The pattern already excludes {@code *}; the explicit check states the reservation,
- *       so no signed-in user can make a change look like a system load.</li>
- *   <li>Usernames are unique, ignoring case, because Spring Security's in-memory user store keys
- *       users by their lower-cased name, so {@code Sales} and {@code sales} would collide there.</li>
- *   <li>Every user has a non-blank password and a role. An unknown role name already fails enum
- *       conversion while binding.</li>
- *   <li>A password is at most {@value #MAX_PASSWORD_BYTES} bytes in UTF-8, the most BCrypt encodes;
- *       a longer one would otherwise fail later, inside {@code SecurityConfig}, with an error naming
- *       no setting. The check is the derived property {@code passwordWithinEncoderLimit}, so the
- *       failure names {@code customer-master.security.users[i]} and reports the value
- *       {@code false}, never the password.</li>
+ *   <li>at least one user ({@code @NotEmpty});</li>
+ *   <li>a username of 1 to {@value #MAX_USERNAME_LENGTH} characters, the width of
+ *       {@code custmast.chguser varchar(18)} ({@code @Size});</li>
+ *   <li>a username matching {@value #USERNAME_PATTERN} ({@code @Pattern});</li>
+ *   <li>no username {@value #SYSTEM_USER} ({@link User#isNotSystemUser()}), stated explicitly although
+ *       the pattern already excludes {@code *}, so no signed-in user can make a change look like a
+ *       system load;</li>
+ *   <li>usernames unique, ignoring case ({@link #isUsernamesUnique()});</li>
+ *   <li>a non-blank password and a role ({@code @NotBlank}, {@code @NotNull}; an unknown role name
+ *       already fails enum conversion);</li>
+ *   <li>a password of at most {@value #MAX_PASSWORD_BYTES} UTF-8 bytes, checked here so an over-long
+ *       one fails naming its setting rather than later inside {@code SecurityConfig}
+ *       ({@link User#isPasswordWithinEncoderLimit()}).</li>
  * </ul>
  *
- * <p><b>Passwords.</b> They are held here only as configured. {@code SecurityConfig} BCrypt-encodes
- * each one once, at startup, into its in-memory user store. {@link User#toString()} masks the
- * password, so binding-failure reports and log lines never print it.
+ * <p><b>Passwords stay private.</b> A failed length check reports the value {@code false}, never the
+ * password, and {@link User#toString()} masks it, so binding-failure reports and log lines never print
+ * it. {@code SecurityConfig} BCrypt-encodes each password once, at startup.
  *
  * <p><b>Registration.</b> The record carries no stereotype annotation, and the application declares
  * no {@code @ConfigurationPropertiesScan}. {@code SecurityConfig}, which exists only in a servlet web
- * application, is its only registrar through
- * {@code @EnableConfigurationProperties(UsersProperties.class)}. In the non-web generator profile it
- * is therefore never bound or validated, and invalid {@code customer-master.security.*} values cannot
- * stop a data load. No class outside that conditional configuration may depend on it.
+ * application, is its only registrar, so the non-web generator profile never binds or validates it
+ * and invalid {@code customer-master.security.*} values cannot stop a data load. No class outside that
+ * conditional configuration may depend on it.
  *
  * @param users the configured users, in configuration order; {@code null} only when none is bound,
  *              which validation reports. A bound list is copied and unmodifiable.

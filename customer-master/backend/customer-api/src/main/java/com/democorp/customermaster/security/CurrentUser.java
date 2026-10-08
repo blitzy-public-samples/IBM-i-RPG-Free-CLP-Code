@@ -18,53 +18,37 @@ import org.springframework.stereotype.Component;
 /**
  * The authenticated principal of the current request: who is signed in, and with which role.
  *
- * <p><b>What it replaces.</b> The IBM i maintenance program stamped every write with the job's user
- * profile. MTNCUSTR reads {@code CURR_USER} from its program status data structure (PSDS position 358)
- * and assigns it to {@code CHGUSER} both when it adds a customer ({@code AddRecd}) and inside the
- * conditional {@code UPDATE CUSTMAST ... CHGUSER = :CURR_USER} ({@code UpdateRecd}); the detail window
- * printed the same profile through the DDS {@code USER} keyword, and the column itself defaulted to
- * {@code USER} ({@code ChgUser varchar(18) not null DEFAULT USER} in {@code Custmast2.sql}). The target
- * has no job user, so the identity comes from authentication instead: the HTTP Basic principal that
- * Spring Security has bound to the request thread.
+ * <p>It replaces the job user the source stamped: MTNCUSTR assigns {@code CURR_USER}, read from its
+ * program status data structure [5250_Subfile/MTNCUSTR.SQLRPGLE:128], to {@code CHGUSER} on add and on
+ * update [5250_Subfile/MTNCUSTR.SQLRPGLE:557,588], and the column defaulted to {@code USER}
+ * [5250_Subfile/Custmast2.sql:21]. The target has no job user, so the identity is the HTTP Basic
+ * principal Spring Security binds to the request thread. {@link Role} records how the source's modes
+ * became roles.
  *
- * <p><b>The only source of {@code chguser}.</b> {@link #name()} is the one value written into
- * {@code custmast.chguser} by the application. It is never the database role (the column default
- * {@code CURRENT_USER} serves only inserts made outside the application), and never a request field
- * (unknown properties such as {@code chgUser} are rejected before they reach a service).
- * {@code CustomerMaintenanceService} writes it in the same {@code INSERT} or {@code UPDATE} statement as
- * the customer data and repeats it in the {@code customer.write action=... user=...} log line after the
- * commit; {@code SessionController} returns it, with {@link #roles()}, as
- * {@code {"username": "sales", "roles": ["MAINTENANCE"]}}. For HTTP Basic the name is the configured
- * username (1 to 18 characters, validated by {@code UsersProperties}, so it always fits the
- * {@code varchar(18)} column), whatever case the client typed, because the user details service returns
- * the stored user.
+ * <p><b>The only source of {@code chguser}.</b> {@link #name()} is the one value the application writes
+ * into {@code custmast.chguser}: never the database role (the column default {@code CURRENT_USER}
+ * serves only inserts made outside the application) and never a request field (unknown properties such
+ * as {@code chgUser} are rejected before they reach a service). It is the configured username, whatever
+ * case the client typed, because the user store returns the configured user, so it always fits the
+ * {@code varchar(18)} column that {@code UsersProperties} validates usernames against.
  *
- * <p><b>Roles are reported as granted, not as implied.</b> {@link #roles()} lists the
- * {@link Role} names behind the principal's {@code ROLE_} authorities without expanding the role
+ * <p><b>Roles are reported as granted, not as implied.</b> {@link #roles()} does not expand the role
  * hierarchy, so a maintenance user is {@code ["MAINTENANCE"]}, not {@code ["MAINTENANCE", "INQUIRY"]}.
- * The browser derives its Inquiry or Maintenance mode from that list, while the hierarchy in
- * {@code SecurityConfig} still lets a maintenance user pass every inquiry rule.
+ * The browser derives its mode from that list, while the hierarchy in {@code SecurityConfig} still lets
+ * a maintenance user pass every inquiry rule.
  *
  * <p><b>An authentication must be bound.</b> Both methods throw {@link IllegalStateException} when the
  * current thread holds no authentication, an anonymous one, or one that is not authenticated. A request
  * that reaches a service has always been authenticated by the filter chain, so the exception signals a
- * programming error, never a user error, and is answered as 500 DEM9999. Code that runs outside a
- * request thread must bind a {@link SecurityContext} on its own thread before it calls a service that
- * uses this class; for example, a test that adds customers from worker threads sets
- * {@code SecurityContextHolder.setContext(...)} in each worker. The test-data generator never calls this
- * class: it stamps the fixed system identity {@code *SYSTEM*}, as LOADCUSTR did.
+ * programming error, never a user error, and is answered as 500 DEM9999. Code outside a request thread,
+ * such as a test that adds customers from worker threads, must bind a {@link SecurityContext} on its
+ * own thread first. The test-data generator never calls this class: it stamps {@code *SYSTEM*}, as
+ * LOADCUSTR did.
  *
  * <p><b>Context independence.</b> The bean has no state and no dependencies, and it imports nothing from
- * the web or controller layers. It is therefore created in every application context, including the
- * non-web generator profile, in which no security configuration exists, so services that inject it start
- * there as well. It reads the thread-bound {@link SecurityContextHolder} on every call, and is safe to
- * share between threads.
- *
- * <p>Usage, inside a request:
- * <pre>{@code
- * String stamp = currentUser.name();          // "sales"
- * List<String> roles = currentUser.roles();   // ["MAINTENANCE"]
- * }</pre>
+ * the web or controller layers, so it exists in every application context, the non-web generator
+ * profile included, and services that inject it start there as well. It reads the thread-bound
+ * {@link SecurityContextHolder} on every call, and is safe to share between threads.
  */
 @Component
 public class CurrentUser {
@@ -83,7 +67,6 @@ public class CurrentUser {
      * context, web or not.
      */
     public CurrentUser() {
-        // Stateless: every call reads the security context bound to the calling thread.
     }
 
     /**

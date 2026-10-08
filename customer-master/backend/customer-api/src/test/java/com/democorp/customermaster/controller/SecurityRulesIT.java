@@ -2,7 +2,9 @@ package com.democorp.customermaster.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
@@ -24,77 +27,53 @@ import org.springframework.lang.Nullable;
 import org.springframework.web.client.RestClient;
 
 /**
- * Proves, against the running server, that the API enforces the roles the IBM i mode letters became,
- * for every endpoint and every kind of caller, and that its 401 and 403 answers are the documented
- * problem bodies.
+ * Proves, against the running server, that the API enforces the roles the IBM i mode letters became
+ * for every endpoint and every caller (anonymous, {@code INQUIRY}, {@code MAINTENANCE}), that its 401
+ * {@code APP0401} and 403 {@code APP0403} answers are the documented problem bodies, and that a 401
+ * carries the Basic challenge only when the request has no {@code X-Requested-With} header.
  *
- * <p><b>What it replaces.</b> PMTCUSTR took its mode as a caller-asserted first parameter,
- * {@code pParmType} ({@code I}, {@code M} or {@code S}; {@code 5250_Subfile/PMTCUSTR.SQLRPGLE}, lines
- * 76-79), and trusted that "in a production environment, this would be called from a tested menu or
- * some program that enforced security" (lines 230-231). {@code I} gave 5=Display only, {@code M} added
- * 2=Edit and F6=Add ({@code 5250_Subfile/README.md}, lines 33-40), and MTNCUSTR's function code
- * {@code pMaintain} was whatever the caller passed. The target authenticates every request with
- * stateless HTTP Basic and authorizes it in {@code security/SecurityConfig}: {@code INQUIRY} reads,
- * {@code MAINTENANCE} (which implies {@code INQUIRY}) also reviews, adds and changes, so a caller can
- * no longer assert a mode it does not hold.
+ * <p><b>Trust boundary.</b> PMTCUSTR took its mode as a caller-asserted parameter, {@code pParmType}
+ * ({@code 5250_Subfile/PMTCUSTR.SQLRPGLE}, lines 76-79), and left enforcement outside the program:
+ * "In a production environment, this would be called from a tested menu or some program that
+ * enforced security" (lines 230-231), with access controlled "by whatever menuing or security system
+ * you have in place" ({@code 5250_Subfile/README.md}, lines 33-40). The API is now that boundary, so
+ * every rule is asserted on the wire, not through the UI. {@code MAINTENANCE} implies {@code INQUIRY}
+ * through the role hierarchy, so every {@code INQUIRY} read is open to both.
  *
- * <p><b>Rules under test</b>, in the order {@code SecurityConfig} evaluates them:
- * <table>
- *   <caption>Authorization rules</caption>
- *   <tr><th>Request</th><th>Required</th></tr>
- *   <tr><td>GET {@code /api/messages}, {@code /actuator/health/**}, {@code /v3/api-docs/**},
- *       {@code /swagger-ui/**}</td><td>public</td></tr>
- *   <tr><td>GET {@code /api/session}, {@code /api/customers}, {@code /api/customers/{custId}},
- *       {@code /api/states}</td><td>{@code INQUIRY}</td></tr>
- *   <tr><td>POST {@code /api/customers/review}, POST {@code /api/customers},
- *       PUT {@code /api/customers/{custId}}</td><td>{@code MAINTENANCE}</td></tr>
- *   <tr><td>anything else, {@code /error} requested directly included</td><td>authenticated</td></tr>
- * </table>
- * A 401 is {@code APP0401} "Sign in required." and carries {@code WWW-Authenticate: Basic
- * realm="customer-master"} only when the request has no {@code X-Requested-With} header, so the SPA
- * never triggers the browser's own sign-in prompt while curl and k6 are still challenged. A 403 is
- * {@code APP0403} "You are not authorized to perform this action.". Both are
- * {@code application/problem+json}, and authorization is decided before any request body is read, so
- * a denied write never reaches validation, consumes no customer id and changes no row.
+ * <p><b>Ordering.</b> {@link #endpointMatrix()} sends each request as an anonymous caller, then as
+ * {@value AbstractPostgresIT#INQUIRY_USER}, then as {@value AbstractPostgresIT#MAINTENANCE_USER}, and
+ * checks the stored rows after each call. The maintenance call comes last because it is the only one
+ * allowed to change the customer the matrix shares. Authorization is decided before any request body
+ * is read, so a denied write reaches no validation, consumes no customer id and changes no row.
  *
- * <p><b>Shape.</b> {@link #endpointMatrix()} sends each request as an anonymous caller, then as the
- * {@code INQUIRY} user {@value AbstractPostgresIT#INQUIRY_USER}, then as the {@code MAINTENANCE} user
- * {@value AbstractPostgresIT#MAINTENANCE_USER}, and checks the status, the problem body and the stored
- * rows after each call. The maintenance call comes last because it is the only one allowed to change
- * the customer the matrix shares. The focused tests then pin the session payload, bad credentials, the
- * challenge rule, the order of authentication and validation, and the two "authenticated" fallbacks.
+ * <p><b>{@code /error}.</b> The rules permit only the container's ERROR dispatch to {@code /error}, so
+ * the forward is never itself rejected and the original 401 or 403 stands; a direct request to
+ * {@code /error} is not public and needs authentication like any path no rule names.
  *
- * <p><b>Context.</b> The class runs in the base context of {@link AbstractPostgresIT}: no
- * {@code @MockitoBean}, no {@code @Import} and no property override, so it adds no context variant.
- * Review therefore runs against the default stub address client, which echoes a non-fixture address
- * in upper case, so a valid review answers 200. Test databases hold no seed rows, so
- * {@link #createCustomer()} adds the one customer the by-id requests need; its id is always
- * {@value DatabaseCleaner#FIRST_INTERACTIVE_ID}.
+ * <p><b>Context.</b> The base context of {@link AbstractPostgresIT}: no {@code @MockitoBean},
+ * {@code @Import} or property override, so the class adds no context variant. Review therefore runs
+ * against the default stub address client, which echoes a non-fixture address, so a valid review
+ * answers 200. Test databases hold no seed rows, so {@link #createCustomer()} adds the one customer
+ * the by-id requests need; its id is always {@value DatabaseCleaner#FIRST_INTERACTIVE_ID}.
  */
 class SecurityRulesIT extends AbstractPostgresIT {
 
-    /** The customer collection path. */
     private static final String CUSTOMERS = "/api/customers";
 
     /** Placeholder in a matrix path for the id of the customer {@link #createCustomer()} adds. */
     private static final String ID_VARIABLE = "{id}";
 
-    /** The path of the one customer the matrix reads and changes. */
     private static final String CUSTOMER = CUSTOMERS + "/" + ID_VARIABLE;
 
     /** Catalog key of a request the API cannot serve, a missing route included. */
     private static final String APP0400 = "APP0400";
 
-    /** Catalog key of a missing or rejected sign-in. */
     private static final String APP0401 = "APP0401";
 
-    /** Catalog key of an authenticated user without the required role. */
     private static final String APP0403 = "APP0403";
 
-    /** The catalog text of {@value #APP0401}. */
     private static final String SIGN_IN_REQUIRED = "Sign in required.";
 
-    /** The catalog text of {@value #APP0403}. */
     private static final String NOT_AUTHORIZED = "You are not authorized to perform this action.";
 
     /** The {@value #APP0400} detail of a path no route or static resource serves. */
@@ -103,7 +82,6 @@ class SecurityRulesIT extends AbstractPostgresIT {
     /** The {@value #APP0400} detail of a direct request to {@code /error}, which carries no error attributes. */
     private static final String ERROR_NOT_FOUND = "Request is not valid: not found";
 
-    /** The exact Basic challenge a non-SPA client receives with a 401. */
     private static final String BASIC_CHALLENGE = "Basic realm=\"customer-master\"";
 
     /**
@@ -114,22 +92,18 @@ class SecurityRulesIT extends AbstractPostgresIT {
             + "\"state\":\"IL\",\"zip\":\"61602\",\"corpPhone\":\"(309) 555-0100\",\"acctMgr\":\"pat quinn\","
             + "\"acctPhone\":\"(309) 555-0101\",\"active\":\"Y\"";
 
-    /** Body of {@code POST /api/customers}: the nine fields. */
     private static final String ADD_BODY = "{" + FIELDS + "}";
 
-    /** Body of {@code POST /api/customers/review}: an EDIT review of the nine fields. */
     private static final String REVIEW_BODY = "{\"purpose\":\"EDIT\"," + FIELDS + "}";
 
-    /** Body of {@code PUT /api/customers/{id}}: the nine fields and the version the setup row has. */
     private static final String UPDATE_BODY = "{" + FIELDS + ",\"version\":0}";
 
-    /** Counts the stored customers. */
     private static final String COUNT_CUSTOMERS = "SELECT count(*) FROM custmast";
 
-    /** Reads the stored version of one customer. */
     private static final String ROW_VERSION = "SELECT row_version FROM custmast WHERE custid = ?";
 
-    /** The id of the customer {@link #createCustomer()} adds before each test. */
+    private static final int BCRYPT_LIMIT_BYTES = 72;
+
     private String custId;
 
     /** The callers of the matrix, in the order each request is sent. */
@@ -154,10 +128,8 @@ class SecurityRulesIT extends AbstractPostgresIT {
         /** An update of the setup customer committed: still one customer, now at version 1. */
         UPDATES_CUSTOMER(1, 1L);
 
-        /** Expected {@code count(*)} of {@code custmast}. */
         private final long customers;
 
-        /** Expected {@code row_version} of the setup customer. */
         private final long setupRowVersion;
 
         Effect(long customers, long setupRowVersion) {
@@ -331,6 +303,109 @@ class SecurityRulesIT extends AbstractPostgresIT {
             ResponseEntity<String> publicRead = send(client, HttpMethod.GET, "/api/messages", null);
             assertProblem(publicRead, HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, "/api/messages");
         }
+    }
+
+    /**
+     * A Basic header whose scheme is not followed by a space is rejected like bad credentials, although
+     * its token holds valid credentials that sign in after {@code "Basic "}.
+     *
+     * @param scheme what precedes the token
+     */
+    @ParameterizedTest(name = "scheme <{0}>")
+    @ValueSource(strings = {"Basic!", "BasicX", "Basic\t", "Basic"})
+    void basicSchemeWithoutItsSpaceSeparatorIsRejected(String scheme) {
+        String token = basicToken(MAINTENANCE_USER, MAINTENANCE_PASSWORD);
+        expectStatus(send(withAuthorization("Basic " + token, false), HttpMethod.GET, CUSTOMERS, null),
+                HttpStatus.OK);
+
+        assertSignInRejected(scheme + token);
+    }
+
+    /** Both configured passwords are exactly at the BCrypt limit, and each signs in. */
+    @Test
+    void passwordsOfExactlyTheBcryptLimitSignIn() {
+        List<String[]> limitUsers = List.of(
+                new String[] {LIMIT_ASCII_USER, LIMIT_ASCII_PASSWORD},
+                new String[] {LIMIT_MULTIBYTE_USER, LIMIT_MULTIBYTE_PASSWORD});
+        for (String[] user : limitUsers) {
+            assertThat(user[1].getBytes(StandardCharsets.UTF_8))
+                    .as("UTF-8 bytes of the password of %s", user[0])
+                    .hasSize(BCRYPT_LIMIT_BYTES);
+            JsonNode session = json(expectStatus(
+                    send(as(user[0], user[1]), HttpMethod.GET, "/api/session", null), HttpStatus.OK));
+            assertThat(session.path("username").asText()).isEqualTo(user[0]);
+        }
+    }
+
+    /**
+     * A limit-length password with any suffix is rejected like bad credentials, although BCrypt alone
+     * would match it on its first {@value #BCRYPT_LIMIT_BYTES} bytes.
+     *
+     * @param username the user whose password is exactly at the limit
+     * @param limitPassword that password
+     * @param suffix what is appended to it
+     */
+    @ParameterizedTest(name = "{0} + <{2}>")
+    @MethodSource("overLimitPasswords")
+    void passwordOverTheBcryptLimitIsRejected(String username, String limitPassword, String suffix) {
+        assertSignInRejected("Basic " + basicToken(username, limitPassword + suffix));
+    }
+
+    static Stream<Arguments> overLimitPasswords() {
+        return Stream.of(
+                Arguments.of(LIMIT_ASCII_USER, LIMIT_ASCII_PASSWORD, "x"),
+                Arguments.of(LIMIT_ASCII_USER, LIMIT_ASCII_PASSWORD, "\u00e9"),
+                Arguments.of(LIMIT_MULTIBYTE_USER, LIMIT_MULTIBYTE_PASSWORD, "x"),
+                Arguments.of(LIMIT_MULTIBYTE_USER, LIMIT_MULTIBYTE_PASSWORD, "\u00e9"));
+    }
+
+    /**
+     * Asserts that a raw {@code Authorization} header is answered as bad credentials are: 401
+     * {@code APP0401} on a read, challenged only without {@code X-Requested-With}, on a write that
+     * changes nothing, and on a public endpoint.
+     *
+     * @param authorization the header value, sent verbatim
+     */
+    private void assertSignInRejected(String authorization) {
+        ResponseEntity<String> read =
+                send(withAuthorization(authorization, false), HttpMethod.GET, CUSTOMERS, null);
+        assertProblem(read, HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, CUSTOMERS);
+        assertThat(read.getHeaders().get(HttpHeaders.WWW_AUTHENTICATE)).containsExactly(BASIC_CHALLENGE);
+
+        ResponseEntity<String> spaRead =
+                send(withAuthorization(authorization, true), HttpMethod.GET, CUSTOMERS, null);
+        assertProblem(spaRead, HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, CUSTOMERS);
+        assertNoChallenge(spaRead);
+
+        ResponseEntity<String> write =
+                send(withAuthorization(authorization, false), HttpMethod.POST, CUSTOMERS, () -> ADD_BODY);
+        assertProblem(write, HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, CUSTOMERS);
+        assertStored(Effect.NONE, "after a POST with a rejected Authorization header");
+
+        ResponseEntity<String> publicRead =
+                send(withAuthorization(authorization, false), HttpMethod.GET, "/api/messages", null);
+        assertProblem(publicRead, HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, "/api/messages");
+    }
+
+    /**
+     * Returns a client that sends {@code authorization} verbatim, unlike {@code as(...)}, which always
+     * formats a well-formed Basic header.
+     *
+     * @param authorization the {@code Authorization} header value
+     * @param xhr whether to send {@code X-Requested-With: XMLHttpRequest} as well
+     * @return a new client bound to {@link #baseUrl()}
+     */
+    private RestClient withAuthorization(String authorization, boolean xhr) {
+        RestClient.Builder builder = baseClient().defaultHeader(HttpHeaders.AUTHORIZATION, authorization);
+        if (xhr) {
+            builder = builder.defaultHeader(X_REQUESTED_WITH, XML_HTTP_REQUEST);
+        }
+        return builder.build();
+    }
+
+    private static String basicToken(String username, String password) {
+        byte[] credentials = (username + ":" + password).getBytes(StandardCharsets.UTF_8);
+        return Base64.getEncoder().encodeToString(credentials);
     }
 
     /**
@@ -524,11 +599,6 @@ class SecurityRulesIT extends AbstractPostgresIT {
         assertThat(problem.path("instance").asText()).isEqualTo(instance);
     }
 
-    /**
-     * Asserts that a response carries no {@code WWW-Authenticate} header.
-     *
-     * @param response the response
-     */
     private static void assertNoChallenge(ResponseEntity<String> response) {
         assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE))
                 .as("WWW-Authenticate on %s: %s", response.getStatusCode(),
@@ -536,13 +606,6 @@ class SecurityRulesIT extends AbstractPostgresIT {
                 .isFalse();
     }
 
-    /**
-     * Asserts a response's status and returns the response.
-     *
-     * @param response the response
-     * @param status the expected status
-     * @return {@code response}
-     */
     private static ResponseEntity<String> expectStatus(ResponseEntity<String> response, HttpStatus status) {
         assertThat(response.getStatusCode()).as("status (body %s)", response.getBody()).isEqualTo(status);
         return response;
@@ -561,12 +624,6 @@ class SecurityRulesIT extends AbstractPostgresIT {
         assertThat(version).as("row_version of %s %s", custId, when).isEqualTo(effect.setupRowVersion);
     }
 
-    /**
-     * Returns the text of each element of a JSON array.
-     *
-     * @param array the node expected to be an array
-     * @return the element texts, in order
-     */
     private static List<String> textValues(JsonNode array) {
         assertThat(array.isArray()).as("an array: %s", array).isTrue();
         List<String> values = new ArrayList<>();
@@ -574,12 +631,6 @@ class SecurityRulesIT extends AbstractPostgresIT {
         return values;
     }
 
-    /**
-     * Returns the member names of a JSON object.
-     *
-     * @param object the node expected to be an object
-     * @return its member names, in order
-     */
     private static List<String> fieldNames(JsonNode object) {
         assertThat(object.isObject()).as("an object: %s", object).isTrue();
         List<String> names = new ArrayList<>();

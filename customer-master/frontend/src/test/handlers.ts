@@ -396,6 +396,9 @@ const BASIC_CHALLENGE = 'Basic realm="customer-master"';
 /** The standard base64 alphabet in sextet order; the URL-safe `-` and `_` are not in it. */
 const BASE64_DIGITS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+/** The longest password, in UTF-8 bytes, the server verifies. */
+const MAX_PASSWORD_BYTES = 72;
+
 /**
  * What the server's request firewall rejects in the raw, still percent-encoded
  * path before any authentication, compared with the path lowercased: `;` and
@@ -469,12 +472,14 @@ function decodeBase64(text: string): Uint8Array | undefined {
 /**
  * Authenticates a request as the server's HTTP Basic filter does. The header
  * is trimmed as Java trims; a scheme other than `Basic`, in any case, carries
- * no credentials. Otherwise the token after `Basic` and one separator
- * character is decoded by {@link decodeBase64} and read as UTF-8, a malformed
- * sequence becoming U+FFFD and a BOM kept, then split at its first `:`, since
- * a password may contain one. The username matches {@link users} in any case,
- * the password exactly. A bare `Basic`, an undecodable token, a missing `:`,
- * an unknown user or a wrong password is rejected.
+ * no credentials. Otherwise `Basic` must be followed by exactly one space, and
+ * the token after it is decoded by {@link decodeBase64} and read as UTF-8, a
+ * malformed sequence becoming U+FFFD and a BOM kept, then split at its first
+ * `:`, since a password may contain one. The username matches {@link users} in
+ * any case, the password exactly. A bare `Basic`, another separator, an
+ * undecodable token, a missing `:`, a password over 72 UTF-8 bytes
+ * ({@link MAX_PASSWORD_BYTES}), which BCrypt would truncate, an unknown user
+ * or a wrong password is rejected.
  */
 function authenticate(request: Request): Authentication {
   const value = request.headers.get('Authorization');
@@ -485,7 +490,7 @@ function authenticate(request: Request): Authentication {
   if (header.slice(0, 5).toLowerCase() !== 'basic') {
     return { outcome: 'anonymous' };
   }
-  const bytes = header.length === 5 ? undefined : decodeBase64(header.slice(6));
+  const bytes = header.charAt(5) === ' ' ? decodeBase64(header.slice(6)) : undefined;
   if (bytes === undefined) {
     return { outcome: 'rejected' };
   }
@@ -496,6 +501,9 @@ function authenticate(request: Request): Authentication {
   }
   const username = token.slice(0, colon).toLowerCase();
   const password = token.slice(colon + 1);
+  if (new TextEncoder().encode(password).length > MAX_PASSWORD_BYTES) {
+    return { outcome: 'rejected' };
+  }
   const user = users.find((u) => u.username.toLowerCase() === username);
   if (user === undefined || user.password !== password) {
     return { outcome: 'rejected' };

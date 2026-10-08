@@ -1,33 +1,24 @@
 /**
  * e2e sign-in: the shared Playwright fixtures and helpers of the Customer Master end-to-end suite.
+ * Every spec imports `test` and `expect` from here, never from `@playwright/test` directly.
  *
- * Every spec under `tests/` imports `test` and `expect` from here (`'../fixtures/auth'`) and never
- * from `@playwright/test` directly, so sign-in, the setup API context and the toast lookup exist
- * exactly once.
- *
- * Why sign-in exists. The IBM i application has no authentication: the caller asserts the mode
- * (I, M or S) in PMTCUSTR's first parameter, and the program leaves security to "a tested menu or
- * some program that enforced security" [5250_Subfile/PMTCUSTR.SQLRPGLE:230-231]. The readme gives
- * Inquiry to the general user population and Maintenance to Sales [5250_Subfile/README.md:33-40].
- * The target authenticates every request with HTTP Basic and derives the mode from the session
- * roles, so a spec signs in as one of two users:
- * - `asInquiry`: the general user, role INQUIRY (Inquiry mode, 5=Display only).
- * - `asMaintenance`: the Sales user, role MAINTENANCE (Maintenance mode, 2=Edit, 5=Display, F6=Add).
- * A customer added through the API is stamped with the authenticated principal as `chgUser`, where
- * MTNCUSTR stamped the job user [5250_Subfile/MTNCUSTR.SQLRPGLE:548-566].
+ * The IBM i application has no authentication: the caller asserts the mode, and the program leaves
+ * security to "a tested menu or some program that enforced security"
+ * [5250_Subfile/PMTCUSTR.SQLRPGLE:230-231]; the readme gives Inquiry to general users and
+ * Maintenance to Sales [5250_Subfile/README.md:33-40].
+ * The target authenticates every request with HTTP Basic, derives the mode from the session roles,
+ * and stamps the authenticated principal as `chgUser` where MTNCUSTR stamped the job user
+ * [5250_Subfile/MTNCUSTR.SQLRPGLE:548-566].
  *
  * Constraints every spec inherits:
- * - **Credentials live in browser memory only.** `AuthProvider` hands them to a module variable of
- *   the SPA's `api/client.ts`; nothing is stored in a cookie or Web Storage. A `page.goto`, a
- *   reload or a new tab after sign-in therefore signs the user out. Sign-in rides the guard
- *   redirect of the start path (`startPath` option), and a spec moves on only by clicking links,
- *   buttons or pressing keys.
- * - **One origin.** Pages and the setup API context both go through `baseURL` (the frontend, whose
- *   nginx proxies `/api` to the backend). Nothing here reaches the database: specs create the
- *   customers they modify with `createCustomer` and never touch a seed row they change.
- * - **No frontend at run time.** The Compose `e2e` service mounts only `./e2e`. The one import from
- *   the frontend tree is type-only, which Playwright's TypeScript transform erases (and
- *   `verbatimModuleSyntax` keeps type-only), so this file loads without `../../frontend`.
+ * - **Credentials live in browser memory only**, never in a cookie or Web Storage, so a
+ *   `page.goto`, a reload or a new tab after sign-in signs the user out. Sign-in rides the guard
+ *   redirect of `startPath`; a spec then moves on only by links, buttons and keys.
+ * - **One origin.** Pages and the setup API context go through `baseURL` (the frontend, whose nginx
+ *   proxies `/api`), never the database; specs create the customers they modify with
+ *   `createCustomer`.
+ * - **No frontend at run time.** The Compose `e2e` service mounts only `./e2e`; the one import from
+ *   the frontend tree is type-only, which Playwright's TypeScript transform erases.
  *
  * @example
  * ```ts
@@ -53,18 +44,19 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
+  type PlaywrightWorkerOptions,
 } from '@playwright/test';
-import { randomInt } from 'node:crypto';
+import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createServer, request as httpRequest, type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import type { AddressInfo } from 'node:net';
+import { pipeline } from 'node:stream';
 // Type-only by necessity: the Compose e2e container has no frontend tree, and only an erased
 // import keeps this module loadable there. Never import a runtime value from the frontend.
 import type { components } from '../../frontend/src/api/schema';
 
 export { expect };
 export type { APIRequestContext, BrowserContext, Locator, Page };
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 /**
  * The nine customer data fields a client may send on add, review and update (the OpenAPI
@@ -87,10 +79,8 @@ export type UniqueName = { name: string; filter: string };
 /** The two live regions of `ToastRegion`, where every client and server message is published. */
 export type ToastLocators = { status: Locator; alert: Locator };
 
-/** Every one of the nine customer fields, each present with a string value. */
 type CompleteCustomerFields = { [K in keyof CustomerFields]-?: string };
 
-/** The fixtures this module adds to Playwright's built-in ones. */
 type Fixtures = {
   /**
    * The guarded path the signed-in fixtures open: `/` (menu), `/customers` (search) or
@@ -105,9 +95,7 @@ type Fixtures = {
   api: APIRequestContext;
 };
 
-// ---------------------------------------------------------------------------
-// Users
-// ---------------------------------------------------------------------------
+type WorkerFixtures = { traceGuard: void };
 
 /**
  * Reads a credential variable, falling back to its documented demo default when the variable is
@@ -119,23 +107,57 @@ function envOrDefault(name: string, fallback: string): string {
 }
 
 /**
+ * The Compose demo users, `inquiry`/`inquiry-demo` (INQUIRY) and `sales`/`sales-demo`
+ * (MAINTENANCE): the only credential values the suite carries.
+ */
+export const DEMO_USERS: Readonly<{ inquiry: E2EUser; maintenance: E2EUser }> = Object.freeze({
+  inquiry: Object.freeze({ username: 'inquiry', password: 'inquiry-demo' }),
+  maintenance: Object.freeze({ username: 'sales', password: 'sales-demo' }),
+});
+
+/**
  * The two users the suite signs in as. Each value comes from the variable the API's user list is
  * bound from (`CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER`,
  * `CM_MAINTENANCE_PASSWORD`), which the Compose `e2e` service passes through, so an override in
- * `.env` reaches both sides. Unset or blank, each falls back to the Compose demo defaults:
- * `inquiry`/`inquiry-demo` (INQUIRY) and `sales`/`sales-demo` (MAINTENANCE). These demo defaults
- * are the only credential values the suite carries.
+ * `.env` reaches both sides. Unset or blank, each falls back to its {@link DEMO_USERS} value.
  */
 export const USERS: Readonly<{ inquiry: E2EUser; maintenance: E2EUser }> = Object.freeze({
   inquiry: Object.freeze({
-    username: envOrDefault('CM_INQUIRY_USER', 'inquiry'),
-    password: envOrDefault('CM_INQUIRY_PASSWORD', 'inquiry-demo'),
+    username: envOrDefault('CM_INQUIRY_USER', DEMO_USERS.inquiry.username),
+    password: envOrDefault('CM_INQUIRY_PASSWORD', DEMO_USERS.inquiry.password),
   }),
   maintenance: Object.freeze({
-    username: envOrDefault('CM_MAINTENANCE_USER', 'sales'),
-    password: envOrDefault('CM_MAINTENANCE_PASSWORD', 'sales-demo'),
+    username: envOrDefault('CM_MAINTENANCE_USER', DEMO_USERS.maintenance.username),
+    password: envOrDefault('CM_MAINTENANCE_PASSWORD', DEMO_USERS.maintenance.password),
   }),
 });
+
+/** Whether both {@link USERS} are exactly the {@link DEMO_USERS}, the only users traces may record. */
+function usesDemoUsers(): boolean {
+  return (['inquiry', 'maintenance'] as const).every(
+    (role) =>
+      USERS[role].username === DEMO_USERS[role].username && USERS[role].password === DEMO_USERS[role].password,
+  );
+}
+
+/**
+ * Refuses tracing unless the suite signs in as the {@link DEMO_USERS}: a trace records the entered
+ * passwords and `Authorization` headers, and the HTML report publishes it. The message names no
+ * credential.
+ *
+ * @param trace a `trace` option: a mode, or an object with `mode`; unset means `off`
+ * @throws Error when the mode is not `off` and a `CM_*` user is not its demo default
+ */
+export function assertTraceAllowed(trace: PlaywrightWorkerOptions['trace']): void {
+  const mode = (typeof trace === 'string' ? trace : trace?.mode) || 'off';
+  if (mode !== 'off' && !usesDemoUsers()) {
+    throw new Error(
+      `Trace mode "${mode}" is refused: traces record entered passwords and Authorization headers, and the ` +
+        'HTML report publishes them, so tracing (E2E_TRACE, --trace or UI mode) is allowed only while the ' +
+        'CM_* users are the demo defaults. Turn tracing off or unset the CM_* user overrides.',
+    );
+  }
+}
 
 /**
  * The `Authorization` value for `user`: `Basic` plus the base64 of `username:password` encoded as
@@ -145,11 +167,6 @@ function basicAuthorization(user: E2EUser): string {
   return `Basic ${Buffer.from(`${user.username}:${user.password}`, 'utf8').toString('base64')}`;
 }
 
-// ---------------------------------------------------------------------------
-// Sign-in
-// ---------------------------------------------------------------------------
-
-/** The public sign-in route the guard redirects a signed-out visitor to. */
 const SIGN_IN_PATH = '/sign-in';
 
 /**
@@ -175,19 +192,45 @@ function assertGuardedPath(path: string): void {
 }
 
 /**
- * Signs `user` in through the SPA's sign-in page and waits until `path` is shown.
+ * Enters `value` into the input `field` as typing would: it focuses the input, sets its value
+ * through the native setter and dispatches `input`, so React's `onChange` runs. Playwright renders
+ * the value of a `fill`, `type` or `insertText` into step titles, call logs and errors, which the
+ * HTML report keeps; an evaluation's argument appears in none of them, only in a trace, which
+ * {@link assertTraceAllowed} allows only with the {@link DEMO_USERS}. No message here carries `value`.
  *
- * Steps: open `path`, which the route guard redirects to `/sign-in` (with `path` as the return
- * location); fill "User" and "Password"; press "Sign in"; wait for the URL of `path` and for the
- * sign-in form to disappear, so the routed screen has rendered. A rejected sign-in (for example a
- * wrong password) leaves the page on `/sign-in`, and the URL assertion fails with a message that
- * names the username.
+ * @throws Error when `field` is not an editable `<input>`, or `value` exceeds its `maxLength`
+ */
+async function enterSecret(field: Locator, value: string): Promise<void> {
+  await expect(field).toBeEditable();
+  await field.evaluate((input, secret) => {
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error(`enterSecret: the field is a <${input.nodeName.toLowerCase()}>, not an <input>.`);
+    }
+    if (input.maxLength >= 0 && secret.length > input.maxLength) {
+      throw new Error(
+        `enterSecret: the value is longer than the field's maxLength of ${input.maxLength}, so a user could not type it either.`,
+      );
+    }
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    if (setValue === undefined) {
+      throw new Error('enterSecret: HTMLInputElement.prototype has no value setter.');
+    }
+    input.focus();
+    setValue.call(input, secret);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+}
+
+/**
+ * Signs `user` in through the sign-in page the route guard redirects `path` to, entering the
+ * password with {@link enterSecret}, and waits until `path` is shown with the sign-in form gone.
+ * A rejected sign-in leaves the page on `/sign-in`, and the URL assertion fails naming the username.
  *
  * After this call the spec must never call `page.goto` or `page.reload`: the credentials live in
- * the page's memory only, and either call discards them. Navigate by links, buttons and keys.
+ * the page's memory only, and either call discards them.
  *
  * @param page a page of a context whose `baseURL` is the frontend origin
- * @param user the credentials to type
+ * @param user the credentials to enter
  * @param path the guarded screen to land on: `/`, `/customers` or `/demo/selection`
  * @throws Error when `path` is not a guarded in-app path (see {@link assertGuardedPath})
  */
@@ -201,7 +244,7 @@ export async function signIn(page: Page, user: E2EUser, path = '/'): Promise<voi
   const target = new URL(path, page.url()).toString();
 
   await page.getByLabel('User', { exact: true }).fill(user.username);
-  await page.getByLabel('Password', { exact: true }).fill(user.password);
+  await enterSecret(page.getByLabel('Password', { exact: true }), user.password);
   const submit = page.getByRole('button', { name: 'Sign in', exact: true });
   await submit.click();
 
@@ -258,11 +301,6 @@ export function requireBaseURL(baseURL?: string): string {
   return baseURL;
 }
 
-// ---------------------------------------------------------------------------
-// Test data
-// ---------------------------------------------------------------------------
-
-/** Fixed lead of every generated filter, so suite-created customers are recognisable. */
 const FILTER_PREFIX = 'E2E';
 
 /** Random characters after the lead: 36^8 (about 2.8 x 10^12) combinations per filter. */
@@ -325,7 +363,6 @@ const CUSTOMER_DEFAULTS: Readonly<Omit<CompleteCustomerFields, 'name'>> = Object
   corpPhone: '(217) 555-0100',
 });
 
-/** The nine property names the API accepts in a customer body. */
 const CUSTOMER_FIELD_NAMES: ReadonlySet<string> = new Set(['name', ...Object.keys(CUSTOMER_DEFAULTS)]);
 
 /**
@@ -350,7 +387,6 @@ export function newCustomerFields(overrides: Partial<CustomerFields> = {}): Cust
   return { ...CUSTOMER_DEFAULTS, name: uniqueName('CUSTOMER').name, ...overrides };
 }
 
-/** Narrows a parsed JSON value to a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -375,7 +411,6 @@ function parseCustomerResponse(text: string, what: string): CustomerResponse {
   }
   const body = parsed;
 
-  /** Reads a required string member. */
   const str = (key: string): string => {
     const value = body[key];
     if (typeof value !== 'string') {
@@ -410,7 +445,6 @@ function parseCustomerResponse(text: string, what: string): CustomerResponse {
   };
 }
 
-/** A customer id: four characters of the base-36 alphabet. */
 const CUSTOMER_ID = /^[A-Z0-9]{4}$/;
 
 /**
@@ -469,9 +503,122 @@ export function toasts(page: Page): ToastLocators {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+/** Hop-by-hop headers (RFC 9110 section 7.6.1): they describe one connection and are never relayed. */
+const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-connection',
+  'proxy-authorization',
+  'transfer-encoding',
+  'te',
+  'trailer',
+  'upgrade',
+]);
+
+/** `headers` without the hop-by-hop ones, including any the `Connection` header names. */
+function endToEndHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
+  const named = (headers.connection ?? '').split(',').map((token) => token.trim().toLowerCase());
+  const relayed: OutgoingHttpHeaders = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined && !HOP_BY_HOP_HEADERS.has(name) && !named.includes(name)) {
+      relayed[name] = value;
+    }
+  }
+  return relayed;
+}
+
+/** Header carrying the forwarder's per-run token; it is checked, then never relayed. */
+const FORWARDER_TOKEN_HEADER = 'x-e2e-forwarder-token';
+
+/** `headers` holds this forwarder's token, compared in constant time. */
+function hasForwarderToken(headers: IncomingHttpHeaders, token: Buffer): boolean {
+  const presented = headers[FORWARDER_TOKEN_HEADER];
+  if (typeof presented !== 'string') {
+    return false;
+  }
+  const candidate = Buffer.from(presented, 'utf8');
+  return candidate.length === token.length && timingSafeEqual(candidate, token);
+}
+
+/** A running forwarder: its URL, the headers a client must send, and its shutdown. */
+type CredentialForwarder = { url: string; headers: Record<string, string>; close: () => Promise<void> };
+
+/**
+ * Starts a loopback HTTP server that relays each request to the origin of `target` with `user`'s
+ * Basic `Authorization` header added. Playwright writes every request header of an
+ * `APIRequestContext` into its call logs, traces and reports and offers no redaction, so the
+ * context talks to this forwarder and never holds the credential. Only a client presenting the
+ * returned `headers` (a random token valid until `close`) is relayed, so no other local process can
+ * borrow the credential. An upstream failure answers 502 naming the request, the origin and the
+ * error, never a header value.
+ *
+ * @throws Error when `target` is not an http(s) URL or the server cannot listen
+ */
+async function startCredentialForwarder(target: string, user: E2EUser): Promise<CredentialForwarder> {
+  const parsed = URL.canParse(target) ? new URL(target) : undefined;
+  if (parsed === undefined || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    throw new Error(`api: baseURL must be an absolute http(s) URL; got "${target}".`);
+  }
+  const upstream = new URL(parsed.origin);
+  const send = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
+  const authorization = basicAuthorization(user);
+  const token = randomBytes(32).toString('hex');
+  const tokenBytes = Buffer.from(token, 'utf8');
+
+  const server = createServer((req, res) => {
+    if (!hasForwarderToken(req.headers, tokenBytes)) {
+      req.resume();
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('api forwarder: a request without this forwarder token is not relayed.');
+      return;
+    }
+    const relayed = endToEndHeaders(req.headers);
+    delete relayed[FORWARDER_TOKEN_HEADER];
+    const headers = { ...relayed, host: upstream.host, authorization };
+    const relay = send(upstream, { method: req.method, path: req.url, headers, agent: false }, (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.statusMessage, endToEndHeaders(answer.headers));
+      pipeline(answer, res, (error) => {
+        if (error) {
+          res.destroy();
+        }
+      });
+    });
+    relay.on('error', (error) => {
+      if (res.headersSent || res.destroyed) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(`api forwarder: ${req.method} ${req.url} to ${upstream.origin} failed: ${error.message}`);
+    });
+    // The client went away first (an APIRequestContext timeout or abort): stop the upstream call.
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        relay.destroy();
+      }
+    });
+    req.on('error', () => relay.destroy());
+    req.pipe(relay);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    headers: { [FORWARDER_TOKEN_HEADER]: token },
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections();
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  };
+}
 
 /**
  * Playwright's `test` extended with the suite's fixtures. Import it, with `expect`, from this module
@@ -480,13 +627,25 @@ export function toasts(page: Page): ToastLocators {
  * - `startPath` (option, default `/`): where `asInquiry` and `asMaintenance` land.
  * - `asInquiry` / `asMaintenance`: a page in its own browser context, signed in through the
  *   sign-in page and showing `startPath`; the context is closed after the test.
- * - `api`: an API request context on the same origin, authenticated as the Sales user with an
- *   explicit `Authorization` header (never `httpCredentials`: with `X-Requested-With` present the
- *   server sends no challenge, so challenge-driven credentials would never be sent).
+ * - `api`: an API request context authenticated as the Sales user. It goes through a loopback
+ *   forwarder that adds the explicit Basic `Authorization` header to each request it relays to
+ *   `baseURL`, so no Playwright call log, trace or report holds the credential (never
+ *   `httpCredentials`: with `X-Requested-With` present the server sends no challenge, so
+ *   challenge-driven credentials would never be sent).
  *
- * Every context receives `baseURL` explicitly rather than relying on inheritance from the config.
+ * Browser contexts and the forwarder receive `baseURL` explicitly rather than inheriting it from
+ * the config.
  */
-export const test = base.extend<Fixtures>({
+export const test = base.extend<Fixtures, WorkerFixtures>({
+  // Worker-scoped and auto: checks the effective trace (config, --trace, UI mode) before any credential.
+  traceGuard: [
+    async ({ trace }, use) => {
+      assertTraceAllowed(trace);
+      await use();
+    },
+    { scope: 'worker', auto: true, box: true },
+  ],
+
   startPath: ['/', { option: true }],
 
   asInquiry: async ({ browser, baseURL, startPath }, use) => {
@@ -508,18 +667,32 @@ export const test = base.extend<Fixtures>({
   },
 
   api: async ({ playwright, baseURL }, use) => {
-    const context = await playwright.request.newContext({
-      baseURL: requireBaseURL(baseURL),
-      extraHTTPHeaders: {
-        Authorization: basicAuthorization(USERS.maintenance),
-        'X-Requested-With': 'XMLHttpRequest',
-        Accept: 'application/json, application/problem+json',
-      },
-    });
+    const forwarder = await startCredentialForwarder(requireBaseURL(baseURL), USERS.maintenance);
     try {
-      await use(context);
-    } finally {
-      await context.dispose();
+      const context = await playwright.request.newContext({
+        baseURL: forwarder.url,
+        extraHTTPHeaders: {
+          ...forwarder.headers,
+          'X-Requested-With': 'XMLHttpRequest',
+          Accept: 'application/json, application/problem+json',
+        },
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.dispose();
+      }
+    } catch (error) {
+      try {
+        await forwarder.close();
+      } catch (closeError) {
+        throw new AggregateError(
+          [error, closeError],
+          'api: the request context failed, and closing its forwarder failed',
+        );
+      }
+      throw error;
     }
+    await forwarder.close();
   },
 });

@@ -37,8 +37,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * no V5 seed rows.
  *
  * <p><b>Configuration.</b> Profile {@code test} adds {@code application-test.yml}: the users
- * {@value #INQUIRY_USER} ({@code INQUIRY}), {@value #MAINTENANCE_USER} and
- * {@value #MAINTENANCE2_USER} ({@code MAINTENANCE}), the stub address client and a 1-second
+ * {@value #INQUIRY_USER} ({@code INQUIRY}), {@value #MAINTENANCE_USER}, {@value #MAINTENANCE2_USER},
+ * {@value #LIMIT_ASCII_USER} and {@value #LIMIT_MULTIBYTE_USER} ({@code MAINTENANCE}; the last two
+ * have passwords of exactly the 72 UTF-8 bytes BCrypt verifies), the stub address client and a 1-second
  * {@code customer-master.db.lock-timeout}. No {@code CM_*}, {@code DB_*} or {@code USPS_*} variable is
  * needed.
  *
@@ -109,6 +110,19 @@ public abstract class AbstractPostgresIT {
 
     /** Password of {@value #MAINTENANCE2_USER}, from {@code application-test.yml}. */
     protected static final String MAINTENANCE2_PASSWORD = "maint2-pw";
+
+    /** {@code MAINTENANCE} user whose password is 72 ASCII characters, the BCrypt limit. */
+    protected static final String LIMIT_ASCII_USER = "limit-ascii";
+
+    /** Password of {@value #LIMIT_ASCII_USER}: 72 UTF-8 bytes. */
+    protected static final String LIMIT_ASCII_PASSWORD =
+            "limit-ascii-pw-012345678901234567890123456789012345678901234567890123456";
+
+    /** {@code MAINTENANCE} user whose password is 24 three-byte characters, the BCrypt limit. */
+    protected static final String LIMIT_MULTIBYTE_USER = "limit-multibyte";
+
+    /** Password of {@value #LIMIT_MULTIBYTE_USER}: 24 x U+20AC, 72 UTF-8 bytes. */
+    protected static final String LIMIT_MULTIBYTE_PASSWORD = "\u20ac".repeat(24);
 
     /** The header the SPA sends on every call; it suppresses the {@code WWW-Authenticate} challenge. */
     protected static final String X_REQUESTED_WITH = "X-Requested-With";

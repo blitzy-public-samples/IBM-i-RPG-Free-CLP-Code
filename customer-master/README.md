@@ -141,7 +141,7 @@ If another program already holds one of them, `up` cannot bind it and Docker rep
 | `inquiry` | `inquiry-demo` | `INQUIRY` |
 | `sales` | `sales-demo` | `MAINTENANCE` |
 
-These are demo-only defaults supplied by `docker-compose.yml` so the stack starts with one command. Override them in `.env` with `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD`. Usernames must be 1–18 characters of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`, and must not be `*SYSTEM*`.
+These are demo-only defaults supplied by `docker-compose.yml` so the stack starts with one command. Override them in `.env` with `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD`. Usernames must be 1–18 characters of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`, and must not be `*SYSTEM*`; passwords must be at most 72 bytes in UTF-8, where a non-ASCII character counts for two to four.
 
 ### Configuration
 
@@ -280,7 +280,7 @@ npx playwright install --with-deps chromium          # once per machine: the Chr
 BASE_URL=http://localhost:8080 npx playwright test   # the stack's FRONTEND_PORT
 ```
 
-On Linux, `--with-deps` also installs the browser's OS libraries and needs root (`sudo`); without root, have those libraries installed first, then run `npx playwright install chromium`. The host run reads `BASE_URL` and the `CM_*` users from the shell only, never from `.env`. Set `BASE_URL` to `http://localhost:<FRONTEND_PORT>` of the stack under test; unset, it defaults to `http://localhost:8080`. If `.env` overrides the demo users, export the same `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD` values in that shell; unset, the suite signs in as `inquiry`/`inquiry-demo` and `sales`/`sales-demo`. Keep `BASE_URL` out of `.env`, because the Compose `e2e` service would then use it instead of `http://frontend`.
+On Linux, `--with-deps` also installs the browser's OS libraries and needs root (`sudo`); without root, have those libraries installed first, then run `npx playwright install chromium`. The host run reads `BASE_URL` and the `CM_*` users from the shell only, never from `.env`. Set `BASE_URL` to `http://localhost:<FRONTEND_PORT>` of the stack under test; unset, it defaults to `http://localhost:8080`. If `.env` overrides the demo users, export the same `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD` values in that shell; unset, the suite signs in as `inquiry`/`inquiry-demo` and `sales`/`sales-demo`. Traces are off; `E2E_TRACE=retain-on-failure` (or `on`) records them, and only with the demo users, because a trace holds the entered passwords and `Authorization` headers. Keep `BASE_URL` out of `.env`, because the Compose `e2e` service would then use it instead of `http://frontend`.
 
 ### Load test
 
