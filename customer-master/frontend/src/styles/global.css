@@ -734,8 +734,9 @@ textarea[aria-invalid="true"] {
 
 /*
  * Further classes the screens apply. .search-panel, .customer-form,
- * .confirmation-panel, .dialog--detail, .dialog--picker and .dialog--conflict
- * need nothing beyond the rules above and stay unstyled hooks.
+ * .confirmation-panel, .dialog--detail and .dialog--picker need nothing
+ * beyond the rules above and stay unstyled hooks; .dialog--conflict scopes
+ * the comparison's word wrapping below.
  */
 
 /* Sign-in page wrapper: a narrow centred column. */
@@ -785,6 +786,35 @@ textarea[aria-invalid="true"] {
   margin-block: 0 var(--space-3);
   font-weight: 600;
   color: var(--color-error-bg);
+}
+
+/*
+ * Conflict comparison headings, field labels and the "Changed" mark wrap
+ * only between words: break-word, unlike the table's `anywhere`, keeps each
+ * word in the column's minimum width, so on a narrow viewport only the value
+ * cells give up width and no label breaks mid-word.
+ */
+.dialog--conflict .results-table th,
+.dialog--conflict .results-table td:last-child {
+  overflow-wrap: break-word;
+}
+
+/*
+ * Field labels start on the first line of a row whose values wrap. `top`
+ * rather than `baseline`: aligning the sans-serif label on the monospace
+ * values' baseline adds 2px to every row, which no longer fits the window
+ * at an 800px viewport height.
+ */
+.dialog--conflict .results-table tbody th {
+  vertical-align: top;
+}
+
+/* The conflict window's Refresh and "Re-apply my changes" buttons, side by side under the comparison. */
+.conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-2);
 }
 
 /* ==== Forced colors (Windows High Contrast and similar) ================= */
