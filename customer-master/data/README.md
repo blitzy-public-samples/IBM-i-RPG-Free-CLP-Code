@@ -41,9 +41,10 @@ The CSV is only read. The generator never writes to `/data`.
 
 The original readme links the ZIP code database at <https://www.unitedstateszipcodes.org/zip-code-database/>. That is a third-party database, not a USPS file, although the original readme calls it a USPS download. This is discrepancy D7 in [Deviations and open questions](../docs/deviations-and-open-questions.md).
 
-- The unedited download works directly: its `primary_city` column is accepted as `city`, and its extra columns are ignored. Unlike the IBM i procedure, no column needs to be deleted or renamed.
+- Download it manually in a browser: choose the free version, complete the site's licence-terms form, and pick the CSV format (`zip_code_database.csv`). The site's bot protection refuses scripted downloads such as `curl` or `wget`, and it may block some networks with HTTP 403. Then save the file on the host as `customer-master/data/csz.csv`, as described under [How to use it](#how-to-use-it).
+- The unedited download works directly. From its header the generator reads `zip`, `type`, `primary_city` (accepted as `city`) and `state`; it ignores the other columns, such as `county` and `latitude`. Unlike the IBM i procedure, no column needs to be deleted or renamed.
 - If you obtain it as a spreadsheet, save it as a UTF-8 CSV without editing the columns. A file in another encoding fails the load.
-- Check the site's licence and terms of use yourself before you download or redistribute the data.
+- Check the site's licence and terms of use yourself before you download or redistribute the data. In October 2026 the site offered the free version for personal or educational, non-commercial use only, without redistribution.
 
 ## How to use it
 

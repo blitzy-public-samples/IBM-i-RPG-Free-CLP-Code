@@ -131,6 +131,8 @@ No manual step is needed. The services start in health order:
 
 The host ports are set by `FRONTEND_PORT` (default 8080) and `API_PORT` (default 8081).
 
+If another program already holds one of them, `up` cannot bind it and Docker reports the port as already allocated or the address as already in use. Choose unused ports, set them as `FRONTEND_PORT` and `API_PORT` in `.env` (see [Configuration](#configuration)), run `docker compose down` (without `-v`, so the data stays) if the failed start left containers behind, and start again. Then use those ports in place of 8080 and 8081 in the URLs above, the quick API check and the `BASE_URL` of a host Playwright run; `npm run dev` always proxies to 8081, so it needs the default `API_PORT`. To run a second stack beside one already running on the same Docker host, also give it its own `COMPOSE_PROJECT_NAME` (in its `.env`, exported, or with `docker compose -p <name>`): the containers, network, `pgdata` volume and `<name>-app:local` image are named after the project, so under the same name `up` reconfigures the running stack instead of starting a second one.
+
 ### Demo users
 
 | User | Password | Role |
@@ -183,7 +185,13 @@ docker compose --profile tools run --rm generator --count=1000000
 - **Ids.** The first id is `1001`, as in LOADCUSTR, unless `--start-id` overrides it. Only 385,245 ids exist above `1001`, so when the count exceeds that the start becomes `AAAA` automatically. Capacity is checked before anything is written.
 - **Write.** Rows stream through `COPY` in one transaction, followed by `ANALYZE custmast` after the commit.
 - **Report.** Success prints `Loaded N customers <first>..<last> in <s> s` and exits 0. For example, `--count=500 --start-id=B000 --seed=7` prints `Loaded 500 customers B000..B1EV in <s> s`.
-- **Failure.** Exit 1 with `Cannot allocate CUSTMAST` when the table lock is not obtained within 5 seconds (the `ALCOBJ … WAIT(5)` guard), with `Unknown option --<name>` for a mistyped flag, or with an id-capacity or CSV error message. A failed load changes nothing.
+- **Failure.** Exit 1 with `Cannot allocate CUSTMAST` when the table lock is not obtained within 5 seconds (the `ALCOBJ … WAIT(5)` guard), with `Unknown option --<name>` for a mistyped flag, with `Option --<name> requires a value` for a flag given without a value, with Spring Boot's `APPLICATION FAILED TO START` report for a count or start id the table below does not allow, or with an id-capacity or CSV error message. These failures leave the rows and the id sequence as they were: the option, value, capacity and CSV checks run before anything is written, and an expired lock wait rolls the load back. Any other load failure prints `Load failed: <cause>; verify custmast and custmast_id_seq before retrying`, because its outcome can be unknown: when the connection is lost before `COMMIT` is acknowledged, the new rows and the restarted sequence, which commit together, may already be committed, and a retry would replace the rows again. Before retrying, run this extended form of the load check below:
+
+  ```sh
+  docker compose exec -T db psql -U customermaster -d customermaster -tAc "select count(*), min(custid), max(custid), min(chgtime) from customer_master.custmast; select last_value, is_called from customer_master.custmast_id_seq"
+  ```
+
+  Every row a load writes carries the load's start time in `chgtime`, so the load committed if the first line shows this run's count, first id and last id with a `min(chgtime)` no earlier than the run's first log line, and the second the ordinal after the last id with `f` (`1679615|t` for a load ending at `9999`); `--count=500 --start-id=B000`, for example, shows `500|B000|B1EV|<this run's start>` and `81814|f`. Retry only when `min(chgtime)` is earlier than the run's first log line and both lines still show the table as it was before the run, which means the load rolled back; on a fresh stack the seed shows `300|AAAB|AAIM|<the stack's creation time>` and `191957|f`. Any other result matches neither this run nor the earlier table, as when adds followed a committed load, so do not retry: investigate it first.
 - **Replacement.** A load replaces every customer row, the seed included. The interactive id sequence restarts after the generated range, so adds continue above it; a load ending at `9999` leaves the id space exhausted, and adds then answer 503 APP0503.
 - **Image.** `app` and `generator` share one image. `docker compose up --build` refreshes both; add `--build` to the `run` command after changing backend code while the stack is running.
 
@@ -194,9 +202,9 @@ docker compose --profile tools run --rm generator --count=1000000
 | `--count` | `GENERATOR_COUNT` | `300` | Rows to load: 1 up to 1,679,616 minus the ordinal of the start id |
 | `--start-id` | `GENERATOR_START_ID` | empty (automatic: `1001` or `AAAA`) | First id, 4 characters of `[A-Z0-9]` |
 | `--csz-file` | `GENERATOR_CSZ_FILE` | `classpath:generator/csz-sample.csv` (bundled sample) | City/state/ZIP CSV; a full file placed in `./data` is read as `/data/csz.csv` |
-| `--seed` | `GENERATOR_SEED` | empty (random) | Random seed; the same seed gives the same rows |
+| `--seed` | `GENERATOR_SEED` | empty (random) | Random seed; the same seed with the same count, start id and CSV file repeats the generated customer values, but `chgtime` records each load's time and so changes |
 
-A flag wins over its variable, which wins over the default. Any option other than these four flags, a fully qualified `customer-master.generator.*` property or a `spring.*` property exits 1 with `Unknown option --<name>`, so a typo never falls back silently to a default.
+A flag wins over its variable, which wins over the default. Besides these four flags and `--spring.*`, only the fully qualified `--customer-master.generator.count`, `.start-id` (or `.startId`, `.start_id`), `.csz-file` (or `.cszFile`, `.csz_file`) and `.seed` are accepted, matched exactly. Any other option, such as `--customer-master.generator.cuont` or Spring Boot's `--debug`, exits 1 with `Unknown option --<name>`, so a typo never falls back silently to a default.
 
 The bundled sample holds 200 city/state/ZIP rows. For realistic distribution, place a full CSV in `./data` (it is mounted read-only at `/data` and must be world-readable) and pass `--csz-file=/data/csz.csv`; the layout and where to obtain the file are in [`data/README.md`](data/README.md). Rows whose city is longer than 20 characters, or whose state is not in STATES, are dropped.
 
@@ -217,7 +225,7 @@ The address-validation module replaces USADRVAL and the Edit_Address step of the
 
 | Setting | Effect |
 |---------|--------|
-| `ADDRESS_VALIDATION_CLIENT=stub` (default) | Deterministic fixtures from `backend/address-validation/src/main/resources/stub/usps-stub-fixtures.json`. An address line containing `BADADDR` returns "USPS: Address Not Found."; any other address is echoed in uppercase |
+| `ADDRESS_VALIDATION_CLIENT=stub` (default) | Deterministic and offline, answering in this order: (1) an address line containing `BADADDR`, in any case, returns the error triple `-2147219401` / `clsAMS` / `Address Not Found.`, which review reports as 422 DEM9898 "USPS: Address Not Found."; (2) otherwise, a street as sent (its first 30 characters), city, state and five-digit ZIP that match an entry in `backend/address-validation/src/main/resources/stub/usps-stub-fixtures.json` after trimming and uppercasing return that entry's standardized address, city, state, Zip5 and, where the entry has one, Zip4, so the form shows `Zip5-Zip4`; (3) anything else is echoed in uppercase with a blank Zip4. |
 | `ADDRESS_VALIDATION_ENABLED=false` | Standardization is off; maintenance then follows the 5250 variant exactly |
 | `ADDRESS_VALIDATION_CLIENT=usps` | The USPS Web Tools XML client. Set `USPS_USER_ID`, `USPS_PASSWORD` (replacing the USPS_ID and USPS_PWD data areas) and optionally `USPS_BASE_URL` in `.env`. Startup fails while `USPS_USER_ID` is empty |
 
@@ -233,7 +241,7 @@ From `backend/`:
 
 ```sh
 ./mvnw -B verify                                   # unit tests and every *IT (Testcontainers PostgreSQL 18.6); benchmark excluded
-./mvnw -B verify -Pbenchmark                       # only the 1,000,000-row SearchBenchmarkIT
+./mvnw -B verify -Pbenchmark                       # unit tests plus only the 1,000,000-row SearchBenchmarkIT
 ./mvnw -B verify -Dopenapi.snapshot.update=true    # rewrites openapi/customer-master-api.yaml after an intended API change
 ```
 
@@ -261,7 +269,17 @@ With the stack running and the seed data in place:
 docker compose --profile e2e run --rm e2e
 ```
 
-Five Playwright flows run in Chromium: `search-and-display`, `edit-with-confirmation`, `add-with-address-standardization`, `concurrent-edit-conflict` and `selection-picker`. They search the seed rows, so run them before the generator replaces those rows, or after `docker compose down -v` and a fresh `up`. To run them on the host instead: from `e2e/`, `npm ci` then `npx playwright test`; `BASE_URL` defaults to `http://localhost:8080`, and the `CM_*` users are read from the shell.
+Five Playwright flows run in Chromium: `search-and-display`, `edit-with-confirmation`, `add-with-address-standardization`, `concurrent-edit-conflict` and `selection-picker`. They search the seed rows, so run them before the generator replaces those rows, or after `docker compose down -v` and a fresh `up`. The Compose service runs them in the Playwright image, which already contains the browsers.
+
+To run them on the host instead, from `e2e/`:
+
+```sh
+npm ci
+npx playwright install --with-deps chromium          # once per machine: the Chromium build pinned by @playwright/test 1.63.0
+BASE_URL=http://localhost:8080 npx playwright test   # the stack's FRONTEND_PORT
+```
+
+On Linux, `--with-deps` also installs the browser's OS libraries and needs root (`sudo`); without root, have those libraries installed first, then run `npx playwright install chromium`. The host run reads `BASE_URL` and the `CM_*` users from the shell only, never from `.env`. Set `BASE_URL` to `http://localhost:<FRONTEND_PORT>` of the stack under test; unset, it defaults to `http://localhost:8080`. If `.env` overrides the demo users, export the same `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD` values in that shell; unset, the suite signs in as `inquiry`/`inquiry-demo` and `sales`/`sales-demo`. Keep `BASE_URL` out of `.env`, because the Compose `e2e` service would then use it instead of `http://frontend`.
 
 ### Load test
 
