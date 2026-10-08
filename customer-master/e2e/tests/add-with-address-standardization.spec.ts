@@ -25,6 +25,12 @@
  * with "Address Not Found.". The e2e container mounts only `./e2e`, so the fixture and the
  * catalog texts are copied here verbatim rather than read at run time.
  *
+ * State prompt checks. Each read the picker sends, on F4, Enter and F7, is checked as well as
+ * the screen: its `GET /api/states` must carry the filter and the order the prompt shows, and
+ * answer the rows in that order. NEW, the filter the selection uses, lists the same states in
+ * the same order by name and by code, so the prompt is also filtered on VIRGIN before and after
+ * F7: VI, VA, WV by name but VA, VI, WV by code. NEW is then applied again and NH selected.
+ *
  * Independence. Each run names its customers with `uniqueName`, and every search uses the
  * returned 11-character `filter`, which matches only that run's customer; rows added by earlier
  * runs therefore never change what a search here finds. The spec changes no seed row.
@@ -77,16 +83,41 @@ const DEM9898_NOT_FOUND = 'USPS: Address Not Found.';
 /** DEM0002, the notice of a search that matches nothing. */
 const DEM0002 = 'No records match the selection criteria';
 
+/** One row of the State picker: a STATES code and its name as stored. */
+type StateRow = { code: string; name: string };
+
+/** The number of STATES rows (V2); the picker opens on all of them, by name. */
+const STATE_COUNT = 58;
+
 /**
  * The STATES rows whose name contains "NEW" (V2, from 5250_Subfile/States.sql). Their name order
- * and their code order are the same, so this list is the expected order under both sorts.
+ * and their code order are the same, so this list is the expected order under both sorts, and
+ * on its own it cannot show which order the picker asked for.
  */
-const NEW_STATES: ReadonlyArray<{ code: string; name: string }> = Object.freeze([
+const NEW_STATES: ReadonlyArray<StateRow> = Object.freeze([
   { code: 'NH', name: 'New Hampshire' },
   { code: 'NJ', name: 'New Jersey' },
   { code: 'NM', name: 'New Mexico' },
   { code: 'NY', name: 'New York' },
 ]);
+
+/**
+ * The STATES rows whose name contains "VIRGIN", in each picker order. The two orders differ
+ * ("Virgin Islands" sorts before "Virginia", while VA precedes VI), which is what makes the F7
+ * check discriminating: a list still sorted by name cannot show the code order.
+ */
+const VIRGIN_STATES: Readonly<{ byName: ReadonlyArray<StateRow>; byCode: ReadonlyArray<StateRow> }> = Object.freeze({
+  byName: Object.freeze([
+    { code: 'VI', name: 'Virgin Islands' },
+    { code: 'VA', name: 'Virginia' },
+    { code: 'WV', name: 'West Virginia' },
+  ]),
+  byCode: Object.freeze([
+    { code: 'VA', name: 'Virginia' },
+    { code: 'VI', name: 'Virgin Islands' },
+    { code: 'WV', name: 'West Virginia' },
+  ]),
+});
 
 // ---------------------------------------------------------------------------
 // Locators
@@ -167,17 +198,74 @@ const STATE_COLUMN = Object.freeze({ code: 1, name: 2 });
 const RESULT_COLUMN = Object.freeze({ name: 1, city: 2, state: 3, zip: 4 });
 
 /**
- * Checks that the picker lists exactly the four "NEW" states, in order, once its reload has
- * settled (the table reports `aria-busy="false"`).
+ * Checks that the picker lists exactly `states`, in that order, once its reload has settled (the
+ * table reports `aria-busy="false"`).
  */
-async function expectNewStates(page: Page, picker: Locator): Promise<void> {
+async function expectStates(page: Page, picker: Locator, states: ReadonlyArray<StateRow>): Promise<void> {
   await expect(picker.getByRole('table')).toHaveAttribute('aria-busy', 'false');
   const rows = dataRows(page, picker);
-  await expect(rows).toHaveCount(NEW_STATES.length);
-  for (const [index, state] of NEW_STATES.entries()) {
+  await expect(rows).toHaveCount(states.length);
+  for (const [index, state] of states.entries()) {
     await expect(cell(rows.nth(index), STATE_COLUMN.code)).toHaveText(state.code);
     await expect(cell(rows.nth(index), STATE_COLUMN.name)).toHaveText(state.name);
   }
+}
+
+/** The State picker's orders, as `GET /api/states` names them in its `sort` parameter. */
+type StateSort = 'name' | 'code';
+
+/** One `GET /api/states` the picker sent: its query parameters and the codes it answered, in order. */
+type StatesRead = { nameContains: string | null; sort: string | null; codes: string[] };
+
+/** Whether `row` has the `{ state, name }` shape of a `GET /api/states` row. */
+function isStateResponse(row: unknown): row is { state: string; name: string } {
+  return (
+    typeof row === 'object' &&
+    row !== null &&
+    'state' in row &&
+    typeof row.state === 'string' &&
+    'name' in row &&
+    typeof row.name === 'string'
+  );
+}
+
+/**
+ * Runs `press`, the key press that makes the picker read the states, and returns the
+ * `GET /api/states` it sent once that read has answered 200. The wait starts before the press,
+ * so the answer cannot arrive unobserved; each caller awaits the previous read first, so the
+ * answer is the one this press caused.
+ */
+async function readStates(page: Page, press: () => Promise<void>): Promise<StatesRead> {
+  const answered = page.waitForResponse(
+    (response) => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/states',
+  );
+  const [response] = await Promise.all([answered, press()]);
+  expect(response.status(), `status of GET ${response.url()}`).toBe(200);
+  const body: unknown = await response.json();
+  if (!Array.isArray(body) || !body.every(isStateResponse)) {
+    throw new Error(`GET ${response.url()} did not answer a list of { state, name }: ${JSON.stringify(body)}`);
+  }
+  const query = new URL(response.url()).searchParams;
+  return { nameContains: query.get('nameContains'), sort: query.get('sort'), codes: body.map((row) => row.state) };
+}
+
+/**
+ * Runs `press` and checks the read it made the picker send: `nameContains` and `sort` as given,
+ * answered with the codes of `states` in that order.
+ */
+async function expectStatesRead(
+  page: Page,
+  press: () => Promise<void>,
+  nameContains: string,
+  sort: StateSort,
+  states: ReadonlyArray<StateRow>,
+): Promise<void> {
+  const read = await readStates(page, press);
+  expect(read, `GET /api/states for "${nameContains}" by ${sort}`).toEqual({
+    nameContains,
+    sort,
+    codes: states.map((state) => state.code),
+  });
 }
 
 /** Types the three account fields of an open add or change form. */
@@ -223,11 +311,15 @@ test('adds a customer through the State prompt with a standardized address, and 
     await field(add, 'City').fill(F1.city);
   });
 
-  await test.step('F4 on State + prompts: filter NEW, F7 to sort by code, option 1 on NH', async () => {
+  await test.step('F4 on State + prompts: filter VIRGIN and NEW, F7 to sort by code, VIRGIN reorders, option 1 on NH', async () => {
     const add = detailDialog(page, /Add Customer/);
     const state = field(add, 'State +');
-    // press() focuses the field first: F4 prompts only while focus is on "State +".
-    await state.press('F4');
+    // press() focuses the field first: F4 prompts only while focus is on "State +". The opening
+    // read is awaited before any filter is typed, so every later read is the one its key sent.
+    const opened = await readStates(page, () => state.press('F4'));
+    expect(opened.nameContains, 'the opening read has no filter').toBe('');
+    expect(opened.sort, 'the opening read is by name').toBe('name');
+    expect(opened.codes, 'the opening read answers every state').toHaveLength(STATE_COUNT);
 
     const picker = statePicker(page);
     await expect(picker).toBeVisible();
@@ -235,18 +327,36 @@ test('adds a customer through the State prompt with a standardized address, and 
     await expect(picker.getByRole('columnheader', { name: 'Name', exact: true })).toHaveAttribute('aria-sort', 'ascending');
     await expect(picker.getByRole('button', { name: 'F7=By Code', exact: true })).toBeVisible();
 
+    // By name, "Virgin Islands" (VI) comes before "Virginia" (VA).
     const filter = picker.getByLabel('Name Contains', { exact: true });
-    await filter.fill('NEW');
-    await filter.press('Enter');
-    await expectNewStates(page, picker);
+    await filter.fill('VIRGIN');
+    await expectStatesRead(page, () => filter.press('Enter'), 'VIRGIN', 'name', VIRGIN_STATES.byName);
+    await expectStates(page, picker, VIRGIN_STATES.byName);
 
-    await page.keyboard.press('F7');
+    await filter.fill('NEW');
+    await expectStatesRead(page, () => filter.press('Enter'), 'NEW', 'name', NEW_STATES);
+    await expectStates(page, picker, NEW_STATES);
+
+    // F7 reloads the filter last applied, NEW, in code order.
+    await expectStatesRead(page, () => page.keyboard.press('F7'), 'NEW', 'code', NEW_STATES);
     await expect(picker.getByText('Sorted by: Code', { exact: true })).toBeVisible();
     await expect(picker.getByRole('button', { name: 'F7=By Name', exact: true })).toBeVisible();
     await expect(picker.getByRole('columnheader', { name: 'Code', exact: true })).toHaveAttribute('aria-sort', 'ascending');
     await expect(picker.getByRole('columnheader', { name: 'Name', exact: true })).not.toHaveAttribute('aria-sort');
     await expect(filter).toHaveValue('NEW');
-    await expectNewStates(page, picker);
+    await expectStates(page, picker, NEW_STATES);
+
+    // NEW reads the same in both orders, so VIRGIN shows the sort took effect: Enter keeps the
+    // code order F7 chose, and VA before VI is an order a name-sorted list cannot produce.
+    await filter.fill('VIRGIN');
+    await expectStatesRead(page, () => filter.press('Enter'), 'VIRGIN', 'code', VIRGIN_STATES.byCode);
+    await expectStates(page, picker, VIRGIN_STATES.byCode);
+
+    // Back to NEW, still by code, for the selection.
+    await filter.fill('NEW');
+    await expectStatesRead(page, () => filter.press('Enter'), 'NEW', 'code', NEW_STATES);
+    await expect(picker.getByText('Sorted by: Code', { exact: true })).toBeVisible();
+    await expectStates(page, picker, NEW_STATES);
     await expect(cell(dataRows(page, picker).first(), STATE_COLUMN.code)).toHaveText(F1.state);
 
     const nhRow = dataRows(page, picker).filter({ has: page.getByRole('cell', { name: F1.state, exact: true }) });
