@@ -21,6 +21,7 @@ import com.democorp.customermaster.domain.CustomerId;
 import com.democorp.customermaster.messages.MessageCatalog;
 import com.democorp.customermaster.repository.CustomerIdAllocator;
 import com.democorp.customermaster.repository.CustomerRepository;
+import com.democorp.customermaster.repository.LockWaitingReads;
 import com.democorp.customermaster.security.CurrentUser;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -140,8 +141,10 @@ final class CustomerMaintenanceServiceAfterCommitLogTest {
         AppProperties appProperties = new AppProperties(
                 new AppProperties.Db(Duration.ofSeconds(5)), new AppProperties.Search(12, 100, 9999));
         Clock clock = Clock.fixed(Instant.parse("2026-10-07T09:30:00Z"), ZoneOffset.UTC);
+        // Only get reads through LockWaitingReads, and no case here calls it.
+        LockWaitingReads lockWaitingReads = mock(LockWaitingReads.class);
         service = new CustomerMaintenanceService(repository, allocator, validator, addressStandardizationService,
-                currentUser, messageCatalog, appProperties, clock, jdbcTemplate);
+                currentUser, messageCatalog, appProperties, clock, jdbcTemplate, lockWaitingReads);
         transactions = new TransactionTemplate(new NoOpTransactionManager());
     }
 

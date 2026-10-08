@@ -6,7 +6,11 @@
 #   docker compose --profile tools run --rm generator --count=1000000
 #
 # The datasource (DB_*) and customer-master.db.lock-timeout are inherited from
-# application.yml. Unknown options are rejected by CustomerGeneratorRunner.
+# application.yml. The inherited datasource includes the 45-second socket bound
+# and the server-side TCP keepalives, which end the session of an interrupted
+# load (a killed generator container) within about 11 s, so PostgreSQL rolls the
+# load back and releases its lock on custmast. Unknown options are rejected by
+# CustomerGeneratorRunner.
 
 spring:
   main:

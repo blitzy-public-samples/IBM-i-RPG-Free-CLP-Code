@@ -149,6 +149,11 @@ import org.springframework.transaction.annotation.Transactional;
  * generic plan cannot derive an index range from an unknown pattern. Forcing custom plans makes every
  * execution plan with the actual prefix, for this transaction only.
  *
+ * <p><b>Locking.</b> The search takes no lock of its own. Behind a table lock on {@code custmast},
+ * such as a generator load's {@code ACCESS EXCLUSIVE}, it waits until the holder commits, through
+ * {@link LockWaitingReads}, which re-checks after every {@code customer-master.db.lock-timeout} so
+ * the socket bound only ends a search on a database that stops answering.
+ *
  * <p><b>Division of work.</b> {@code service/CustomerSearchService} normalizes the filters
  * ({@code TextNormalizer.filter}: trimmed, uppercased), rejects an invalid state filter (DEM0007),
  * decodes the opaque cursor, chooses {@code limit} ({@code size + 1} for the look-ahead row) and
@@ -256,14 +261,19 @@ public class CustomerSearchRepository {
 
     private final NamedParameterJdbcTemplate namedJdbc;
 
+    /** Runs the page query so that it waits through a table lock until the holder commits. */
+    private final LockWaitingReads lockWaitingReads;
+
     /**
      * Creates the repository over the application's datasource.
      *
-     * @param namedJdbc the named-parameter template Spring Boot configures on that datasource
-     * @throws NullPointerException if {@code namedJdbc} is {@code null}
+     * @param namedJdbc        the named-parameter template Spring Boot configures on that datasource
+     * @param lockWaitingReads runs the page query so that it waits through a table lock
+     * @throws NullPointerException if {@code namedJdbc} or {@code lockWaitingReads} is {@code null}
      */
-    public CustomerSearchRepository(NamedParameterJdbcTemplate namedJdbc) {
+    public CustomerSearchRepository(NamedParameterJdbcTemplate namedJdbc, LockWaitingReads lockWaitingReads) {
         this.namedJdbc = Objects.requireNonNull(namedJdbc, "namedJdbc");
+        this.lockWaitingReads = Objects.requireNonNull(lockWaitingReads, "lockWaitingReads");
     }
 
     /**
@@ -272,8 +282,12 @@ public class CustomerSearchRepository {
      *
      * <p>Runs in a read-only transaction (joining the caller's, if one is open) that first issues
      * {@code SET LOCAL plan_cache_mode = force_custom_plan}, so the statement is always planned with
-     * the actual patterns; the setting ends with the transaction. The connection returns to the pool
-     * when it ends; no lock and no cursor outlive the call.
+     * the actual patterns; the setting ends with the transaction. The query then runs through
+     * {@link LockWaitingReads#read(java.util.function.Supplier)}: while a table lock is held on
+     * {@code custmast}, such as a generator load's {@code ACCESS EXCLUSIVE}, it waits until the holder
+     * commits or rolls back, re-checking after every {@code customer-master.db.lock-timeout} with the
+     * planning setting still in force, and then reads the committed rows. The connection returns to
+     * the pool when the transaction ends; no lock and no cursor outlive the call.
      *
      * @param c     the normalized criteria; {@code size} and {@code cursor.served()} are not read
      * @param limit the most rows to return, at least 1; the service passes {@code size + 1} so the
@@ -281,6 +295,8 @@ public class CustomerSearchRepository {
      * @return the matching rows in list order; empty when none matches, never {@code null}
      * @throws NullPointerException     if {@code c} is {@code null}
      * @throws IllegalArgumentException if {@code limit} is less than 1
+     * @throws org.springframework.transaction.IllegalTransactionStateException if called on an
+     *                                  instance that is not the Spring proxy, outside any transaction
      * @throws org.springframework.dao.DataAccessException if the database rejects or fails the
      *                                  statement; the API maps it to 500 DEM9999
      */
@@ -288,7 +304,7 @@ public class CustomerSearchRepository {
     public List<CustomerSummary> find(SearchCriteria c, int limit) {
         SqlQuery q = buildQuery(c, limit);
         namedJdbc.getJdbcOperations().execute("SET LOCAL plan_cache_mode = force_custom_plan");
-        List<CustomerSummary> rows = namedJdbc.query(q.sql(), q.params(), ROW_MAPPER);
+        List<CustomerSummary> rows = lockWaitingReads.read(() -> namedJdbc.query(q.sql(), q.params(), ROW_MAPPER));
         if (LOG.isDebugEnabled()) {
             // The SQL text holds only fixed fragments; parameter values (user filters) are not logged.
             LOG.debug("customer.search sql=[{}] limit={} rows={}", q.sql(), limit, rows.size());

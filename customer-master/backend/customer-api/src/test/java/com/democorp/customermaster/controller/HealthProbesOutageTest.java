@@ -8,6 +8,7 @@ import java.net.ServerSocket;
 import java.time.Duration;
 
 import com.democorp.customermaster.config.BoundedDataSourceHealthIndicator;
+import com.democorp.customermaster.config.ConnectionPoolSaturation;
 import com.democorp.customermaster.config.DataSourceHealthConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.Test;
@@ -113,6 +114,8 @@ class HealthProbesOutageTest {
             long validationTimeout = dataSource.getValidationTimeout();
             Duration checkValidation = Duration.ofSeconds(
                     context.getBean(BoundedDataSourceHealthIndicator.class).getValidationTimeoutSeconds());
+            Duration probeBound = Duration.ofSeconds(
+                    context.getBean(ConnectionPoolSaturation.class).getProbeTimeoutSeconds());
 
             assertThat(validationTimeout)
                     .as("Hikari requires validation-timeout below connection-timeout")
@@ -121,6 +124,12 @@ class HealthProbesOutageTest {
                     .as("worst-case wait of the db check: a pooled connection's aliveness check that"
                             + " starts just before the connection timeout expires, then the check's"
                             + " own validation of the connection it holds")
+                    .isLessThan(PROBE_BUDGET);
+            assertThat(probeBound).as("the direct probe is bounded").isPositive();
+            assertThat(Duration.ofMillis(connectionTimeout).plus(probeBound).plus(probeBound))
+                    .as("worst-case wait of the db check in a saturated pool: the connection timeout,"
+                            + " then the direct probe's login and its validation, each within the probe"
+                            + " bound")
                     .isLessThan(PROBE_BUDGET);
         });
     }

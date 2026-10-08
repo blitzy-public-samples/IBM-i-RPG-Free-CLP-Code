@@ -1,6 +1,7 @@
 package com.democorp.customermaster.controller;
 
 import com.democorp.customermaster.address.AddressServiceUnavailableException;
+import com.democorp.customermaster.config.ConnectionPoolSaturation;
 import com.democorp.customermaster.controller.ProblemFactory.FieldProblem;
 import com.democorp.customermaster.controller.dto.CustomerResponse;
 import com.democorp.customermaster.service.exception.CustomerIdExhaustedException;
@@ -35,6 +36,7 @@ import org.springframework.context.MessageSourceResolvable;
 import org.springframework.context.support.DefaultMessageSourceResolvable;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
@@ -43,6 +45,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.lang.Nullable;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
 import org.springframework.validation.method.ParameterErrors;
@@ -66,6 +69,7 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.web.util.DisconnectedClientHelper;
+import org.springframework.web.util.UrlPathHelper;
 
 /**
  * The status map for every exception that reaches Spring MVC: each one becomes an RFC 9457
@@ -96,6 +100,11 @@ import org.springframework.web.util.DisconnectedClientHelper;
  *   <tr><td>{@link StaleCustomerException}</td><td>409 {@code DEM1002}</td>
  *       <td>{@code current}: the stored record in the {@link CustomerResponse} shape</td></tr>
  *   <tr><td>{@link CustomerLockedException}</td><td>409 {@code DEM1001}</td><td>none, never SQLERRMC</td></tr>
+ *   <tr><td>{@link CannotCreateTransactionException} of an add ({@code POST /api/customers}) or update
+ *       ({@code PUT /api/customers/{custId}}) whose connection borrow timed out in a saturated pool
+ *       while PostgreSQL answers a direct probe ({@link ConnectionPoolSaturation})</td>
+ *       <td>409 {@code DEM1001}, as a {@link CustomerLockedException}</td>
+ *       <td>none; any other {@link CannotCreateTransactionException} is answered as "anything else"</td></tr>
  *   <tr><td>{@link CustomerValidationException}</td><td>422 {@code DEM0501}, {@code DEM0502},
  *       {@code DEM0503} or {@code DEM9898}</td><td>{@code errors}, in rule order</td></tr>
  *   <tr><td>{@link AddressServiceUnavailableException}</td><td>502 {@code APP0502}</td><td>none</td></tr>
@@ -124,8 +133,9 @@ import org.springframework.web.util.DisconnectedClientHelper;
  * the {@code Problem} schema. The web-application condition keeps it out of the generator's non-web
  * context.
  *
- * <p><b>Thread safety.</b> The only instance state is the final, thread-safe {@link ProblemFactory}; every
- * method works on request-local values, so one instance serves all request threads.
+ * <p><b>Thread safety.</b> The only instance state is the final, thread-safe {@link ProblemFactory} and
+ * {@link ConnectionPoolSaturation}; every method works on request-local values, so one instance serves
+ * all request threads.
  */
 @Hidden
 @RestControllerAdvice
@@ -209,14 +219,19 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     /** The single builder of problem bodies. */
     private final ProblemFactory problems;
 
+    /** Tells a write's failed connection borrow in a saturated pool from a lost database. */
+    private final ConnectionPoolSaturation poolSaturation;
+
     /**
      * Creates the handler.
      *
      * @param problems the factory that builds every problem body
-     * @throws NullPointerException when {@code problems} is {@code null}
+     * @param poolSaturation the checks over the application's connection pool
+     * @throws NullPointerException when {@code problems} or {@code poolSaturation} is {@code null}
      */
-    public ApiExceptionHandler(ProblemFactory problems) {
+    public ApiExceptionHandler(ProblemFactory problems, ConnectionPoolSaturation poolSaturation) {
         this.problems = Objects.requireNonNull(problems, "problems");
+        this.poolSaturation = Objects.requireNonNull(poolSaturation, "poolSaturation");
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -430,6 +445,72 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ReviewFailedException.class)
     public ResponseEntity<Object> handleReviewFailed(ReviewFailedException ex, HttpServletRequest request) {
         return problems.response(toProblem(ex, request));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Connection pool saturation
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Answers a transaction that could not start because it obtained no connection.
+     *
+     * <p>Every request waiting on a lock holds its pooled connection for the whole wait: a read behind a
+     * generator load's {@code ACCESS EXCLUSIVE} lock until the load commits, an add or update up to the
+     * lock timeout. Once such requests hold every connection, an add or update fails here, when the
+     * pool's connection timeout expires, before its own lock wait can begin. It is answered as the lock
+     * wait it is, exactly as a {@link CustomerLockedException}: 409 {@code DEM1001} with no data, and
+     * one WARN line naming the URI, when all three hold:
+     * <ul>
+     *   <li>the request is an add or an update, {@link #isCustomerWrite(HttpServletRequest)};</li>
+     *   <li>the failure is the borrow timeout of a saturated pool,
+     *       {@link ConnectionPoolSaturation#isSaturationTimeout(Throwable)};</li>
+     *   <li>PostgreSQL answers a direct probe, {@link ConnectionPoolSaturation#databaseAnswers()}.</li>
+     * </ul>
+     * Every other case, a read, a review, a pool that cannot create connections or a database that does
+     * not answer the probe, takes the catch-all path {@link #handleUnexpected} unchanged: 500
+     * {@code DEM9999} with an {@code errorId} and one ERROR line.
+     *
+     * @param ex the exception
+     * @param request the current request
+     * @param response the current response
+     * @return the problem response, or {@code null} when nothing can be written
+     */
+    @ExceptionHandler(CannotCreateTransactionException.class)
+    @Nullable
+    public ResponseEntity<Object> handleCannotCreateTransaction(CannotCreateTransactionException ex,
+            HttpServletRequest request, HttpServletResponse response) {
+        if (isCustomerWrite(request) && ConnectionPoolSaturation.isSaturationTimeout(ex)
+                && poolSaturation.databaseAnswers()) {
+            log.warn("Connection pool stayed saturated; write answered code={} uri={}", CODE_LOCKED,
+                    request.getRequestURI());
+            return problems.response(toProblem(new CustomerLockedException(ex), request));
+        }
+        return handleUnexpected(ex, request, response);
+    }
+
+    /**
+     * Tells whether a request adds or updates a customer, by its method and its path within the
+     * application: {@code POST} to exactly {@value CustomerController#BASE_PATH}, or {@code PUT} to that
+     * path followed by one more non-empty segment, the {@code custId}. A review
+     * ({@code POST /api/customers/review}) and every other method are not writes.
+     *
+     * @param request the current request
+     * @return {@code true} for an add or an update
+     */
+    private static boolean isCustomerWrite(HttpServletRequest request) {
+        String path = UrlPathHelper.defaultInstance.getPathWithinApplication(request);
+        if (HttpMethod.POST.matches(request.getMethod())) {
+            return CustomerController.BASE_PATH.equals(path);
+        }
+        if (HttpMethod.PUT.matches(request.getMethod())) {
+            String itemPrefix = CustomerController.BASE_PATH + "/";
+            if (!path.startsWith(itemPrefix)) {
+                return false;
+            }
+            String custId = path.substring(itemPrefix.length());
+            return !custId.isEmpty() && custId.indexOf('/') < 0;
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------------------------------------

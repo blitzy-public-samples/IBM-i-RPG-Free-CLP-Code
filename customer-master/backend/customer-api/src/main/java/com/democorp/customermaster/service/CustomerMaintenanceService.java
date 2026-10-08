@@ -10,6 +10,7 @@ import com.democorp.customermaster.domain.TextNormalizer;
 import com.democorp.customermaster.messages.MessageCatalog;
 import com.democorp.customermaster.repository.CustomerIdAllocator;
 import com.democorp.customermaster.repository.CustomerRepository;
+import com.democorp.customermaster.repository.LockWaitingReads;
 import com.democorp.customermaster.security.CurrentUser;
 import com.democorp.customermaster.service.exception.CustomerIdExhaustedException;
 import com.democorp.customermaster.service.exception.CustomerLockedException;
@@ -17,21 +18,13 @@ import com.democorp.customermaster.service.exception.CustomerNotFoundException;
 import com.democorp.customermaster.service.exception.CustomerValidationException;
 import com.democorp.customermaster.service.exception.ReviewFailedException;
 import com.democorp.customermaster.service.exception.StaleCustomerException;
-import java.sql.SQLException;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayDeque;
-import java.util.Collections;
-import java.util.Deque;
-import java.util.IdentityHashMap;
 import java.util.Objects;
-import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.OptimisticLockingFailureException;
-import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -85,7 +78,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p><b>Transactions and locking.</b>
  * <ul>
- *   <li>{@link #get(CustomerId)}: one read-only transaction.</li>
+ *   <li>{@link #get(CustomerId)}: one read-only transaction, whose read runs through
+ *       {@link LockWaitingReads}: behind a table lock, such as a generator load's
+ *       {@code ACCESS EXCLUSIVE}, it waits until the holder commits, re-checking after every
+ *       {@code customer-master.db.lock-timeout}, so the 45-second socket bound only ends a read on a
+ *       database that stops answering.</li>
  *   <li>{@link #review(Purpose, Customer)}: no transaction, so no connection is held while the
  *       address service is called. The class carries no {@code @Transactional} for this reason.</li>
  *   <li>{@link #add(Customer)}: one transaction: {@code SET LOCAL lock_timeout}, the allocation guard
@@ -100,8 +97,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *       row as now stored.</li>
  * </ul>
  * No row lock outlives the request: there is no {@code SELECT ... FOR UPDATE}, and this class never
- * touches the id sequence itself. A lock wait longer than {@code customer-master.db.lock-timeout}
- * (SQLSTATE {@code 55P03}, the counterpart of the source's {@code 57033}) becomes
+ * touches the id sequence itself. A write's lock wait longer than
+ * {@code customer-master.db.lock-timeout} (SQLSTATE {@code 55P03}, the counterpart of the source's
+ * {@code 57033}, recognised by {@link LockWaitingReads#isLockWait(Throwable)}) becomes
  * {@link CustomerLockedException}, 409 DEM1001.
  *
  * <p><b>Audit.</b> The change stamp is the only audit, as in the source: {@code chgtime} from the
@@ -143,23 +141,11 @@ public class CustomerMaintenanceService {
     /** The active code an add starts with [5250_Subfile/MTNCUSTR.SQLRPGLE:254]. */
     static final String DEFAULT_ACTIVE = "Y";
 
-    /** PostgreSQL {@code lock_not_available}: a {@code lock_timeout} expired. */
-    static final String LOCK_NOT_AVAILABLE = "55P03";
-
     /** Action name of the after-commit line for an insert. */
     private static final String ACTION_ADD = "ADD";
 
     /** Action name of the after-commit line for an update. */
     private static final String ACTION_UPDATE = "UPDATE";
-
-    /** Most throwables {@link #isLockWait(Throwable)} inspects in one cause graph. */
-    private static final int MAX_CAUSE_DEPTH = 32;
-
-    /** Smallest lock timeout accepted; PostgreSQL reads {@code 0} as "wait forever". */
-    private static final Duration MIN_LOCK_TIMEOUT = Duration.ofMillis(1);
-
-    /** Largest lock timeout accepted: PostgreSQL's {@code lock_timeout} is an {@code int} of ms. */
-    private static final Duration MAX_LOCK_TIMEOUT = Duration.ofMillis(Integer.MAX_VALUE);
 
     /** Reads and writes {@code custmast}; {@code save} issues the INSERT or the versioned UPDATE. */
     private final CustomerRepository repository;
@@ -187,6 +173,9 @@ public class CustomerMaintenanceService {
 
     /** {@code SET LOCAL lock_timeout = '<n>ms'}, formatted once from configuration. */
     private final String setLockTimeoutSql;
+
+    /** Runs the read of get so that it waits through a table lock until the holder commits. */
+    private final LockWaitingReads lockWaitingReads;
 
     /**
      * Why a review is requested, bound from the JSON {@code purpose} of
@@ -237,6 +226,8 @@ public class CustomerMaintenanceService {
      * @param clock                         the UTC clock {@code chgtime} is taken from
      * @param jdbcTemplate                  runs {@code SET LOCAL lock_timeout} on the transaction's
      *                                      connection
+     * @param lockWaitingReads              runs the read of {@link #get(CustomerId)} so that it waits
+     *                                      through a table lock
      * @throws NullPointerException     if any argument, or the {@code db} settings or their lock
      *                                  timeout, is {@code null}
      * @throws IllegalArgumentException if the lock timeout is not between 1 ms and
@@ -251,7 +242,8 @@ public class CustomerMaintenanceService {
             MessageCatalog messageCatalog,
             AppProperties appProperties,
             Clock clock,
-            JdbcTemplate jdbcTemplate) {
+            JdbcTemplate jdbcTemplate,
+            LockWaitingReads lockWaitingReads) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.allocator = Objects.requireNonNull(allocator, "allocator");
         this.validator = Objects.requireNonNull(validator, "validator");
@@ -261,9 +253,11 @@ public class CustomerMaintenanceService {
         this.messageCatalog = Objects.requireNonNull(messageCatalog, "messageCatalog");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = Objects.requireNonNull(jdbcTemplate, "jdbcTemplate");
+        this.lockWaitingReads = Objects.requireNonNull(lockWaitingReads, "lockWaitingReads");
         Objects.requireNonNull(appProperties, "appProperties");
         AppProperties.Db db = Objects.requireNonNull(appProperties.db(), "appProperties.db");
-        this.setLockTimeoutSql = lockTimeoutSql(Objects.requireNonNull(db.lockTimeout(), "lockTimeout"));
+        this.setLockTimeoutSql =
+                LockWaitingReads.lockTimeoutSql(Objects.requireNonNull(db.lockTimeout(), "lockTimeout"));
     }
 
     /**
@@ -275,6 +269,11 @@ public class CustomerMaintenanceService {
      * a stateless request cannot end a program, and the message the source shows for a row that
      * vanished during edit is the right one.
      *
+     * <p>The read runs through {@link LockWaitingReads#read(java.util.function.Supplier)} in this
+     * read-only transaction: while a table lock is held on {@code custmast}, such as a generator load's
+     * {@code ACCESS EXCLUSIVE}, it waits until the holder commits or rolls back, re-checking after every
+     * {@code customer-master.db.lock-timeout}, and then returns the row as committed.
+     *
      * @param id the customer id from the request path
      * @return the stored customer, including its change stamp and {@code rowVersion}
      * @throws CustomerNotFoundException if no row has that id
@@ -283,7 +282,8 @@ public class CustomerMaintenanceService {
     @Transactional(readOnly = true)
     public Customer get(CustomerId id) {
         Objects.requireNonNull(id, "id");
-        return repository.findById(id).orElseThrow(() -> new CustomerNotFoundException(id));
+        return lockWaitingReads.read(() -> repository.findById(id))
+                .orElseThrow(() -> new CustomerNotFoundException(id));
     }
 
     /**
@@ -537,10 +537,11 @@ public class CustomerMaintenanceService {
 
     /**
      * Maps a failure of the database section of {@link #add(Customer)} or
-     * {@link #update(CustomerId, Customer, long)}: an expired lock wait becomes
-     * {@link CustomerLockedException}, which carries no data, as DEM1001 has no {@code &1}. Every
-     * other failure is returned unchanged: {@link CustomerIdExhaustedException} keeps its 503, and a
-     * {@code DuplicateKeyException} or any other error reaches the 500 DEM9999 catch-all.
+     * {@link #update(CustomerId, Customer, long)}: an expired lock wait
+     * ({@link LockWaitingReads#isLockWait(Throwable)}) becomes {@link CustomerLockedException}, which
+     * carries no data, as DEM1001 has no {@code &1}. Every other failure is returned unchanged:
+     * {@link CustomerIdExhaustedException} keeps its 503, and a {@code DuplicateKeyException} or any
+     * other error reaches the 500 DEM9999 catch-all.
      *
      * @param failure the failure thrown inside the transaction
      * @return the exception to throw
@@ -549,56 +550,10 @@ public class CustomerMaintenanceService {
         if (failure instanceof CustomerIdExhaustedException) {
             return failure;
         }
-        if (isLockWait(failure)) {
+        if (LockWaitingReads.isLockWait(failure)) {
             return new CustomerLockedException(failure);
         }
         return failure;
-    }
-
-    /**
-     * Whether a failure is an expired lock wait.
-     *
-     * <p>Walks the cause graph, including {@link SQLException#getNextException()}, because Spring
-     * Data JDBC wraps write failures in {@code DbActionExecutionException} and Spring's PostgreSQL
-     * translation leaves {@code 55P03} uncategorized. A failure is a lock wait when the graph holds a
-     * {@link PessimisticLockingFailureException}, the type of the
-     * {@link org.springframework.dao.CannotAcquireLockException} that {@link CustomerIdAllocator}
-     * raises for its guard, or an {@link SQLException} whose SQLSTATE is {@code 55P03}. At most
-     * {@value #MAX_CAUSE_DEPTH} throwables are inspected, each once, so a cyclic or self-referencing
-     * cause chain ends.
-     *
-     * @param failure the failure, possibly {@code null}
-     * @return {@code true} if the failure is, or is caused by, a lock wait
-     */
-    private static boolean isLockWait(Throwable failure) {
-        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        Deque<Throwable> pending = new ArrayDeque<>();
-        if (failure != null) {
-            pending.add(failure);
-        }
-        while (!pending.isEmpty() && visited.size() < MAX_CAUSE_DEPTH) {
-            Throwable current = pending.poll();
-            if (!visited.add(current)) {
-                continue;
-            }
-            if (current instanceof PessimisticLockingFailureException) {
-                return true;
-            }
-            if (current instanceof SQLException sql) {
-                if (LOCK_NOT_AVAILABLE.equals(sql.getSQLState())) {
-                    return true;
-                }
-                SQLException next = sql.getNextException();
-                if (next != null) {
-                    pending.add(next);
-                }
-            }
-            Throwable cause = current.getCause();
-            if (cause != null) {
-                pending.add(cause);
-            }
-        }
-        return false;
     }
 
     /**
@@ -665,31 +620,5 @@ public class CustomerMaintenanceService {
             // Standard error failed too. Nothing further is attempted: any other report could fail
             // the same way, and the committed write must still return its result to the caller.
         }
-    }
-
-    /**
-     * Formats {@code SET LOCAL lock_timeout} from the configured duration. {@code SET} takes no bind
-     * parameters, so the value is a whole number of milliseconds formatted from configuration, never
-     * caller text.
-     *
-     * <p>The range is checked so the configured wait is the wait PostgreSQL applies: a duration
-     * under 1 ms would format as {@code 0ms}, which PostgreSQL reads as "no timeout" and would let an
-     * add or update wait on a lock indefinitely; a duration over {@link Integer#MAX_VALUE} ms exceeds
-     * the parameter's range and would fail every write. Sub-millisecond parts are dropped.
-     *
-     * @param lockTimeout {@code customer-master.db.lock-timeout}
-     * @return the statement, for example {@code SET LOCAL lock_timeout = '5000ms'}
-     * @throws IllegalArgumentException if the duration is under 1 ms or over
-     *                                  {@link Integer#MAX_VALUE} ms
-     */
-    private static String lockTimeoutSql(Duration lockTimeout) {
-        // Fails at startup rather than silently disabling the lock-wait limit: the add and update
-        // transactions promise a bounded wait before 409 DEM1001.
-        if (lockTimeout.compareTo(MIN_LOCK_TIMEOUT) < 0 || lockTimeout.compareTo(MAX_LOCK_TIMEOUT) > 0) {
-            throw new IllegalArgumentException("customer-master.db.lock-timeout must be between "
-                    + MIN_LOCK_TIMEOUT.toMillis() + " ms and " + MAX_LOCK_TIMEOUT.toMillis()
-                    + " ms, was " + lockTimeout);
-        }
-        return "SET LOCAL lock_timeout = '" + lockTimeout.toMillis() + "ms'";
     }
 }

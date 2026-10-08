@@ -7,38 +7,49 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.democorp.customermaster.config.AppProperties;
 import com.democorp.customermaster.config.DataSourceCredentialsGuard;
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
 import com.democorp.customermaster.config.DataSourceSchemaGuard;
 import com.democorp.customermaster.config.DataSourceSchemaGuard.InvalidSchemaException;
+import com.democorp.customermaster.repository.LockWaitingReads;
+import com.democorp.customermaster.repository.LockWaitingReads.InvalidLockTimeoutException;
+import com.zaxxer.hikari.HikariDataSource;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLState;
+import org.springframework.beans.BeanInstantiationException;
 import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootExceptionReporter;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.JdbcConnectionDetails;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.core.io.support.SpringFactoriesLoader;
 import org.springframework.core.io.support.SpringFactoriesLoader.ArgumentResolver;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.env.MockEnvironment;
 
 /**
@@ -48,17 +59,19 @@ import org.springframework.mock.env.MockEnvironment;
  * is left to Spring Boot.
  *
  * <p><b>Scenarios.</b> The failures a wrong {@code DB_PASSWORD}, an unknown {@code DB_HOST}, a refused
- * {@code DB_PORT}, a missing {@code DB_NAME}, an empty {@code DB_USER} and an empty {@code DB_SCHEMA}
- * raise, wrapped as Spring wraps them during the context refresh; the schema guard's failure on its own;
- * the credentials guard's precedence over the schema guard; failures that are not about the database; the
- * web context; a {@code null} context; URLs whose query or user information carries a secret; cyclic and
- * chained cause graphs; the {@code META-INF/spring.factories} registration and its order ahead of
- * Spring Boot's {@code FailureAnalyzers}; and starts through {@link SpringApplication} with and without the
- * profile, one of them with the real {@link DataSourceSchemaGuard}.
+ * {@code DB_PORT}, a missing {@code DB_NAME}, an empty {@code DB_USER}, an empty {@code DB_SCHEMA} and a
+ * {@code DB_LOCK_TIMEOUT} the lock-timeout check of {@link LockWaitingReads} refuses raise, wrapped as
+ * Spring wraps them during the context refresh; the schema guard's and the lock-timeout check's failures
+ * on their own; the precedence of credentials over schema over lock timeout over connection failures;
+ * failures that are not about the database; the web context; a {@code null} context; URLs whose query or
+ * user information carries a secret; cyclic and chained cause graphs; the
+ * {@code META-INF/spring.factories} registration and its order ahead of Spring Boot's
+ * {@code FailureAnalyzers}; and starts through {@link SpringApplication} with and without the profile,
+ * with the real {@link DataSourceSchemaGuard} or the real {@link LockWaitingReads}.
  *
  * <p>Plain JUnit 5 and AssertJ over the reporter's package-private constructor, printing to a
  * {@link ByteArrayOutputStream}; no database and no Docker. The exceptions are built as pgjdbc and
- * Spring raise them. This class and its nested source class carry no stereotype, because test classes
+ * Spring raise them. This class and its nested source classes carry no stereotype, because test classes
  * are on the classpath when other tests run the application's component scan. Every host, credential
  * and URL here is fictitious.
  */
@@ -227,6 +240,97 @@ final class GeneratorStartupFailureReporterTest {
                 new BeanCreationException("jdbcConnectionDetails", invalid.getMessage(), invalid));
 
         assertThat(reporter(URL).reportException(failure)).isFalse();
+        assertThat(reporter(URL, "test").reportException(invalid)).isFalse();
+
+        assertThat(printedLines()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("DB_LOCK_TIMEOUT not below the socket bound, wrapped as the context refresh wraps it: the check's"
+            + " own message after 'Database lock timeout invalid: '")
+    void invalidLockTimeoutPrintsPrefixedMessage() {
+        InvalidLockTimeoutException sixty = lockTimeoutGuardFailure(Duration.ofSeconds(60));
+        InvalidLockTimeoutException fortyFive = lockTimeoutGuardFailure(Duration.ofSeconds(45));
+        GeneratorStartupFailureReporter reporter = reporter(URL, CustomerGeneratorRunner.PROFILE);
+
+        assertThat(reporter.reportException(lockWaitingReadsStartupFailure(sixty))).isTrue();
+        assertThat(reporter.reportException(lockWaitingReadsStartupFailure(fortyFive))).isTrue();
+
+        assertThat(printedLines()).containsExactly(
+                "Database lock timeout invalid: " + sixty.getMessage(),
+                "Database lock timeout invalid: " + fortyFive.getMessage());
+        assertThat(sixty.getMessage())
+                .startsWith("customer-master.db.lock-timeout (DB_LOCK_TIMEOUT) must be below"
+                        + " spring.datasource.hikari.data-source-properties.socketTimeout")
+                .endsWith("PT1M is not below PT45S")
+                .doesNotContain(SECRET, URL);
+        assertThat(fortyFive.getMessage()).endsWith("PT45S is not below PT45S");
+        assertThat(printed.toString(UTF_8)).doesNotContain(SECRET, "currentSchema");
+    }
+
+    @Test
+    @DisplayName("the lock-timeout check's failure itself, unwrapped, for each of its faults: one prefixed line")
+    void invalidLockTimeoutAloneIsOneLine() {
+        InvalidLockTimeoutException aboveBound = lockTimeoutGuardFailure(Duration.ofSeconds(60));
+        InvalidLockTimeoutException zero = lockTimeoutGuardFailure(Duration.ZERO);
+        InvalidLockTimeoutException negative = lockTimeoutGuardFailure(Duration.ofSeconds(-1));
+        InvalidLockTimeoutException fractionalBound = lockTimeoutGuardFailure(Duration.ofSeconds(5), "4.5");
+        GeneratorStartupFailureReporter reporter = reporter(URL, CustomerGeneratorRunner.PROFILE);
+
+        for (InvalidLockTimeoutException invalid : List.of(aboveBound, zero, negative, fractionalBound)) {
+            assertThat(reporter.reportException(invalid)).isTrue();
+        }
+
+        assertThat(printedLines()).containsExactly(
+                "Database lock timeout invalid: " + aboveBound.getMessage(),
+                "Database lock timeout invalid: customer-master.db.lock-timeout must be between 1 ms and "
+                        + Integer.MAX_VALUE + " ms, was PT0S",
+                "Database lock timeout invalid: customer-master.db.lock-timeout must be between 1 ms and "
+                        + Integer.MAX_VALUE + " ms, was PT-1S",
+                "Database lock timeout invalid: spring.datasource.hikari.data-source-properties.socketTimeout"
+                        + " (or socketTimeout in the JDBC URL) must be a whole number of seconds");
+        assertThat(zero).hasCauseInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("lock-timeout failure in one cause graph with others: credentials and schema lines win over it,"
+            + " it wins over a connection failure above or below it")
+    void lockTimeoutFailureSitsBetweenSchemaAndConnectionFailures() {
+        InvalidSchemaException schemaAbove = schemaGuardFailure();
+        schemaAbove.initCause(lockTimeoutGuardFailure(Duration.ofSeconds(60)));
+        MissingCredentialsException credentialsAbove = credentialsGuardFailure();
+        credentialsAbove.initCause(lockTimeoutGuardFailure(Duration.ofSeconds(60)));
+        InvalidLockTimeoutException lockAboveSchema = lockTimeoutGuardFailure(Duration.ofSeconds(60));
+        InvalidSchemaException schemaBelow = schemaGuardFailure();
+        lockAboveSchema.initCause(schemaBelow);
+        InvalidLockTimeoutException underConnection = lockTimeoutGuardFailure(Duration.ofSeconds(60));
+        InvalidLockTimeoutException aboveConnection = lockTimeoutGuardFailure(Duration.ofSeconds(45));
+        aboveConnection.initCause(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+        GeneratorStartupFailureReporter reporter = reporter(URL, CustomerGeneratorRunner.PROFILE);
+
+        assertThat(reporter.reportException(new BeanCreationException("dataSource", "failed", schemaAbove))).isTrue();
+        assertThat(reporter.reportException(new BeanCreationException("dataSource", "failed", credentialsAbove)))
+                .isTrue();
+        assertThat(reporter.reportException(lockWaitingReadsStartupFailure(lockAboveSchema))).isTrue();
+        assertThat(reporter.reportException(new BeanCreationException("jdbcDialect", "failed",
+                new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection", underConnection)))).isTrue();
+        assertThat(reporter.reportException(lockWaitingReadsStartupFailure(aboveConnection))).isTrue();
+
+        assertThat(printedLines()).containsExactly(
+                schemaAbove.getMessage(),
+                credentialsAbove.getMessage(),
+                schemaBelow.getMessage(),
+                "Database lock timeout invalid: " + underConnection.getMessage(),
+                "Database lock timeout invalid: " + aboveConnection.getMessage());
+        assertThat(printed.toString(UTF_8)).doesNotContain("Cannot connect to database", AUTH_FAILED);
+    }
+
+    @Test
+    @DisplayName("DB_LOCK_TIMEOUT not below the socket bound outside the generator profile: left to Spring Boot")
+    void invalidLockTimeoutOutsideGeneratorIsLeftToSpringBoot() {
+        InvalidLockTimeoutException invalid = lockTimeoutGuardFailure(Duration.ofSeconds(60));
+
+        assertThat(reporter(URL).reportException(lockWaitingReadsStartupFailure(invalid))).isFalse();
         assertThat(reporter(URL, "test").reportException(invalid)).isFalse();
 
         assertThat(printedLines()).isEmpty();
@@ -405,6 +509,43 @@ final class GeneratorStartupFailureReporterTest {
 
     @Test
     @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("SpringApplication under the generator profile, the real lock-timeout check, the application's"
+            + " 45 s socket bound and a 60s lock timeout: one prefixed line, no stack trace, rethrown")
+    void generatorStartWithLockTimeoutNotBelowSocketBoundPrintsOneLine(CapturedOutput output) {
+        SpringApplication application = lockTimeoutApplication();
+
+        assertThatThrownBy(() -> application.run("--spring.profiles.active=" + CustomerGeneratorRunner.PROFILE,
+                "--spring.datasource.url=" + URL, "--spring.datasource.username=customermaster",
+                "--spring.datasource.password=" + SECRET, "--customer-master.db.lock-timeout=60s"))
+                .isInstanceOf(BeanCreationException.class)
+                .hasRootCauseInstanceOf(InvalidLockTimeoutException.class);
+
+        String expected = "Database lock timeout invalid: customer-master.db.lock-timeout (DB_LOCK_TIMEOUT) must be"
+                + " below spring.datasource.hikari.data-source-properties.socketTimeout, so that PostgreSQL answers"
+                + " every lock wait before the socket bound gives up on the connection: PT1M is not below PT45S";
+        assertThat(output.getOut().lines().filter(expected::equals)).hasSize(1);
+        assertThat(output.getAll())
+                .doesNotContain("Application run failed", "Caused by:", "\tat ", SECRET, "Cannot connect to database");
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("SpringApplication without the generator profile and a 60s lock timeout: Spring Boot's report is"
+            + " unchanged")
+    void otherStartWithLockTimeoutNotBelowSocketBoundIsUnchanged(CapturedOutput output) {
+        SpringApplication application = lockTimeoutApplication();
+
+        assertThatThrownBy(() -> application.run("--spring.datasource.url=" + URL,
+                "--spring.datasource.username=customermaster", "--spring.datasource.password=" + SECRET,
+                "--customer-master.db.lock-timeout=60s"))
+                .isInstanceOf(BeanCreationException.class)
+                .hasRootCauseInstanceOf(InvalidLockTimeoutException.class);
+
+        assertThat(output.getAll()).contains("Application run failed").doesNotContain("Database lock timeout invalid");
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
     @DisplayName("SpringApplication without the generator profile: Spring Boot's report is unchanged")
     void otherStartIsUnchanged(CapturedOutput output) {
         SpringApplication application = failingApplication();
@@ -540,6 +681,66 @@ final class GeneratorStartupFailureReporterTest {
     }
 
     /**
+     * Raises the lock-timeout check's failure through the real {@link LockWaitingReads} constructor, over
+     * an unstarted Hikari pool with the application's 45-second socket bound, whose URL carries a password
+     * that must not appear.
+     *
+     * @param lockTimeout {@code customer-master.db.lock-timeout}, not below 45 s or outside 1 ms to
+     *                    {@link Integer#MAX_VALUE} ms
+     * @return the check's exception
+     */
+    private static InvalidLockTimeoutException lockTimeoutGuardFailure(Duration lockTimeout) {
+        return lockTimeoutGuardFailure(lockTimeout, "45");
+    }
+
+    /**
+     * Raises the lock-timeout check's failure through the real {@link LockWaitingReads} constructor, over
+     * an unstarted Hikari pool whose URL carries a password that must not appear; no connection is opened.
+     *
+     * @param lockTimeout   {@code customer-master.db.lock-timeout}
+     * @param socketTimeout the pool's {@code socketTimeout} data-source property
+     * @return the check's exception
+     */
+    private static InvalidLockTimeoutException lockTimeoutGuardFailure(Duration lockTimeout, String socketTimeout) {
+        try (HikariDataSource pool = new HikariDataSource()) {
+            pool.setJdbcUrl(URL + "&password=" + SECRET);
+            pool.addDataSourceProperty("socketTimeout", socketTimeout);
+            AppProperties settings = new AppProperties(new AppProperties.Db(lockTimeout),
+                    new AppProperties.Search(12, 100, 9999));
+            InvalidLockTimeoutException invalid = catchThrowableOfType(InvalidLockTimeoutException.class,
+                    () -> new LockWaitingReads(settings, new JdbcTemplate(pool)));
+            assertThat(invalid).as("lock-timeout check failure").isNotNull();
+            return invalid;
+        }
+    }
+
+    /**
+     * Wraps the lock-timeout check's failure as the generator's context refresh does: the search
+     * repository's dependency on {@code lockWaitingReads} cannot be satisfied because its constructor threw.
+     *
+     * @param invalid the check's exception
+     * @return the exception {@code SpringApplication.run} fails with
+     */
+    private static RuntimeException lockWaitingReadsStartupFailure(InvalidLockTimeoutException invalid) {
+        return new UnsatisfiedDependencyException(null, "customerSearchRepository", "lockWaitingReads",
+                new BeanCreationException("lockWaitingReads",
+                        "Failed to instantiate [" + LockWaitingReads.class.getName() + "]: Constructor threw exception",
+                        new BeanInstantiationException(LockWaitingReads.class, "Constructor threw exception",
+                                invalid)));
+    }
+
+    /**
+     * Builds an application over the real {@link LockWaitingReads}, Spring Boot's datasource
+     * auto-configuration and {@link LockTimeoutSource}, with no web server, banner, startup log or
+     * shutdown hook. The pool is never started, so no connection is opened.
+     *
+     * @return the application
+     */
+    private static SpringApplication lockTimeoutApplication() {
+        return quietApplication(LockTimeoutSource.class, LockWaitingReads.class, DataSourceAutoConfiguration.class);
+    }
+
+    /**
      * The one bean of {@link #failingApplication()}: its constructor fails as {@code JdbcConfig.jdbcDialect}
      * does when PostgreSQL rejects the password. It carries no stereotype, so no component scan finds it.
      */
@@ -553,6 +754,27 @@ final class GeneratorStartupFailureReporterTest {
         FailingDialectSource() {
             throw new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection",
                     new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+        }
+    }
+
+    /**
+     * The settings and template {@link LockWaitingReads} needs in {@link #lockTimeoutApplication()}:
+     * registers {@link AppProperties}, bound from {@code customer-master.*} as the application binds it,
+     * and a {@link JdbcTemplate} over the auto-configured datasource. It carries no stereotype, so no
+     * component scan finds it.
+     */
+    @EnableConfigurationProperties(AppProperties.class)
+    static final class LockTimeoutSource {
+
+        /**
+         * The template {@link LockWaitingReads} reads its datasource from.
+         *
+         * @param dataSource the auto-configured, unstarted Hikari pool
+         * @return the template
+         */
+        @Bean
+        JdbcTemplate jdbcTemplate(DataSource dataSource) {
+            return new JdbcTemplate(dataSource);
         }
     }
 }

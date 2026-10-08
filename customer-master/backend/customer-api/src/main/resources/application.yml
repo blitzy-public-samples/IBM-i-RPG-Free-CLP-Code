@@ -36,6 +36,34 @@ spring:
       # (config.BoundedDataSourceHealthIndicator, rounded up to whole seconds).
       # Hikari requires it below connection-timeout.
       validation-timeout: 2000
+      # pgjdbc connection properties of every pooled connection; the generator
+      # profile inherits them.
+      data-source-properties:
+        # Longest wait, in seconds, for PostgreSQL's answer on an open connection.
+        # Hikari hands out a connection used in the last 500 ms without an
+        # aliveness check, and any connection can lose the database mid-query, so
+        # without this bound a request waited without end on a database that
+        # stopped answering. With it the read fails with an I/O error, Hikari
+        # evicts the connection and the request answers 500 DEM9999 with an
+        # errorId. No legitimate answer takes longer than the lock timeout
+        # (DB_LOCK_TIMEOUT, 5s) plus statement time: an add or update gives up
+        # its lock wait with 409 DEM1001, and a search or get waiting behind a
+        # table lock (a generator load's ACCESS EXCLUSIVE) is answered at each
+        # lock timeout, re-checks and keeps waiting until the load commits
+        # (repository.LockWaitingReads, which fails startup unless the lock
+        # timeout is below this bound). So 45 only bounds a database that stops
+        # answering. It stays below nginx's default 60 s proxy_read_timeout, so
+        # the UI still receives the problem+json. A fixed value: no environment
+        # variable sets it.
+        socketTimeout: 45
+        # Server-side TCP keepalives of each session. PostgreSQL ends a session
+        # whose client vanished without closing its socket (a generator container
+        # killed during COPY) after about 11 s (5 s idle, then 3 unanswered probes
+        # 2 s apart), rolling the load back and releasing its lock, instead of
+        # after the OS default of about 2 hours. Probes run only while the
+        # connection is idle and a live peer's kernel answers them, so a slow but
+        # live client is never dropped.
+        options: "-c tcp_keepalives_idle=5 -c tcp_keepalives_interval=2 -c tcp_keepalives_count=3"
   flyway:
     schemas: ${DB_SCHEMA:customer_master}
     # V1-V4 only. Compose sets SPRING_FLYWAY_LOCATIONS to add classpath:db/seed (V5).
@@ -91,11 +119,15 @@ management:
         readiness:
           # Ready only while PostgreSQL answers ("db" is the DataSource check):
           # readiness turns 503 when the database is lost and UP once it returns.
+          # While requests waiting on locks hold every pooled connection, the
+          # check asks PostgreSQL directly over one unpooled connection and stays
+          # UP when it answers (config.ConnectionPoolSaturation).
           # Worst-case answer, about 9s: connection-timeout (5s), plus a pool
           # aliveness check started just before it expires (validation-timeout,
-          # 2s), plus the db check's validation (2s). That stays below Spring
-          # Boot's 10s slow-indicator threshold and Docker's default 30s
-          # healthcheck timeout.
+          # 2s), plus the db check's validation (2s); in a saturated pool,
+          # connection-timeout plus the direct probe's login and validation (2s
+          # each). That stays below Spring Boot's 10s slow-indicator threshold
+          # and Docker's default 30s healthcheck timeout.
           include: readinessState,db
         liveness:
           # Process state only, so a database outage never reports the app as broken.
@@ -111,7 +143,9 @@ springdoc:
 
 customer-master:
   db:
-    # Lock wait of add and update transactions before 409 DEM1001.
+    # Lock wait of add and update transactions before 409 DEM1001, and the
+    # interval at which a search or get waiting on a table lock re-checks it.
+    # Must stay below the 45 s socketTimeout above, or startup fails.
     # An empty DB_LOCK_TIMEOUT counts as unset: the 5s default applies.
     lock-timeout: ${DB_LOCK_TIMEOUT:5s}
   search:

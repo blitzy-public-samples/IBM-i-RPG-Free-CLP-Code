@@ -2,6 +2,7 @@ package com.democorp.customermaster.generator;
 
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
 import com.democorp.customermaster.config.DataSourceSchemaGuard.InvalidSchemaException;
+import com.democorp.customermaster.repository.LockWaitingReads.InvalidLockTimeoutException;
 import java.io.PrintStream;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
@@ -31,12 +32,14 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
  * {@code Cannot allocate CUSTMAST} or {@code Unknown option --<name>} do.
  *
  * <p><b>Why it exists.</b> The generator context needs the database while it starts: the JDBC dialect
- * is detected from a live connection, and {@code DataSourceCredentialsGuard} and
- * {@code DataSourceSchemaGuard} check the credentials and the schema settings before the pool exists. A
- * wrong password, an unknown host, a refused port, a missing database, an empty {@code DB_USER} or an
- * empty, blank or padded {@code DB_SCHEMA} therefore fails the context refresh, before
- * {@link CustomerGeneratorRunner} exists to print its line. Spring Boot would log
- * {@code Application run failed} with a stack trace of about 200 lines and the cause at its bottom.
+ * is detected from a live connection, {@code DataSourceCredentialsGuard} and
+ * {@code DataSourceSchemaGuard} check the credentials and the schema settings before the pool exists,
+ * and {@code LockWaitingReads} checks {@code DB_LOCK_TIMEOUT} against the pool's socket bound. A wrong
+ * password, an unknown host, a refused port, a missing database, an empty {@code DB_USER}, an empty,
+ * blank or padded {@code DB_SCHEMA}, or a {@code DB_LOCK_TIMEOUT} under 1 ms or not below the socket
+ * bound therefore fails the context refresh, before {@link CustomerGeneratorRunner} exists to print its
+ * line. Spring Boot would log {@code Application run failed} with a stack trace of about 200 lines and the
+ * cause at its bottom.
  *
  * <p><b>What it reports.</b> Only in a context whose environment has profile
  * {@value CustomerGeneratorRunner#PROFILE} active, and only for a failure whose cause graph, including
@@ -46,6 +49,9 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
  *       ({@code Database credentials missing: …});</li>
  *   <li>an {@link InvalidSchemaException}: prints the schema guard's own message
  *       ({@code Database schema invalid: …});</li>
+ *   <li>an {@link InvalidLockTimeoutException}: prints {@code Database lock timeout invalid: } and the
+ *       lock-timeout check's own message, which names {@code customer-master.db.lock-timeout} and the
+ *       bound it misses;</li>
  *   <li>a {@link CannotGetJdbcConnectionException}, or an {@link SQLException} with SQLSTATE class
  *       {@code 08} (connection exception) or {@code 28} (invalid authorization): prints
  *       {@code Cannot connect to database <host:port>: <reason>}. The address is the authority of the
@@ -86,6 +92,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
 
     /** The start of every connection-failure line. */
     static final String CONNECT_FAILURE = "Cannot connect to database";
+
+    /** The start of every lock-timeout failure line, before the check's own message. */
+    static final String LOCK_TIMEOUT_FAILURE = "Database lock timeout invalid";
 
     /** SQLSTATE class {@code 08}, connection exception, such as 08001 for a connection not established. */
     private static final String CONNECTION_EXCEPTION_CLASS = "08";
@@ -170,8 +179,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
      * @param failure     the exception the start failed with, or {@code null}
      * @param environment the failed context's environment, source of {@value #URL_PROPERTY}
      * @return the credentials guard's message for missing credentials, else the schema guard's message for
-     *         an invalid schema setting, else {@code Cannot connect to database [<authority>]: <reason>} for
-     *         a connection failure, otherwise (and for {@code null}) empty
+     *         an invalid schema setting, else {@code Database lock timeout invalid: <message>} for an
+     *         unusable lock timeout, else {@code Cannot connect to database [<authority>]: <reason>} for a
+     *         connection failure, otherwise (and for {@code null}) empty
      */
     static Optional<String> describe(Throwable failure, Environment environment) {
         final CauseScan scan = CauseScan.of(failure);
@@ -180,6 +190,10 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
         }
         if (scan.invalidSchema != null) {
             return Optional.of(CustomerGeneratorRunner.messageOf(scan.invalidSchema));
+        }
+        if (scan.invalidLockTimeout != null) {
+            return Optional.of(LOCK_TIMEOUT_FAILURE + ": "
+                    + CustomerGeneratorRunner.messageOf(scan.invalidLockTimeout));
         }
         if (!scan.connectionFailure) {
             return Optional.empty();
@@ -278,6 +292,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
         /** The schema guard's failure, if any. */
         private InvalidSchemaException invalidSchema;
 
+        /** The lock-timeout check's failure, if any. */
+        private InvalidLockTimeoutException invalidLockTimeout;
+
         /** Whether the graph holds a connection failure. */
         private boolean connectionFailure;
 
@@ -347,6 +364,9 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
             }
             if (current instanceof InvalidSchemaException invalid && invalidSchema == null) {
                 invalidSchema = invalid;
+            }
+            if (current instanceof InvalidLockTimeoutException invalid && invalidLockTimeout == null) {
+                invalidLockTimeout = invalid;
             }
             if (current instanceof CannotGetJdbcConnectionException) {
                 connectionFailure = true;

@@ -2,6 +2,7 @@ package com.democorp.customermaster.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.democorp.customermaster.config.ConnectionPoolSaturation;
 import com.democorp.customermaster.controller.ProblemFactory.FieldProblem;
 import com.democorp.customermaster.messages.MessageCatalog;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,6 +17,7 @@ import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -35,7 +37,9 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
  * names nothing a client can be pointed to carries no {@code errors}.
  *
  * <p>Plain JUnit 5 and AssertJ over a real {@link ProblemFactory} and {@link MessageCatalog}, with
- * Spring's mock servlet request: no Spring context, no database, no Docker.
+ * Spring's mock servlet request: no Spring context, no database, no Docker. The handler's
+ * {@link ConnectionPoolSaturation} wraps an unconfigured {@link DriverManagerDataSource}, which none of
+ * these failures consults.
  */
 @DisplayName("ApiExceptionHandler: APP0400 errors[] for parameter failures")
 final class ApiExceptionHandlerFieldErrorsTest {
@@ -48,7 +52,8 @@ final class ApiExceptionHandlerFieldErrorsTest {
 
     @BeforeEach
     void createHandler() {
-        handler = new ApiExceptionHandler(new ProblemFactory(new MessageCatalog(), new ObjectMapper()));
+        handler = new ApiExceptionHandler(new ProblemFactory(new MessageCatalog(), new ObjectMapper()),
+                new ConnectionPoolSaturation(new DriverManagerDataSource()));
         request = new ServletWebRequest(new MockHttpServletRequest("GET", "/api/states"),
                 new MockHttpServletResponse());
     }

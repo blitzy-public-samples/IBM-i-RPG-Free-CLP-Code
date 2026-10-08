@@ -35,8 +35,9 @@ import org.springframework.validation.annotation.Validated;
  * request.
  *
  * <p>{@code CustomerMaintenanceService} reads {@link #db()} for its add and update transactions,
- * and {@code CustomerSearchService} reads {@link #search()}. The generator's {@code CustomerLoader}
- * keeps its own fixed lock timeout and does not read this class.
+ * {@code repository.LockWaitingReads} reads it as the interval at which a search or get waiting on
+ * a table lock re-checks, and {@code CustomerSearchService} reads {@link #search()}. The generator's
+ * {@code CustomerLoader} keeps its own fixed lock timeout and does not read this class.
  *
  * @param db     database settings ({@code customer-master.db.*})
  * @param search customer search settings ({@code customer-master.search.*})
@@ -49,8 +50,10 @@ public record AppProperties(@DefaultValue @Valid Db db, @DefaultValue @Valid Sea
      * Database settings.
      *
      * @param lockTimeout {@code customer-master.db.lock-timeout} ({@code DB_LOCK_TIMEOUT}): the
-     *                    {@code SET LOCAL lock_timeout} of add and update transactions; a lock
-     *                    wait that exceeds it becomes 409 DEM1001
+     *                    {@code SET LOCAL lock_timeout} of add and update transactions, where a
+     *                    lock wait that exceeds it becomes 409 DEM1001, and of searches and gets,
+     *                    which re-check a held table lock after each such wait and keep waiting;
+     *                    startup fails unless it is below the pgjdbc {@code socketTimeout}
      */
     public record Db(@DefaultValue("5s") @NotNull Duration lockTimeout) {
     }

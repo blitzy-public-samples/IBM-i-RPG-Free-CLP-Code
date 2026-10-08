@@ -3,6 +3,7 @@ package com.democorp.customermaster.controller;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.democorp.customermaster.config.ConnectionPoolSaturation;
 import com.democorp.customermaster.controller.ProblemFactory.FieldProblem;
 import com.democorp.customermaster.messages.MessageCatalog;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,6 +21,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.web.context.request.ServletWebRequest;
@@ -47,7 +49,8 @@ final class ParameterParseFailureInterceptorTest {
     @BeforeEach
     void create() {
         interceptor = new ParameterParseFailureInterceptor();
-        handler = new ApiExceptionHandler(new ProblemFactory(new MessageCatalog(), new ObjectMapper()));
+        handler = new ApiExceptionHandler(new ProblemFactory(new MessageCatalog(), new ObjectMapper()),
+                new ConnectionPoolSaturation(new DriverManagerDataSource()));
     }
 
     // ---------------------------------------------------------------------------------------------
