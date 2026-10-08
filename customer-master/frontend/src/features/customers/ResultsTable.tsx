@@ -8,7 +8,11 @@
  *   'Opt' DSPATR(HI) + SF_OPT 1A B            "Opt" column: a one-character text
  *     DSPATR(RI) on indicator 81                input, `aria-invalid="true"` (the
  *                                               reverse image of global.css) when
- *                                               the panel marks it invalid
+ *                                               the panel marks it invalid. Its id
+ *                                               is a `useId()` prefix plus the
+ *                                               row's `custId`, and a visually
+ *                                               hidden `<label for>` in the same
+ *                                               cell names it "Option for <name>"
  *   'Customer Name' + SF_NAME 40A             "Customer Name" column
  *   'City'          + SF_CITY 20A             "City" column
  *   'St'            + SF_STATE 2A             "St" column
@@ -59,6 +63,7 @@
  *   optionRef={(custId) => (el) => { optionInputs.current[custId] = el; }}
  * />
  */
+import { useId } from 'react';
 import type { CustomerSummaryResponse } from '../../api/customers';
 
 /**
@@ -127,6 +132,9 @@ export function ResultsTable({
   optionRef,
   caption = DEFAULT_CAPTION,
 }: ResultsTableProps) {
+  // Opt input ids are `${idPrefix}-opt-${custId}`: unique per row, and per
+  // table, so a Customer picker's table over the search page shares no id.
+  const idPrefix = useId();
   // Fixed order and no duplicates, however the panel lists its options.
   const actions = OPTION_ORDER.filter((option) => allowedOptions.includes(option));
 
@@ -158,16 +166,21 @@ export function ResultsTable({
           // showing "undefined" in a label or a cell.
           const name = row.name ?? '';
           const inactive = row.active === INACTIVE;
+          const optionId = `${idPrefix}-opt-${custId}`;
           return (
             <tr key={custId} className={inactive ? 'row--inactive' : undefined}>
               <td>
+                {/* Every input has a <label for>; this hidden one names the Opt input "Option for <name>". */}
+                <label htmlFor={optionId} className="visually-hidden">
+                  {`Option for ${name}`}
+                </label>
                 <input
+                  id={optionId}
                   type="text"
                   maxLength={1}
                   size={1}
                   inputMode="numeric"
                   autoComplete="off"
-                  aria-label={`Option for ${name}`}
                   value={options[custId] ?? ''}
                   onChange={(event) => onOptionChange(custId, event.target.value)}
                   aria-invalid={invalid[custId] ? 'true' : undefined}

@@ -24,6 +24,8 @@
  *   Enter searches again (`NewSearchCriteria`, PMTSTATER:257-260).
  * - **Option 1** returns the row's code (PMTSTATER:299-304); any other option
  *   raises DEM0004 with the option typed and marks that row (:311-329).
+ * - **Option labels.** Every option field has its own id and a `<label for>`
+ *   naming it "Option for <Name>" (AAP 0.3.8: all inputs have `<label for>`).
  * - **Enter with nothing to do** positions the last six-row page and sends
  *   no request (PMTSTATER:334-341).
  * - **F3, F12 and Escape** cancel without a code (PMTSTATER:252-255); a key
@@ -426,6 +428,40 @@ describe('StatePicker', () => {
       expect(onCancel).not.toHaveBeenCalled();
       expect(stateRequests).toHaveLength(1);
       expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('each option field has its own id and a <label for> naming it "Option for <Name>"', async () => {
+      const byName = await serverRows('', 'name');
+
+      const { user, dialog } = await openPicker();
+
+      /** Checks the option fields of `rows`, the page in view, and returns their ids. */
+      function checkOptionLabels(rows: readonly StateResponse[]): string[] {
+        return rows.map((row) => {
+          const name = `Option for ${row.name}`;
+          const option = within(dialog).getByRole('textbox', { name });
+          if (!(option instanceof HTMLInputElement)) {
+            throw new Error(`The "${name}" textbox is not an <input>`);
+          }
+          expect(option.id).not.toBe('');
+          // Named by its <label for>, not by an aria-label.
+          expect(within(dialog).getByLabelText(name)).toBe(option);
+          expect(option).not.toHaveAttribute('aria-label');
+          const labels = option.labels;
+          expect(labels).toHaveLength(1);
+          expect(labels?.[0]).toHaveAttribute('for', option.id);
+          expect(labels?.[0]).toHaveTextContent(name);
+          return option.id;
+        });
+      }
+
+      const firstPageIds = checkOptionLabels(byName.slice(0, PAGE_SIZE));
+      expect(new Set(firstPageIds).size).toBe(PAGE_SIZE);
+
+      // Paging re-labels the same six inputs for the rows now in view.
+      await user.keyboard('{PageDown}');
+      const secondPageIds = checkOptionLabels(byName.slice(PAGE_SIZE, 2 * PAGE_SIZE));
+      expect(new Set([...firstPageIds, ...secondPageIds]).size).toBe(2 * PAGE_SIZE);
     });
 
     it("the row's Select button returns its code", async () => {

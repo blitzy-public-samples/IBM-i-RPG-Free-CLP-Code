@@ -40,7 +40,9 @@
  * - **Input.** "Name Contains" (SC_NAME 10A, no CHECK(LC), PMTSTATED:87-88)
  *   and the option fields uppercase as typed by the shared length-preserving
  *   rule. The filter is sent exactly as typed: trimming, uppercasing and the
- *   `rpad(upper(name), 30) LIKE '%…%'` match are the server's.
+ *   `rpad(upper(name), 30) LIKE '%…%'` match are the server's. Each option
+ *   field's id is a `useId()` prefix plus the row's state code, and a visually
+ *   hidden `<label for>` in its cell names it "Option for <Name>".
  *
  * Not carried: SH_PGM, DATE and TIME of the header (5250 chrome), and the
  * function line, which PMTSTATER never assigns (SH_FUNCT stays blank).
@@ -61,7 +63,7 @@
  * />
  * ```
  */
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { FieldError } from '../../api/problem';
 import type { StateSort } from '../../api/states';
@@ -193,6 +195,13 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   // The rendered option inputs by state code, filled by callback refs, so the
   // first rejected option can receive focus (DSPATR(PC), indicator 82).
   const optionInputs = useRef(new Map<string, HTMLInputElement>());
+  // Option input ids are `${optionIdPrefix}-opt-${code}`, unique per row and per window.
+  const optionIdPrefix = useId();
+
+  /** The id of the option input of the row holding state `code`. */
+  function optionIdOf(code: string): string {
+    return `${optionIdPrefix}-opt-${code}`;
+  }
 
   /** Shows the first field error of a failed request on the filter, the only input sent. */
   function showFilterErrors(errors: FieldError[]): void {
@@ -448,13 +457,17 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
             {pageRows.map((row, slot) => (
               <tr key={slot}>
                 <td>
+                  {/* Every input has a <label for>; this hidden one names the option field "Option for <Name>". */}
+                  <label htmlFor={optionIdOf(row.state)} className="visually-hidden">
+                    {`Option for ${row.name}`}
+                  </label>
                   <input
+                    id={optionIdOf(row.state)}
                     type="text"
                     maxLength={OPTION_LENGTH}
                     size={OPTION_LENGTH}
                     inputMode="numeric"
                     autoComplete="off"
-                    aria-label={`Option for ${row.name}`}
                     value={options[row.state] ?? ''}
                     onChange={(event) => changeOption(row.state, event.target.value)}
                     aria-invalid={invalid.has(row.state) ? 'true' : undefined}
