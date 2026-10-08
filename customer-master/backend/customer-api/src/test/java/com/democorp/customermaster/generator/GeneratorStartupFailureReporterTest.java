@@ -1,0 +1,418 @@
+package com.democorp.customermaster.generator;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import com.democorp.customermaster.config.DataSourceCredentialsGuard;
+import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.sql.SQLException;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.postgresql.util.PSQLException;
+import org.postgresql.util.PSQLState;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.boot.Banner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.SpringBootExceptionReporter;
+import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.autoconfigure.jdbc.JdbcConnectionDetails;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.core.io.support.SpringFactoriesLoader;
+import org.springframework.core.io.support.SpringFactoriesLoader.ArgumentResolver;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.mock.env.MockEnvironment;
+
+/**
+ * Specifies {@link GeneratorStartupFailureReporter}: a generator start that fails for want of its
+ * database prints one line naming the cause, as the generator's other failures do, instead of Spring
+ * Boot's {@code Application run failed} and a stack trace; every other failure and every other context
+ * is left to Spring Boot.
+ *
+ * <p><b>Scenarios.</b> The failures a wrong {@code DB_PASSWORD}, an unknown {@code DB_HOST}, a refused
+ * {@code DB_PORT}, a missing {@code DB_NAME} and an empty {@code DB_USER} raise, wrapped as Spring wraps
+ * them during the context refresh; failures that are not about the database; the web context; a
+ * {@code null} context; URLs whose query or user information carries a secret; cyclic and chained
+ * cause graphs; the {@code META-INF/spring.factories} registration and its order ahead of
+ * Spring Boot's {@code FailureAnalyzers}; and one start through {@link SpringApplication} with and without the
+ * profile.
+ *
+ * <p>Plain JUnit 5 and AssertJ over the reporter's package-private constructor, printing to a
+ * {@link ByteArrayOutputStream}; no database and no Docker. The exceptions are built as pgjdbc and
+ * Spring raise them. This class and its nested source class carry no stereotype, because test classes
+ * are on the classpath when other tests run the application's component scan. Every host, credential
+ * and URL here is fictitious.
+ */
+@DisplayName("GeneratorStartupFailureReporter: a database startup failure of the generator is one line")
+final class GeneratorStartupFailureReporterTest {
+
+    /** The fictitious database address of most scenarios. */
+    private static final String AUTHORITY = "reporter-test-host:20044";
+
+    /** The datasource URL as {@code application.yml} resolves it. */
+    private static final String URL =
+            "jdbc:postgresql://" + AUTHORITY + "/customermaster?currentSchema=customer_master";
+
+    /** A fictitious password; it must never be printed. */
+    private static final String SECRET = "reporter-test-secret";
+
+    /** The message PostgreSQL sends for a wrong password (SQLSTATE 28P01). */
+    private static final String AUTH_FAILED = "FATAL: password authentication failed for user \"customermaster\"";
+
+    /** The message pgjdbc gives for a connect that never reached a server. */
+    private static final String ATTEMPT_FAILED = "The connection attempt failed.";
+
+    /** Spring Boot's own reporter, a package-private class, asked after this one. */
+    private static final String FAILURE_ANALYZERS = "org.springframework.boot.diagnostics.FailureAnalyzers";
+
+    /** Receives the reporter's line. */
+    private final ByteArrayOutputStream printed = new ByteArrayOutputStream();
+
+    @Test
+    @DisplayName("wrong password: one line with host:port and the server's 28P01 message")
+    void wrongPasswordIsOneLine() {
+        RuntimeException failure = startupFailure(
+                new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly("Cannot connect to database " + AUTHORITY + ": " + AUTH_FAILED);
+    }
+
+    @Test
+    @DisplayName("unknown host: names the host the resolver could not find")
+    void unknownHostIsOneLine() {
+        RuntimeException failure = startupFailure(new PSQLException(ATTEMPT_FAILED,
+                PSQLState.CONNECTION_UNABLE_TO_CONNECT, new UnknownHostException("nohost-qa")));
+
+        assertThat(reporter("jdbc:postgresql://nohost-qa:5432/customermaster?currentSchema=customer_master",
+                CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines())
+                .containsExactly("Cannot connect to database nohost-qa:5432: unknown host nohost-qa");
+    }
+
+    @Test
+    @DisplayName("refused port: the socket failure, in lower case after the colon")
+    void refusedPortIsOneLine() {
+        RuntimeException failure = startupFailure(new PSQLException("Connection to localhost:20049 refused. Check"
+                + " that the hostname and port are correct and that the postmaster is accepting TCP/IP connections.",
+                PSQLState.CONNECTION_UNABLE_TO_CONNECT, new ConnectException("Connection refused")));
+
+        assertThat(reporter("jdbc:postgresql://localhost:20049/customermaster", CustomerGeneratorRunner.PROFILE)
+                .reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly("Cannot connect to database localhost:20049: connection refused");
+    }
+
+    @Test
+    @DisplayName("connect timeout: the socket timeout is the reason")
+    void connectTimeoutIsOneLine() {
+        RuntimeException failure = startupFailure(new PSQLException(ATTEMPT_FAILED,
+                PSQLState.CONNECTION_UNABLE_TO_CONNECT, new SocketTimeoutException("Connect timed out")));
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly("Cannot connect to database " + AUTHORITY + ": connect timed out");
+    }
+
+    @Test
+    @DisplayName("missing database (3D000 under CannotGetJdbcConnectionException): the deepest SQL message")
+    void missingDatabaseIsOneLine() {
+        RuntimeException failure = startupFailure(
+                new SQLException("FATAL: database \"nodb\" does not exist", "3D000"));
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines())
+                .containsExactly("Cannot connect to database " + AUTHORITY
+                        + ": FATAL: database \"nodb\" does not exist");
+    }
+
+    @Test
+    @DisplayName("empty DB_USER: prints the credentials guard's own message")
+    void missingCredentialsPrintGuardMessage() {
+        JdbcConnectionDetails details = mock(JdbcConnectionDetails.class);
+        when(details.getUsername()).thenReturn("");
+        when(details.getPassword()).thenReturn(SECRET);
+        when(details.getJdbcUrl()).thenReturn(URL);
+        DataSourceCredentialsGuard guard = new DataSourceCredentialsGuard();
+        MissingCredentialsException missing = catchThrowableOfType(MissingCredentialsException.class,
+                () -> guard.postProcessAfterInitialization(details, "jdbcConnectionDetails"));
+        RuntimeException failure = new BeanCreationException("dataSource", "Unsatisfied dependency",
+                new BeanCreationException("jdbcConnectionDetails", missing.getMessage(), missing));
+
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly(missing.getMessage());
+        assertThat(missing.getMessage())
+                .startsWith("Database credentials missing: spring.datasource.username (environment variable DB_USER)")
+                .doesNotContain(SECRET, URL);
+    }
+
+    @Test
+    @DisplayName("not a database failure (option validation, plain state, SQL grammar): false, nothing printed")
+    void otherFailuresAreLeftToSpringBoot() {
+        GeneratorStartupFailureReporter reporter = reporter(URL, CustomerGeneratorRunner.PROFILE);
+
+        assertThat(reporter.reportException(new BeanCreationException("customerGeneratorRunner",
+                "Could not bind properties to 'GeneratorProperties'",
+                new IllegalStateException("count must be greater than or equal to 1")))).isFalse();
+        assertThat(reporter.reportException(new IllegalStateException("Failed to execute ApplicationRunner")))
+                .isFalse();
+        assertThat(reporter.reportException(new BeanCreationException("stateService", "init failed",
+                new BadSqlGrammarException("states", "SELECT 1", new SQLException("relation missing", "42P01")))))
+                .isFalse();
+
+        assertThat(printedLines()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("web context (no generator profile): the same failure is left to Spring Boot")
+    void webContextIsLeftToSpringBoot() {
+        RuntimeException failure = startupFailure(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+
+        assertThat(reporter(URL).reportException(failure)).isFalse();
+        assertThat(reporter(URL, "test").reportException(failure)).isFalse();
+
+        assertThat(printedLines()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("null context, null failure, or a context that cannot answer: false, nothing printed, no throw")
+    void unusableInputIsLeftToSpringBoot() {
+        RuntimeException failure = startupFailure(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+        ConfigurableApplicationContext closed = mock(ConfigurableApplicationContext.class);
+        when(closed.getEnvironment()).thenThrow(new IllegalStateException("context closed"));
+
+        assertThat(new GeneratorStartupFailureReporter(null, printStream()).reportException(failure)).isFalse();
+        assertThat(reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(null)).isFalse();
+        assertThat(new GeneratorStartupFailureReporter(closed, printStream()).reportException(failure)).isFalse();
+
+        assertThat(printedLines()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a password in the URL query is never printed; only the authority is")
+    void queryPasswordIsNeverPrinted() {
+        RuntimeException failure = startupFailure(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+
+        assertThat(reporter(URL + "&user=customermaster&password=" + SECRET, CustomerGeneratorRunner.PROFILE)
+                .reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly("Cannot connect to database " + AUTHORITY + ": " + AUTH_FAILED);
+        assertThat(printed.toString(UTF_8)).doesNotContain(SECRET, "password=", "currentSchema", "user=");
+    }
+
+    @Test
+    @DisplayName("user information before the host, or no parseable authority: the address is left out")
+    void unsafeOrUnparseableAuthorityIsOmitted() {
+        RuntimeException failure = startupFailure(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+
+        assertThat(reporter("jdbc:postgresql://customermaster:" + SECRET + "@" + AUTHORITY + "/customermaster",
+                CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+        assertThat(reporter("jdbc:postgresql://localhost:abc/customermaster", CustomerGeneratorRunner.PROFILE)
+                .reportException(failure)).isTrue();
+        assertThat(reporter(null, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue();
+
+        assertThat(printedLines()).containsExactly(
+                "Cannot connect to database: " + AUTH_FAILED,
+                "Cannot connect to database: " + AUTH_FAILED,
+                "Cannot connect to database: " + AUTH_FAILED);
+        assertThat(printed.toString(UTF_8)).doesNotContain(SECRET);
+    }
+
+    @Test
+    @DisplayName("authority: hosts and ports only, from the prefix to the path, query or fragment")
+    void authorityKeepsHostsAndPortsOnly() {
+        assertThat(GeneratorStartupFailureReporter.authority(URL)).contains(AUTHORITY);
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://db/customermaster")).contains("db");
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://a.example:5432,b.example/x"))
+                .contains("a.example:5432,b.example");
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://[::1]:5432/x"))
+                .contains("[::1]:5432");
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://db:5432?password=" + SECRET))
+                .contains("db:5432");
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://db:5432#frag")).contains("db:5432");
+
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql:customermaster")).isEmpty();
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:mysql://db:3306/x")).isEmpty();
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql:///x")).isEmpty();
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://db:5432?pw=a@b")).isEmpty();
+        assertThat(GeneratorStartupFailureReporter.authority("jdbc:postgresql://bad host:5432/x")).isEmpty();
+        assertThat(GeneratorStartupFailureReporter.authority(null)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("cause graphs: a 28P01 behind SQLException.getNextException is found; a cycle ends")
+    void causeGraphsAreWalkedSafely() {
+        SQLException batch = new SQLException("Batch entry 0 failed", "08006");
+        batch.setNextException(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+        assertThat(GeneratorStartupFailureReporter.describe(new BeanCreationException("jdbcDialect", "failed", batch),
+                environment(URL, CustomerGeneratorRunner.PROFILE)))
+                .contains("Cannot connect to database " + AUTHORITY + ": " + AUTH_FAILED);
+
+        IllegalStateException first = new IllegalStateException("first");
+        IllegalStateException second = new IllegalStateException("second", first);
+        first.initCause(second);
+        Optional<String> cyclic = GeneratorStartupFailureReporter.describe(first,
+                environment(URL, CustomerGeneratorRunner.PROFILE));
+        assertThat(cyclic).isEmpty();
+
+        assertThat(GeneratorStartupFailureReporter.describe(null, environment(URL, CustomerGeneratorRunner.PROFILE)))
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("META-INF/spring.factories registers the reporter, and Spring Boot asks it before FailureAnalyzers")
+    void registeredAheadOfFailureAnalyzers() {
+        GenericApplicationContext context = new GenericApplicationContext();
+        context.setEnvironment(environment(URL, CustomerGeneratorRunner.PROFILE));
+
+        List<SpringBootExceptionReporter> reporters = SpringFactoriesLoader
+                .forDefaultResourceLocation(getClass().getClassLoader())
+                .load(SpringBootExceptionReporter.class,
+                        ArgumentResolver.of(ConfigurableApplicationContext.class, context));
+
+        assertThat(reporters).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(reporters.get(0)).isInstanceOf(GeneratorStartupFailureReporter.class);
+        assertThat(reporters).extracting(reporter -> reporter.getClass().getName()).contains(FAILURE_ANALYZERS);
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("SpringApplication under the generator profile: the one line, no 'Application run failed', rethrown")
+    void generatorStartPrintsOneLine(CapturedOutput output) {
+        SpringApplication application = failingApplication();
+
+        assertThatThrownBy(() -> application.run("--spring.profiles.active=" + CustomerGeneratorRunner.PROFILE,
+                "--spring.datasource.url=" + URL + "&password=" + SECRET))
+                .isInstanceOf(BeanCreationException.class)
+                .hasRootCauseInstanceOf(PSQLException.class);
+
+        String expected = "Cannot connect to database " + AUTHORITY + ": " + AUTH_FAILED;
+        assertThat(output.getOut().lines().filter(expected::equals)).hasSize(1);
+        assertThat(output.getAll())
+                .doesNotContain("Application run failed", "Caused by:", "\tat ", SECRET);
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("SpringApplication without the generator profile: Spring Boot's report is unchanged")
+    void otherStartIsUnchanged(CapturedOutput output) {
+        SpringApplication application = failingApplication();
+
+        assertThatThrownBy(() -> application.run("--spring.datasource.url=" + URL))
+                .isInstanceOf(BeanCreationException.class);
+
+        assertThat(output.getAll()).contains("Application run failed").doesNotContain("Cannot connect to database");
+    }
+
+    /**
+     * Wraps a database failure as the generator's context refresh does: the dialect bean fails to obtain
+     * a connection, and the beans that depend on it fail in turn.
+     *
+     * @param sqlFailure what the driver raised
+     * @return the exception {@code SpringApplication.run} fails with
+     */
+    private static RuntimeException startupFailure(SQLException sqlFailure) {
+        return new BeanCreationException("cszSource",
+                "Unsatisfied dependency expressed through constructor parameter 0",
+                new BeanCreationException("jdbcDialect", "Failed to instantiate [Dialect]",
+                        new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection", sqlFailure)));
+    }
+
+    /**
+     * Creates a reporter over a context with the given environment, printing to {@link #printed}.
+     *
+     * @param url      the {@code spring.datasource.url}, or {@code null} for none
+     * @param profiles the active profiles
+     * @return the reporter
+     */
+    private GeneratorStartupFailureReporter reporter(String url, String... profiles) {
+        GenericApplicationContext context = new GenericApplicationContext();
+        context.setEnvironment(environment(url, profiles));
+        return new GeneratorStartupFailureReporter(context, printStream());
+    }
+
+    /**
+     * Creates an environment.
+     *
+     * @param url      the {@code spring.datasource.url}, or {@code null} for none
+     * @param profiles the active profiles
+     * @return the environment
+     */
+    private static MockEnvironment environment(String url, String... profiles) {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setActiveProfiles(profiles);
+        if (url != null) {
+            environment.setProperty(GeneratorStartupFailureReporter.URL_PROPERTY, url);
+        }
+        return environment;
+    }
+
+    /**
+     * Returns a stream into {@link #printed}.
+     *
+     * @return the stream
+     */
+    private PrintStream printStream() {
+        return new PrintStream(printed, true, UTF_8);
+    }
+
+    /**
+     * Returns what the reporters printed, line by line.
+     *
+     * @return the printed lines
+     */
+    private List<String> printedLines() {
+        return printed.toString(UTF_8).lines().toList();
+    }
+
+    /**
+     * Builds an application whose only bean fails as the generator's dialect bean does on a wrong
+     * password, with no web server, banner, startup log or shutdown hook.
+     *
+     * @return the application
+     */
+    private static SpringApplication failingApplication() {
+        SpringApplication application = new SpringApplication(FailingDialectSource.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        application.setBannerMode(Banner.Mode.OFF);
+        application.setLogStartupInfo(false);
+        application.setRegisterShutdownHook(false);
+        return application;
+    }
+
+    /**
+     * The one bean of {@link #failingApplication()}: its constructor fails as {@code JdbcConfig.jdbcDialect}
+     * does when PostgreSQL rejects the password. It carries no stereotype, so no component scan finds it.
+     */
+    static final class FailingDialectSource {
+
+        /**
+         * Fails.
+         *
+         * @throws CannotGetJdbcConnectionException always, caused by a 28P01 {@link PSQLException}
+         */
+        FailingDialectSource() {
+            throw new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection",
+                    new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+        }
+    }
+}

@@ -45,8 +45,10 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>Ownership.</b> No other class constructs a {@code ProblemDetail} or writes a problem body:
  * {@code ApiExceptionHandler} uses {@link #response(ProblemDetail, HttpHeaders)} for errors that reach
- * Spring MVC, while {@code ProblemErrorController} (ERROR dispatch) and the security entry point and
- * access-denied handler use {@link #write(HttpServletResponse, ProblemDetail)}.
+ * Spring MVC, while {@code ProblemErrorController} (ERROR dispatch), the security entry point and
+ * access-denied handler, the security configuration's CORS processor (a rejected cross-origin
+ * request) and {@code ProblemErrorReportValve} (a request Tomcat's connector rejects) use
+ * {@link #write(HttpServletResponse, ProblemDetail)}.
  *
  * <p><b>Dependency direction.</b> The security configuration depends on this class, so it imports only
  * {@link MessageCatalog}, Spring, Jackson, Jakarta Servlet, SLF4J and the JDK. It never imports DTOs,
@@ -388,9 +390,10 @@ public class ProblemFactory {
 
     /**
      * Writes a problem straight to the servlet response, for code that runs outside Spring MVC's return
-     * value handling: the ERROR dispatch controller and the security entry point and access-denied
-     * handler. Headers already set on the response, such as a {@code WWW-Authenticate} challenge or an
-     * {@code Allow} list, are kept.
+     * value handling: the ERROR dispatch controller, the security entry point and access-denied
+     * handler, the CORS processor's rejection, and the container's error-report valve. Headers already
+     * set on the response, such as a {@code WWW-Authenticate} challenge, an {@code Allow} list or
+     * {@code Vary}, are kept.
      *
      * <p>The body is serialized first, with the Boot-configured mapper, so a serialization failure leaves
      * the response untouched. Then any buffered content is discarded, and the body is always sent as its

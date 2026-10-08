@@ -659,6 +659,12 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      *       {@code addr contains a character that cannot be stored}, {@code <name> is invalid}</td></tr>
      *   <tr><td>type mismatch of a parameter (field)</td><td>{@code size has an invalid value}</td></tr>
      *   <tr><td>missing request parameter (field)</td><td>{@code <name> is required}</td></tr>
+     *   <tr><td>query parameter Tomcat could not decode, {@link ParameterParseFailedException} (field,
+     *       unless its name is itself malformed)</td><td>{@code cursor has an invalid value},
+     *       {@code parameter has an invalid value}</td></tr>
+     *   <tr><td>other parameter parse failure of Tomcat, {@link ParameterParseFailedException}</td>
+     *       <td>{@code parameter without a name}, {@code too many parameters},
+     *       {@code request body too large} (413), {@code malformed request parameters}</td></tr>
      *   <tr><td>no route or static resource</td><td>{@code no such resource}</td></tr>
      *   <tr><td>405, 406, 415</td><td>{@code method not allowed}, {@code not acceptable},
      *       {@code unsupported media type}</td></tr>
@@ -738,6 +744,10 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                     List.of(Violation.general(REASON_NOT_ACCEPTABLE));
             case HttpMediaTypeNotSupportedException unsupported ->
                     List.of(Violation.general(REASON_UNSUPPORTED_MEDIA_TYPE));
+            // Tomcat could not decode one parameter and dropped it, or rejected the parameters as a whole.
+            case ParameterParseFailedException unparsed -> List.of(unparsed.reason() == null
+                    ? named(unparsed.parameterName(), "has an invalid value")
+                    : Violation.general(unparsed.reason()));
             default -> List.of(Violation.general(statusReason(status)));
         };
     }

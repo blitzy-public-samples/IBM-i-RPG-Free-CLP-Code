@@ -59,13 +59,17 @@ import org.springframework.stereotype.Component;
  * returning {@value #EXIT_FAILURE}:
  * <ol>
  *   <li><b>Strict options.</b> Only {@code --count}, {@code --start-id}, {@code --csz-file},
- *       {@code --seed}, {@code --customer-master.generator.*} and {@code --spring.*} are accepted, so a
- *       mistyped flag cannot silently fall back to its default. The first other option, in sorted
- *       order, prints {@code Unknown option --<name>}; failing that, the first non-option argument
- *       prints {@code Unknown option <arg>}. Spring Boot's own {@code --debug} and {@code --trace} are
- *       rejected too; {@code --logging.level...} likewise. Logging can still be tuned through
- *       {@code LOGGING_LEVEL_*} environment variables. Once every argument is accepted, the first
- *       flag or {@code --customer-master.generator.*} option given without a value, in sorted order,
+ *       {@code --seed}, their fully qualified properties {@code --customer-master.generator.count},
+ *       {@code .start-id} (also {@code .startId} or {@code .start_id}), {@code .csz-file} (also
+ *       {@code .cszFile} or {@code .csz_file}) and {@code .seed}, all matched exactly
+ *       ({@link #QUALIFIED_OPTIONS}), and {@code --spring.*} are accepted, so a mistyped flag or
+ *       qualified property cannot silently fall back to its default. The first other option, in
+ *       sorted order, prints {@code Unknown option --<name>}, for example
+ *       {@code Unknown option --customer-master.generator.cuont}; failing that, the first non-option
+ *       argument prints {@code Unknown option <arg>}. Spring Boot's own {@code --debug} and
+ *       {@code --trace} are rejected too; {@code --logging.level...} likewise. Logging can still be
+ *       tuned through {@code LOGGING_LEVEL_*} environment variables. Once every argument is accepted,
+ *       the first flag or qualified property given without a value, in sorted order,
  *       prints {@code Option --<name> requires a value}: a bare {@code --seed} would otherwise bind
  *       as empty and select a default. An explicitly empty value ({@code --start-id=},
  *       {@code --csz-file=}, {@code --seed=}) still selects the automatic start, the bundled sample or
@@ -159,8 +163,31 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     /** Refreshes the planner statistics after a load; an unqualified name, resolved by {@code currentSchema}. */
     static final String ANALYZE_SQL = "ANALYZE custmast";
 
-    /** Option-name prefix of the fully qualified generator properties. */
+    /**
+     * Option-name prefix of the fully qualified generator properties. Only the names in
+     * {@link #QUALIFIED_OPTIONS} are accepted under it.
+     */
     static final String GENERATOR_OPTION_PREFIX = GeneratorProperties.PREFIX + ".";
+
+    /**
+     * The fully qualified generator properties accepted on the command line: {@code count},
+     * {@code start-id}, {@code csz-file} and {@code seed} under {@value #GENERATOR_OPTION_PREFIX}, plus
+     * the camel-case and underscore spellings {@code startId}, {@code start_id}, {@code cszFile} and
+     * {@code csz_file}, each of which Spring binds to the same {@link GeneratorProperties} component.
+     * The names are matched exactly, and every other name under the prefix is rejected as an unknown
+     * option: a misspelling such as {@code customer-master.generator.cuont} would bind nothing and
+     * leave its option at the default, and a spelling outside this list, such as
+     * {@code customer-master.generator.Count}, is not one the generator documents.
+     */
+    static final Set<String> QUALIFIED_OPTIONS = Set.of(
+            GENERATOR_OPTION_PREFIX + "count",
+            GENERATOR_OPTION_PREFIX + "start-id",
+            GENERATOR_OPTION_PREFIX + "startId",
+            GENERATOR_OPTION_PREFIX + "start_id",
+            GENERATOR_OPTION_PREFIX + "csz-file",
+            GENERATOR_OPTION_PREFIX + "cszFile",
+            GENERATOR_OPTION_PREFIX + "csz_file",
+            GENERATOR_OPTION_PREFIX + "seed");
 
     /** Option-name prefix of Spring properties such as {@code spring.profiles.active}. */
     static final String SPRING_OPTION_PREFIX = "spring.";
@@ -438,8 +465,9 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
-     * Whether an option name is one of the four flags, a fully qualified generator property or a Spring
-     * property.
+     * Whether an option name is one of the four flags, one of the accepted fully qualified generator
+     * properties or a Spring property. A mistyped qualified name such as
+     * {@code customer-master.generator.cuont} is not accepted.
      *
      * @param name the option name without its leading {@code --}
      * @return {@code true} when the option is accepted
@@ -449,14 +477,15 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
-     * Whether an option name sets a generator option: one of the four flags or a fully qualified
-     * generator property.
+     * Whether an option name sets a generator option: one of the four flags or one of the accepted
+     * fully qualified generator properties, matched exactly.
      *
      * @param name the option name without its leading {@code --}
-     * @return {@code true} for {@link #FLAGS} and names under {@value #GENERATOR_OPTION_PREFIX}
+     * @return {@code true} for {@link #FLAGS} and {@link #QUALIFIED_OPTIONS}, {@code false} for every
+     *         other name, including any other name under {@value #GENERATOR_OPTION_PREFIX}
      */
     static boolean isGeneratorOption(String name) {
-        return FLAGS.contains(name) || name.startsWith(GENERATOR_OPTION_PREFIX);
+        return FLAGS.contains(name) || QUALIFIED_OPTIONS.contains(name);
     }
 
     /**

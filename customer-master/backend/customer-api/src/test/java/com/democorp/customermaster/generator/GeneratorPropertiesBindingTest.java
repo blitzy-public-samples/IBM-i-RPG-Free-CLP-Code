@@ -10,9 +10,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.context.properties.ConfigurationPropertiesBindHandlerAdvisor;
 import org.springframework.boot.context.properties.bind.BindException;
@@ -38,6 +41,11 @@ import org.springframework.validation.FieldError;
  * a name is absent, so {@code GENERATOR_COUNT=} resolves to {@code ""}, which the primitive
  * {@code int count} cannot take. {@code GeneratorProperties.BlankCountAdvisor} turns that blank into the
  * {@code @DefaultValue("300")}.
+ *
+ * <p><b>Accepted qualified options.</b> {@code CustomerGeneratorRunner} accepts exactly the fully
+ * qualified names in {@link CustomerGeneratorRunner#QUALIFIED_OPTIONS} and rejects every other name
+ * under {@code customer-master.generator.}. Each accepted name, given on the command line, must bind its
+ * record component, so no accepted option can be silently ignored.
  *
  * <p><b>Same registration as production.</b> Every generator context here is built from
  * {@link CustomerGeneratorRunner} itself under profile {@value CustomerGeneratorRunner#PROFILE}, so its own
@@ -65,6 +73,9 @@ final class GeneratorPropertiesBindingTest {
 
     /** The record default of {@code count}. */
     private static final int DEFAULT_COUNT = 300;
+
+    /** A CSZ location other than the bundled sample, so that binding it is visible. */
+    private static final String OTHER_CSZ_FILE = "classpath:generator/other-csz.csv";
 
     @ParameterizedTest(name = "count = \"{0}\" binds as 300")
     @ValueSource(strings = {"", " ", "   ", "\t"})
@@ -177,6 +188,50 @@ final class GeneratorPropertiesBindingTest {
     @DisplayName("bridge: GENERATOR_COUNT=0 still fails validation naming customer-master.generator.count")
     void bridgeOutOfRangeVariableFails() {
         assertValidationFailure(bridged(Map.of("GENERATOR_COUNT", "0")));
+    }
+
+    /**
+     * Each fully qualified option {@link CustomerGeneratorRunner} accepts, given on the command line, and
+     * the record it must bind: that one component set, the others as the bridge leaves them with no
+     * flag and no variable.
+     *
+     * @return the qualified option name, its value and the expected record
+     */
+    static Stream<Arguments> qualifiedOptions() {
+        GeneratorProperties count =
+                new GeneratorProperties(7, "", GeneratorProperties.DEFAULT_CSZ_FILE, null);
+        GeneratorProperties startId =
+                new GeneratorProperties(DEFAULT_COUNT, "C000", GeneratorProperties.DEFAULT_CSZ_FILE, null);
+        GeneratorProperties cszFile =
+                new GeneratorProperties(DEFAULT_COUNT, "", OTHER_CSZ_FILE, null);
+        GeneratorProperties seed =
+                new GeneratorProperties(DEFAULT_COUNT, "", GeneratorProperties.DEFAULT_CSZ_FILE, 5L);
+        return Stream.of(
+                Arguments.of(COUNT_KEY, "7", count),
+                Arguments.of(GeneratorProperties.PREFIX + ".start-id", "C000", startId),
+                Arguments.of(GeneratorProperties.PREFIX + ".startId", "C000", startId),
+                Arguments.of(GeneratorProperties.PREFIX + ".start_id", "C000", startId),
+                Arguments.of(GeneratorProperties.PREFIX + ".csz-file", OTHER_CSZ_FILE, cszFile),
+                Arguments.of(GeneratorProperties.PREFIX + ".cszFile", OTHER_CSZ_FILE, cszFile),
+                Arguments.of(GeneratorProperties.PREFIX + ".csz_file", OTHER_CSZ_FILE, cszFile),
+                Arguments.of(GeneratorProperties.PREFIX + ".seed", "5", seed));
+    }
+
+    @ParameterizedTest(name = "--{0}={1}")
+    @MethodSource("qualifiedOptions")
+    @DisplayName("bridge: every accepted fully qualified option binds its component from the command line")
+    void acceptedQualifiedOptionBinds(String name, String value, GeneratorProperties expected) {
+        bridged(Map.of(), "--" + name + "=" + value).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean(GeneratorProperties.class)).isEqualTo(expected);
+        });
+    }
+
+    @Test
+    @DisplayName("the binding cases cover exactly the qualified options CustomerGeneratorRunner accepts")
+    void bindingCasesCoverEveryAcceptedQualifiedOption() {
+        assertThat(qualifiedOptions().map(arguments -> (String) arguments.get()[0]))
+                .containsExactlyInAnyOrderElementsOf(CustomerGeneratorRunner.QUALIFIED_OPTIONS);
     }
 
     @Test

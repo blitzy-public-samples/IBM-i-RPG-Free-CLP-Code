@@ -27,20 +27,26 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Specifies step 1 of {@link CustomerGeneratorRunner#execute(org.springframework.boot.ApplicationArguments)},
- * the strict options, for arguments whose value is missing.
+ * the strict options, for arguments whose value is missing and for fully qualified generator options.
  *
  * <p><b>Why a missing value must fail.</b> Spring Boot parses a bare {@code --seed} as an option with no
  * value and exposes it as the property value {@code ""}, so the bridge in {@code application-generator.yml}
  * would bind an empty seed (random), an empty start id (the automatic start) or an empty CSZ file (the
  * bundled sample), and the load would replace the table and exit 0 although the operator left the value
- * out. Each of the four flags and each fully qualified {@code customer-master.generator.*} property
- * given without a value therefore prints {@code Option --<name> requires a value} and exits 1 before
- * the CSZ file is read or the database is touched.
+ * out. Each of the four flags and each accepted fully qualified generator property given without a
+ * value therefore prints {@code Option --<name> requires a value} and exits 1 before the CSZ file is
+ * read or the database is touched.
+ *
+ * <p><b>Why a mistyped qualified name must fail.</b> A name under {@code customer-master.generator.}
+ * that is not one of {@link CustomerGeneratorRunner#QUALIFIED_OPTIONS}, such as
+ * {@code customer-master.generator.cuont}, sets no option, so the load would run with the defaults and
+ * replace the table. It prints {@code Unknown option --<name>} and exits 1 before any work, with or
+ * without a value.
  *
  * <p><b>What stays accepted.</b> An explicitly empty value such as {@code --seed=} still selects its
- * default (an empty start id is the automatic start, an empty seed is random), a bare {@code --spring.*}
- * option is not judged, and an unknown option still prints {@code Unknown option --<name>}, ahead of
- * any missing value.
+ * default (an empty start id is the automatic start, an empty seed is random), each accepted qualified
+ * property with a value proceeds to the load, a bare {@code --spring.*} option is not judged, and an
+ * unknown option still prints {@code Unknown option --<name>}, ahead of any missing value.
  *
  * <p>The runner is built through its package-private constructor with mocked collaborators and a
  * captured output stream, so the options are judged exactly as the runner receives them from
@@ -99,7 +105,13 @@ class CustomerGeneratorRunnerOptionsTest {
                 Arguments.of("customer-master.generator.seed",
                         new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.seed"}),
                 Arguments.of("customer-master.generator.startId",
-                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.startId"}));
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.startId"}),
+                Arguments.of("customer-master.generator.start_id",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.start_id"}),
+                Arguments.of("customer-master.generator.cszFile",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.cszFile"}),
+                Arguments.of("customer-master.generator.csz_file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.csz_file"}));
     }
 
     @ParameterizedTest(name = "--{0}")
@@ -151,6 +163,101 @@ class CustomerGeneratorRunnerOptionsTest {
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
         assertThat(printedLines()).containsExactly("Unknown option --cuont");
         verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    /**
+     * Names under {@code customer-master.generator.} that are not one of the accepted qualified
+     * properties, each given with a value. None of them would set an option, so each would otherwise
+     * load with the defaults and replace the table.
+     *
+     * @return the option name as printed and the command line
+     */
+    static Stream<Arguments> unknownQualifiedOptions() {
+        return Stream.of(
+                Arguments.of("customer-master.generator.cuont",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.cuont=5"}),
+                Arguments.of("customer-master.generator.bogus",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.bogus=1", "--count=5"}),
+                Arguments.of("customer-master.generator.Count",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.Count=5"}),
+                Arguments.of("customer-master.generator.count.x",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.count.x=5"}),
+                Arguments.of("customer-master.generator.count[0]",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.count[0]=5"}),
+                Arguments.of("customer-master.generator.start.id",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.start.id=C000"}),
+                Arguments.of("customer-master.generator.",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.=5"}));
+    }
+
+    @ParameterizedTest(name = "--{0}")
+    @MethodSource("unknownQualifiedOptions")
+    @DisplayName("a mistyped fully qualified generator option prints Unknown option --<name> before any work")
+    void mistypedQualifiedOptionIsUnknown(String name, String[] args) {
+        int status = runner.execute(new DefaultApplicationArguments(args));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).containsExactly("Unknown option --" + name);
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("a mistyped fully qualified option without a value is unknown, not merely valueless")
+    void bareMistypedQualifiedOptionIsUnknown() {
+        int status = runner.execute(new DefaultApplicationArguments(
+                PROFILE_OPTION, "--count=5", "--customer-master.generator.cuont"));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).containsExactly("Unknown option --customer-master.generator.cuont");
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    /**
+     * Each accepted fully qualified generator property given with a value.
+     *
+     * @return the option as given and the command line holding it
+     */
+    static Stream<Arguments> acceptedQualifiedOptions() {
+        return Stream.of(
+                "--customer-master.generator.count=5",
+                "--customer-master.generator.start-id=C000",
+                "--customer-master.generator.startId=C000",
+                "--customer-master.generator.start_id=C000",
+                "--customer-master.generator.csz-file=" + GeneratorProperties.DEFAULT_CSZ_FILE,
+                "--customer-master.generator.cszFile=" + GeneratorProperties.DEFAULT_CSZ_FILE,
+                "--customer-master.generator.csz_file=" + GeneratorProperties.DEFAULT_CSZ_FILE,
+                "--customer-master.generator.seed=7")
+                .map(option -> Arguments.of(option, new String[] {PROFILE_OPTION, option}));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("acceptedQualifiedOptions")
+    @DisplayName("an accepted fully qualified generator option with a value proceeds to the load")
+    void acceptedQualifiedOptionProceeds(String option, String[] args) {
+        stubSuccessfulLoad();
+
+        int status = runner.execute(new DefaultApplicationArguments(args));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_SUCCESS);
+        assertThat(printedLines()).singleElement().asString()
+                .matches("Loaded 5 customers C000\\.\\.C004 in \\d+\\.\\d s");
+        verify(cszSource).load(GeneratorProperties.DEFAULT_CSZ_FILE);
+        verify(loader).load(any(CustomerLoader.Plan.class));
+        verify(jdbcTemplate).execute(CustomerGeneratorRunner.ANALYZE_SQL);
+    }
+
+    @Test
+    @DisplayName("the accepted fully qualified options are exactly the four properties and their bound spellings")
+    void acceptedQualifiedOptionsAreTheGeneratorProperties() {
+        assertThat(CustomerGeneratorRunner.QUALIFIED_OPTIONS).containsExactlyInAnyOrder(
+                "customer-master.generator.count",
+                "customer-master.generator.start-id",
+                "customer-master.generator.startId",
+                "customer-master.generator.start_id",
+                "customer-master.generator.csz-file",
+                "customer-master.generator.cszFile",
+                "customer-master.generator.csz_file",
+                "customer-master.generator.seed");
     }
 
     /**

@@ -25,10 +25,12 @@ import org.springframework.util.StringUtils;
  * Boot builds the {@code DataSource} from: the details it derives from {@code spring.datasource.*},
  * or a provider that replaces them, such as the details Testcontainers {@code @ServiceConnection}
  * registers in the integration tests. The username and the password must each contain text.
- * Otherwise startup fails with an {@link IllegalStateException} that names every missing key with its
- * environment variable, and the type of the details. The message never carries a credential value or
- * the JDBC URL. Credentials set only on the pool ({@code spring.datasource.hikari.*}) do not count:
- * {@code DB_USER} and {@code DB_PASSWORD} are the one documented source.
+ * Otherwise startup fails with a {@link MissingCredentialsException}, an {@link IllegalStateException}
+ * that names every missing key with its environment variable, and the type of the details. The message
+ * never carries a credential value or the JDBC URL. Its own type lets the generator's startup failure
+ * reporter recognise it without matching message text. Credentials set only on the pool
+ * ({@code spring.datasource.hikari.*}) do not count: {@code DB_USER} and {@code DB_PASSWORD} are the
+ * one documented source.
  *
  * <p><b>When.</b> The check runs after the details bean is initialized (a {@code @ServiceConnection}
  * provider reaches its container only then) and before the {@code DataSource} that depends on it is
@@ -63,8 +65,8 @@ public class DataSourceCredentialsGuard implements BeanPostProcessor, PriorityOr
      * @param bean     the initialized bean
      * @param beanName the bean's name
      * @return {@code bean}
-     * @throws IllegalStateException if {@code bean} is a {@link JdbcConnectionDetails} whose username or
-     *                               password is null, empty or blank
+     * @throws MissingCredentialsException if {@code bean} is a {@link JdbcConnectionDetails} whose
+     *                                     username or password is null, empty or blank
      */
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) {
@@ -88,8 +90,9 @@ public class DataSourceCredentialsGuard implements BeanPostProcessor, PriorityOr
      * Fails when the details supply no username or no password, naming both keys when both are missing.
      *
      * @param details the connection details the {@code DataSource} is built from
-     * @throws IllegalStateException if the username or the password is null, empty or blank; the message
-     *                               names the missing keys and the type of {@code details}, never a value
+     * @throws MissingCredentialsException if the username or the password is null, empty or blank; the
+     *                                     message names the missing keys and the type of {@code details},
+     *                                     never a value
      */
     private static void verify(JdbcConnectionDetails details) {
         List<String> missing = new ArrayList<>(2);
@@ -100,10 +103,34 @@ public class DataSourceCredentialsGuard implements BeanPostProcessor, PriorityOr
             missing.add(PASSWORD_KEY);
         }
         if (!missing.isEmpty()) {
-            throw new IllegalStateException("Database credentials missing: " + String.join(" and ", missing)
+            throw new MissingCredentialsException("Database credentials missing: "
+                    + String.join(" and ", missing)
                     + (missing.size() == 1 ? " has" : " have") + " no value in connection details "
                     + details.getClass().getName() + ". The API, Flyway and the generator connect as this one"
                     + " role, so startup stops before any database connection is opened.");
+        }
+    }
+
+    /**
+     * The guard's failure: the database role has no username or no password.
+     *
+     * <p>The message is one line that names every missing key with its environment variable and the
+     * type of the connection details, never a value. It stays an {@link IllegalStateException}, the
+     * type Spring Boot and existing callers see; the subtype exists so that the generator CLI, which
+     * prints this message as its one outcome line, recognises the failure by type rather than by text.
+     */
+    public static final class MissingCredentialsException extends IllegalStateException {
+
+        /** Serialization version. */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Creates the exception.
+         *
+         * @param message the one-line message naming the missing keys, never a credential value
+         */
+        public MissingCredentialsException(String message) {
+            super(message);
         }
     }
 }

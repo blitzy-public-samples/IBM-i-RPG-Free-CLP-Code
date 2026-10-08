@@ -32,7 +32,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
  * problem bodies the rest of the API sends, built by {@link ProblemFactory}. An exception escaping the
  * filter chain reaches the container through {@link ErrorDispatchFilter}, which sets the exception
  * attribute and calls {@code sendError(500)} instead of rethrowing, so the container logs nothing and
- * this controller writes the only ERROR line of the failure.
+ * this controller writes the only ERROR line of the failure. A request Tomcat's connector rejects before
+ * any filter runs (an oversized request line or header, a malformed request target, an encoded
+ * {@code /}, {@code \} or NUL in the path, {@code TRACE}) is never forwarded here at all;
+ * {@link ProblemErrorReportValve} answers it in the container with the body {@link #problemFor} builds,
+ * so this status map stays the only one.
  *
  * <p><b>What it replaces.</b> On the IBM i, a "never should happen" failure went through
  * {@code SQLProblem} ({@code SRV_SQL}): {@code GET DIAGNOSTICS} read the SQLSTATE and message text,
@@ -162,20 +166,23 @@ public class ProblemErrorController implements ErrorController {
     }
 
     /**
-     * Applies the status map to the container's error attributes.
+     * Applies the status map to the container's error attributes. {@link ProblemErrorReportValve} calls
+     * it too, with the status of a request the connector rejected, so both answer alike.
      *
      * <p>The 500 branch draws a new {@code errorId} and writes the one ERROR line for it, carrying the
-     * status, the URI, the SQLSTATE found in the cause chain of the original failure ({@code -} when
-     * there is none) and the {@link RedactedThrowable} copy of the failure: exception types and stack
-     * frames with every message withheld. None of these reaches the body except the {@code errorId}.
+     * status, the URI ({@code -} when there is none), the SQLSTATE found in the cause chain of the
+     * original failure ({@code -} when there is none) and the {@link RedactedThrowable} copy of the
+     * failure: exception types and stack frames with every message withheld. None of these reaches the
+     * body except the {@code errorId}.
      *
      * @param status the {@code jakarta.servlet.error.status_code} attribute as set, normally an
      *     {@link Integer}; {@code null} when absent
      * @param failure the {@code jakarta.servlet.error.exception} attribute; {@code null} when absent
-     * @param uri the URI of the request that failed, used as {@code instance}
+     * @param uri the URI of the request that failed, used as {@code instance}; {@code null} when the
+     *     connector could not read one, which leaves {@code instance} unset
      * @return the problem to send
      */
-    ProblemDetail problemFor(@Nullable Object status, @Nullable Throwable failure, String uri) {
+    ProblemDetail problemFor(@Nullable Object status, @Nullable Throwable failure, @Nullable String uri) {
         if (status == null && failure == null) {
             return problemFactory.create(HttpStatus.NOT_FOUND, CODE_INVALID_REQUEST,
                     List.of(REASON_NOT_FOUND), uri);
@@ -197,7 +204,8 @@ public class ProblemErrorController implements ErrorController {
         }
         String errorId = ProblemFactory.newErrorId();
         log.error("Unhandled error errorId={} status={} uri={} sqlState={}", errorId,
-                status == null ? ABSENT : status, uri, ProblemFactory.findSqlState(failure).orElse(ABSENT),
+                status == null ? ABSENT : status, uri == null ? ABSENT : uri,
+                ProblemFactory.findSqlState(failure).orElse(ABSENT),
                 RedactedThrowable.of(failure));
         ProblemDetail problem = problemFactory.create(HttpStatus.INTERNAL_SERVER_ERROR, CODE_PROGRAM_ERROR,
                 List.of(), uri);

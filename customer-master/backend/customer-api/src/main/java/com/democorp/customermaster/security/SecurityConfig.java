@@ -10,8 +10,11 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -19,6 +22,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchyImpl;
@@ -35,6 +40,10 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.util.function.SingletonSupplier;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.DefaultCorsProcessor;
+import org.springframework.web.servlet.handler.AbstractHandlerMapping;
 
 /**
  * The security configuration of the Customer Master web API: stateless HTTP Basic authentication
@@ -75,7 +84,13 @@ import org.springframework.security.web.access.AccessDeniedHandler;
  * <p><b>Stateless.</b> No HTTP session is created or read, and every request carries its own
  * credentials. CSRF protection is therefore disabled: no cookie or session carries authority, so a
  * forged cross-site request has nothing to ride on. There is no CORS configuration, because the
- * browser reaches the API only from the same origin (nginx in Compose, the Vite proxy in development).
+ * browser reaches the API only from the same origin (nginx in Compose, the Vite proxy in development),
+ * so no cross-origin request is ever granted. Spring MVC itself rejects an authenticated cross-origin
+ * preflight and a request whose {@code Origin} header cannot be parsed; every handler mapping answers
+ * those with 403 {@code APP0403} problem+json from {@link ProblemCorsProcessor}, which
+ * {@link #problemCorsProcessorInstaller(ObjectProvider)} installs, instead of Spring's plain-text
+ * {@code Invalid CORS request}. An anonymous preflight never gets that far: it is answered 401 like any
+ * anonymous request to a protected path.
  * Logout and the request cache are disabled too: there is no session to end and no login page to
  * return to, and the default logout filter would otherwise answer {@code POST /logout} with a redirect
  * rather than letting an unknown path reach the 404 of the MVC layer. The default security headers
@@ -296,6 +311,25 @@ public class SecurityConfig {
     }
 
     /**
+     * Installs one {@link ProblemCorsProcessor} on every Spring MVC handler mapping, so a cross-origin
+     * request Spring rejects is answered 403 {@code APP0403} problem+json whichever mapping found its
+     * handler: the controllers, the Actuator endpoints, the API docs and the Swagger UI resources alike.
+     *
+     * <p>The method is static and its only parameter is an {@link ObjectProvider}, so registering the
+     * post-processor instantiates neither this configuration nor {@link ProblemFactory}: no bean is
+     * created early, and none misses the post-processing of the others. The factory is resolved on the
+     * first rejection and then reused.
+     *
+     * @param problems the factory that builds and writes the 403 problem body, resolved lazily
+     * @return the post-processor that sets the processor on each handler mapping
+     */
+    @Bean
+    public static BeanPostProcessor problemCorsProcessorInstaller(ObjectProvider<ProblemFactory> problems) {
+        return new CorsProcessorInstaller(
+                new ProblemCorsProcessor(SingletonSupplier.of(problems::getObject)));
+    }
+
+    /**
      * Answers an unauthenticated request with 401 {@code APP0401} problem+json, adding the Basic
      * challenge only for clients that are not the SPA.
      *
@@ -380,6 +414,116 @@ public class SecurityConfig {
             log.debug("403 {} for {} request", CODE_FORBIDDEN, request.getMethod());
             problems.write(response, problems.create(HttpStatus.FORBIDDEN, CODE_FORBIDDEN,
                     List.of(), request.getRequestURI()));
+        }
+    }
+
+    /**
+     * Decides cross-origin requests exactly as Spring's {@link DefaultCorsProcessor} does, but answers
+     * each rejection with 403 {@code APP0403} problem+json instead of the plain-text body
+     * {@code Invalid CORS request}.
+     *
+     * <p>Every decision stays the default one. {@code Vary: Origin}, {@code Access-Control-Request-Method}
+     * and {@code Access-Control-Request-Headers} are added to each response the processor sees. A
+     * request without an {@code Origin} header, or from the API's own origin, passes untouched. With no
+     * CORS configuration, which this application never declares, a cross-origin preflight is rejected and
+     * any other cross-origin request passes without an {@code Access-Control-Allow-*} header. A request
+     * whose {@code Origin} cannot be parsed is rejected as well.
+     *
+     * <p>Only the rejection's body changes. {@link #rejectRequest(ServerHttpResponse)} receives no
+     * request, so it keeps the 403 status and writes nothing; {@link #processRequest} learns of the
+     * rejection from the {@code false} the default processor returns for it, and then writes the problem
+     * with the request path as {@code instance}. The headers already set, the {@code Vary} and security
+     * headers included, are kept. The body names neither the origin nor the requested method or headers.
+     *
+     * <p>One instance serves every handler mapping and request thread; it holds only the supplier of the
+     * factory.
+     */
+    static final class ProblemCorsProcessor extends DefaultCorsProcessor {
+
+        /** Supplies the factory that builds and writes the problem body; called only on a rejection. */
+        private final Supplier<ProblemFactory> problems;
+
+        /**
+         * Creates the processor.
+         *
+         * @param problems supplies the factory that builds and writes the problem body
+         * @throws NullPointerException when {@code problems} is {@code null}
+         */
+        ProblemCorsProcessor(Supplier<ProblemFactory> problems) {
+            this.problems = Objects.requireNonNull(problems, "problems");
+        }
+
+        /**
+         * Applies the default CORS decision and, when it rejects the request, writes the 403 response.
+         *
+         * @param config the CORS configuration of the matched handler; {@code null} when it has none,
+         *     which is always the case here
+         * @param request the request being checked
+         * @param response the response, still uncommitted when the request is rejected
+         * @return {@code false} when the request was rejected and answered, {@code true} when it may
+         *     proceed
+         * @throws IOException when writing to the client fails
+         * @throws NullPointerException when the supplier yields no factory
+         */
+        @Override
+        public boolean processRequest(@Nullable CorsConfiguration config, HttpServletRequest request,
+                HttpServletResponse response) throws IOException {
+            if (super.processRequest(config, request, response)) {
+                return true;
+            }
+            log.debug("403 {} for rejected CORS {} request", CODE_FORBIDDEN, request.getMethod());
+            ProblemFactory factory = Objects.requireNonNull(problems.get(), "problems");
+            factory.write(response, factory.create(HttpStatus.FORBIDDEN, CODE_FORBIDDEN,
+                    List.of(), request.getRequestURI()));
+            return false;
+        }
+
+        /**
+         * Keeps the default rejection status, 403, and leaves the body to {@link #processRequest},
+         * which knows the request path. Nothing is written or flushed, so the response stays
+         * uncommitted for the problem body.
+         *
+         * @param response the response of the rejected request
+         */
+        @Override
+        protected void rejectRequest(ServerHttpResponse response) {
+            response.setStatusCode(HttpStatus.FORBIDDEN);
+        }
+    }
+
+    /**
+     * Sets the shared {@link ProblemCorsProcessor} on each {@link AbstractHandlerMapping} bean before it
+     * is initialized, replacing the {@link DefaultCorsProcessor} every mapping creates for itself. Every
+     * other bean passes through unchanged, and no bean is wrapped or replaced.
+     */
+    static final class CorsProcessorInstaller implements BeanPostProcessor {
+
+        /** The processor every handler mapping shares. */
+        private final ProblemCorsProcessor processor;
+
+        /**
+         * Creates the post-processor.
+         *
+         * @param processor the processor to install on every handler mapping
+         * @throws NullPointerException when {@code processor} is {@code null}
+         */
+        CorsProcessorInstaller(ProblemCorsProcessor processor) {
+            this.processor = Objects.requireNonNull(processor, "processor");
+        }
+
+        /**
+         * Installs the processor when {@code bean} is a handler mapping.
+         *
+         * @param bean the new bean instance, before its initialization callbacks
+         * @param beanName the name of the bean
+         * @return {@code bean} itself
+         */
+        @Override
+        public Object postProcessBeforeInitialization(Object bean, String beanName) {
+            if (bean instanceof AbstractHandlerMapping mapping) {
+                mapping.setCorsProcessor(processor);
+            }
+            return bean;
         }
     }
 }

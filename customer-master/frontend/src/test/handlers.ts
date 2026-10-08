@@ -78,7 +78,9 @@ type ProblemBody = Schemas['Problem'];
  *
  * - `args`: substitution values for the catalog text; also sent as `args`.
  * - `instance`: the request path; defaults to `/api/customers/review` when
- *   `stateAccepted` is given, and to `/api` otherwise.
+ *   `stateAccepted` is given, and to `/api` otherwise. `null` leaves the
+ *   member out, as the server does for a request its connector refused
+ *   before reading a path.
  * - `detail`: overrides the catalog text, e.g. for DEM9898's USPS description.
  * - `errors`: the fields at fault; never empty, and 400 or 422 only.
  * - `current`: 409 DEM1002 only, and required there: the customer as now stored.
@@ -89,7 +91,9 @@ type ProblemBody = Schemas['Problem'];
  * {@link problem} throws when a member breaks this contract.
  */
 export type ProblemExtra = Partial<
-  Pick<ProblemBody, 'args' | 'instance' | 'detail' | 'errors' | 'current' | 'stateAccepted' | 'errorId'>
+  Pick<ProblemBody, 'args' | 'detail' | 'errors' | 'current' | 'stateAccepted' | 'errorId'> & {
+    instance: ProblemBody['instance'] | null;
+  }
 >;
 
 /** A demo user: the Compose defaults of `CM_INQUIRY_*` and `CM_MAINTENANCE_*`. */
@@ -319,6 +323,130 @@ export const users: readonly UserFixture[] = deepFreeze([
 ]);
 
 // ---------------------------------------------------------------------------
+// Request target (the servlet container's connector, before any filter)
+// ---------------------------------------------------------------------------
+
+/**
+ * The printable characters the server's connector refuses anywhere in the
+ * raw request target, path and query alike, while it reads the request line;
+ * the controls, the space, DEL and every non-ASCII character are refused too.
+ */
+const TARGET_REFUSED: ReadonlySet<string> = new Set(['"', '#', '<', '>', '\\', '^', '`', '{', '|', '}']);
+
+/**
+ * `[` and `]`, which the connector refuses in the query while it reads the
+ * request line, and in the path only after reading it, so a path holding one
+ * keeps its `instance`.
+ */
+const BRACKETS: ReadonlySet<string> = new Set(['[', ']']);
+
+/** The bytes the connector refuses as the decoding of a path escape: `/` (`%2F`), `\` (`%5C`) and NUL (`%00`). */
+const PATH_REFUSED_BYTES: ReadonlySet<number> = new Set([0x2f, 0x5c, 0x00]);
+
+/** One ASCII character `java.net.URI` accepts unquoted in a path. */
+const URI_PATH_CHAR = /^[A-Za-z0-9!$&'()*+,\-./:;=@_~]$/;
+
+/** A path `java.net.URI` parses as it is: {@link URI_PATH_CHAR} characters and `%` escapes of two hex digits. */
+const URI_PATH = /^(?:[A-Za-z0-9!$&'()*+,\-./:;=@_~]|%[0-9A-Fa-f]{2})*$/;
+
+/**
+ * Whether the connector refuses `char` in the raw request target as it reads
+ * the request line: {@link TARGET_REFUSED}, a control, the space, DEL or a
+ * non-ASCII character, and also a {@link BRACKETS} character when `inQuery`.
+ */
+function refusedInTarget(char: string, inQuery: boolean): boolean {
+  const unit = char.charCodeAt(0);
+  return unit <= 0x20 || unit >= 0x7f || TARGET_REFUSED.has(char) || (inQuery && BRACKETS.has(char));
+}
+
+/**
+ * Whether the connector decodes the raw path `path`: every `%` followed by two
+ * ASCII hex digits, no escape that decodes to one of
+ * {@link PATH_REFUSED_BYTES}, and the decoded bytes well-formed UTF-8
+ * ({@link wellFormedUtf8Length}), so `%FF` or `%C0%AF` is refused. The path
+ * is ASCII here: the request-line check refused every other character.
+ */
+function connectorDecodes(path: string): boolean {
+  const bytes: number[] = [];
+  for (let index = 0; index < path.length; index += 1) {
+    if (path.charAt(index) !== '%') {
+      bytes.push(path.charCodeAt(index));
+      continue;
+    }
+    const hex = path.slice(index + 1, index + 3);
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) {
+      return false;
+    }
+    const byte = Number.parseInt(hex, 16);
+    if (PATH_REFUSED_BYTES.has(byte)) {
+      return false;
+    }
+    bytes.push(byte);
+    index += 2;
+  }
+  const decoded = Uint8Array.from(bytes);
+  return wellFormedUtf8Length(decoded) === decoded.length;
+}
+
+/**
+ * The `instance` the server derives from a raw path it refused: the path
+ * itself when `java.net.URI` parses it ({@link URI_PATH}), otherwise the path
+ * that URI's quoting constructor builds, every `%` and every other character
+ * outside {@link URI_PATH_CHAR} written `%XX` (`/api/customers/AA%ZZ` becomes
+ * `/api/customers/AA%25ZZ`, `[` becomes `%5B`). The path is ASCII here.
+ */
+function uriInstance(path: string): string {
+  if (URI_PATH.test(path)) {
+    return path;
+  }
+  return [...path]
+    .map((char) =>
+      URI_PATH_CHAR.test(char) ? char : `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+    )
+    .join('');
+}
+
+/**
+ * The 400 APP0400 `bad request` with which the server's connector refuses a
+ * request target before any filter, firewall or authentication runs, or
+ * `undefined` for a target it accepts. It reads the target as `request.url`
+ * carries it, the form a browser sends, and refuses, in its order:
+ *
+ * 1. while reading the request line, a {@link refusedInTarget} character in
+ *    the path or the query, such as a raw `|` or `{` in the query or `|` in
+ *    the path: the problem has no `instance`, since no path was read;
+ * 2. then a `[` or `]` in the path, or a path that does not decode
+ *    ({@link connectorDecodes}): an encoded `/`, `\` or NUL, an invalid
+ *    escape such as `%ZZ`, or bytes that are not UTF-8. `instance` is
+ *    {@link uriInstance} of the raw path.
+ *
+ * It applies to the routes below only; a path no route matches, such as
+ * `/api/messages%00`, is not answered here. Requests the connector refuses
+ * for their method (`TRACE`, a method that is no token) never reach MSW,
+ * since `fetch` refuses those methods itself.
+ *
+ * Not mirrored: the connector's 8 KB limit on the request line and headers
+ * together, which a cursor or filter of some 8,000 characters reaches. The
+ * server counts every byte of the request head, the headers the client adds
+ * itself (Host, User-Agent, Accept, cookies) included, and MSW never sees
+ * those bytes, so no threshold computed here would match the server's. Nor is
+ * the container's limit of 10,000 parameters, which no query string within
+ * that 8 KB holds.
+ */
+function connectorRejection(request: Request): Response | undefined {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const query = url.search.slice(1);
+  if ([...path].some((char) => refusedInTarget(char, false)) || [...query].some((char) => refusedInTarget(char, true))) {
+    return problem(400, 'APP0400', { args: ['bad request'], instance: null });
+  }
+  if ([...path].some((char) => BRACKETS.has(char)) || !connectorDecodes(path)) {
+    return problem(400, 'APP0400', { args: ['bad request'], instance: uriInstance(path) });
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Security (the server's filter chain: firewall, HTTP Basic, access rules)
 // ---------------------------------------------------------------------------
 
@@ -463,14 +591,17 @@ function unauthorized(request: Request): Response {
 }
 
 /**
- * Wraps a route's resolver in the server's security filter chain, in its
- * order: the request firewall ({@link FIREWALL_REJECTED}: 400 APP0400 `bad
- * request`), then {@link authenticate} on any credentials supplied, public
- * routes included (rejected: 401 APP0401), then the route's access rule
- * (anonymous on a protected route: 401 APP0401; a user without the role: 403
- * APP0403). Only an admitted request reaches the resolver, so every guard
- * runs before the route parses or validates anything. The admitted user is
- * available to the resolver through {@link principal}.
+ * Wraps a route's resolver in what the server runs before any route, in its
+ * order: the connector's request-target checks ({@link connectorRejection}:
+ * 400 APP0400 `bad request`), then the security filter chain: the request
+ * firewall ({@link FIREWALL_REJECTED}: 400 APP0400 `bad request`), then
+ * {@link authenticate} on any credentials supplied, public routes included
+ * (rejected: 401 APP0401), then the route's access rule (anonymous on a
+ * protected route: 401 APP0401; a user without the role: 403 APP0403). Only
+ * an admitted request reaches the resolver, so every guard runs before the
+ * route parses or validates anything, its query string included
+ * ({@link queryValues}). The admitted user is available to the resolver
+ * through {@link principal}.
  */
 function secured<Params extends PathParams<keyof Params> = PathParams>(
   access: Access,
@@ -478,6 +609,10 @@ function secured<Params extends PathParams<keyof Params> = PathParams>(
 ): HttpResponseResolver<Params, DefaultBodyType, undefined> {
   return (info) => {
     const { request } = info;
+    const refused = connectorRejection(request);
+    if (refused !== undefined) {
+      return refused;
+    }
     const instance = pathOf(request);
     const lowered = instance.toLowerCase();
     if (FIREWALL_REJECTED.some((fragment) => lowered.includes(fragment))) {
@@ -520,8 +655,9 @@ function principal(request: Request): Schemas['SessionResponse'] {
  * `errors`, `current`, `stateAccepted` and `errorId` only where the contract
  * below allows them. `title` is the reason phrase of `status`
  * ({@link REASON_PHRASES}) and is left out for a status Spring does not
- * resolve, as the server does. `detail` defaults to the catalog text of
- * `code` with `extra.args` substituted.
+ * resolve, as the server does. `instance` is left out when `extra.instance`
+ * is `null`. `detail` defaults to the catalog text of `code` with
+ * `extra.args` substituted.
  *
  * The conditional-member contract of the API's error model. A call that
  * breaks it is a programming error in the test and throws an `Error` naming
@@ -547,7 +683,8 @@ function principal(request: Request): Schemas['SessionResponse'] {
  * @example problem(502, 'APP0502', { stateAccepted: 'NV' }) // instance: /api/customers/review
  */
 export function problem(status: number, code: string, extra: ProblemExtra = {}) {
-  const instance = extra.instance ?? (extra.stateAccepted === undefined ? '/api' : REVIEW_PATH);
+  const defaultInstance = extra.stateAccepted === undefined ? '/api' : REVIEW_PATH;
+  const instance = extra.instance === null ? undefined : (extra.instance ?? defaultInstance);
   const call = `problem(${status}, '${code}')`;
   if (!Number.isInteger(status) || status < 400 || status > 599) {
     throw new Error(`${call}: a problem is an error response, so its status must be an integer from 400 to 599`);
@@ -600,7 +737,7 @@ export function problem(status: number, code: string, extra: ProblemExtra = {}) 
     type: `urn:customer-master:problem:${code}`,
     ...(title === undefined ? {} : { title }),
     status,
-    instance,
+    ...(instance === undefined ? {} : { instance }),
     detail: extra.detail ?? messageText(code, args),
     code,
     args: [...args],
@@ -654,7 +791,7 @@ export interface RequestViolation {
  * @param status 400, or the framework 4xx the failure keeps (404, 405, 406,
  *   415, ...); never 401 or 403, which are APP0401 and APP0403
  * @throws Error when `status` is not such a 4xx, a violation list comes with a
- *   status other than 400, or a reason or field is blank
+ *   status other than 400, or a reason or field is blank ({@link isJavaBlank})
  * @example requestNotValid('/api/customers', [{ field: 'addr', reason: 'addr is too long' }])
  * @example requestNotValid('/api/customers/review', 'unsupported media type', 415)
  */
@@ -672,9 +809,12 @@ export function requestNotValid(
     throw new Error(`${call}: a reason that names a field is sent on 400 only`);
   }
   const reason = typeof cause === 'string' ? cause : cause[0].reason;
+  // Blank as the server's `String.isBlank()` reads it: a query parameter the
+  // client named U+00A0 is a field the server reports, though `trim()` would
+  // call it blank.
   if (
-    reason.trim() === '' ||
-    violations.some((violation) => violation.field.trim() === '' || violation.reason.trim() === '')
+    isJavaBlank(reason) ||
+    violations.some((violation) => isJavaBlank(violation.field) || isJavaBlank(violation.reason))
   ) {
     throw new Error(`${call}: every reason and field must be non-blank`);
   }
@@ -1390,15 +1530,21 @@ function bindBody(reader: JsonReader, shape: RequestShape): BoundBody {
 
 /**
  * Reads a write request's body as the server does before validating it: 415
- * APP0400 `unsupported media type` unless {@link isJsonMediaType}; then the
- * raw bytes, decoded as UTF-8 up to the first byte that is not well-formed
- * (a leading BOM is skipped), bound by {@link bindBody}; a failure is 400
+ * APP0400 `unsupported media type` unless {@link isJsonMediaType}, decided
+ * when the server maps the route; then the query string, which must parse
+ * ({@link queryValues}) though no write reads a parameter; then the raw
+ * bytes, decoded as UTF-8 up to the first byte that is not well-formed (a
+ * leading BOM is skipped), bound by {@link bindBody}; a failure is 400
  * APP0400 with its reason, naming the property on `errors` when it has one.
  */
 async function bindWriteRequest(request: Request, shape: RequestShape): Promise<ReadResult<BoundBody>> {
   const instance = pathOf(request);
   if (!isJsonMediaType(request.headers.get('Content-Type'))) {
     return { ok: false, response: requestNotValid(instance, 'unsupported media type', 415) };
+  }
+  const query = queryValues(request);
+  if (!query.ok) {
+    return query;
   }
   const bytes = new Uint8Array(await request.arrayBuffer());
   const wellFormed = wellFormedUtf8Length(bytes);
@@ -2110,12 +2256,39 @@ const INT_MAX = 2 ** 31 - 1;
 const HEX_PREFIXES: readonly string[] = ['0x', '0X', '#'];
 
 /**
+ * `bytes` read as UTF-8 as Java's `new String(bytes, UTF_8)` reads them, the
+ * servlet container's reading of a decoded query name or value: each
+ * malformed sequence becomes one U+FFFD and a BOM is kept. That is the WHATWG
+ * decoder's reading except for one case: Java takes `ED` followed by
+ * `A0`–`BF`, the start of an encoded surrogate, together with the
+ * continuation byte after them as one malformed sequence, so `ED A0 80` is
+ * one U+FFFD where the WHATWG decoder gives three.
+ */
+function javaUtf8(bytes: readonly number[]): string {
+  const prepared: number[] = [];
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index] ?? 0;
+    const second = bytes[index + 1];
+    if (byte === 0xed && second !== undefined && second >= 0xa0 && second <= 0xbf) {
+      const third = bytes[index + 2];
+      // U+FFFD encoded, which the decoder below reads as that one character.
+      prepared.push(0xef, 0xbf, 0xbd);
+      index += third !== undefined && third >= 0x80 && third <= 0xbf ? 2 : 1;
+    } else {
+      prepared.push(byte);
+    }
+  }
+  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(Uint8Array.from(prepared));
+}
+
+/**
  * One name or value of the query string decoded as the API's servlet
  * container decodes it: `+` is a space, `%XX` a byte, and the bytes are
- * read as UTF-8, a malformed sequence becoming U+FFFD and a BOM kept.
+ * read by {@link javaUtf8}.
  *
- * @returns the text, or `undefined` for a `%` without two hex digits after
- *   it, for which the container skips the whole parameter
+ * @returns the text, or `undefined` for a `%` without two ASCII hex digits
+ *   after it, which fails the container's parse of the query string; the API
+ *   then answers 400 ({@link queryValues})
  */
 function decodeQueryPart(part: string): string | undefined {
   const encoder = new TextEncoder();
@@ -2139,24 +2312,60 @@ function decodeQueryPart(part: string): string | undefined {
       index += text.length;
     }
   }
-  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(Uint8Array.from(bytes));
+  return javaUtf8(bytes);
 }
 
 /**
- * The query parameters of `url` as the API's servlet container parses the
- * query string: pairs split at `&`, each split at its first `=` (a pair
- * without one has an empty value), name and value decoded by
- * {@link decodeQueryPart}. An empty pair, an empty name, or a pair that does
- * not decode is skipped. Names are case-sensitive.
+ * The 400 APP0400 the API answers for a query parameter the container could
+ * not decode: `<name> has an invalid value` with `errors[0].field` on the
+ * name, made safe as the server quotes a name ({@link safePropertyName});
+ * `parameter has an invalid value` with no `errors` when the name itself does
+ * not decode (`undefined`) or is blank ({@link isJavaBlank}). The value sent
+ * is never quoted.
  */
-function queryValues(url: URL): QueryValues {
+function undecodableParameter(instance: string, name: string | undefined): Response {
+  if (name === undefined || isJavaBlank(name)) {
+    return requestNotValid(instance, 'parameter has an invalid value');
+  }
+  const field = safePropertyName(name);
+  return requestNotValid(instance, [{ field, reason: `${field} has an invalid value` }]);
+}
+
+/**
+ * The query parameters of `request` as the API's servlet container parses
+ * the query string, or the 400 APP0400 the API answers when that parse fails.
+ * Pairs are split at `&`, each at its first `=` (a pair without one has an
+ * empty value), name and value decoded by {@link decodeQueryPart}; names are
+ * case-sensitive. An empty pair (`&&`, a trailing `&`) is ignored. The first
+ * pair, in query order, that the container cannot parse decides the answer,
+ * as the container keeps its first failure:
+ *
+ * - an empty name before an `=` (`?=x`, `?=`): `parameter without a name`,
+ *   with no `errors`;
+ * - a name or value that does not decode (`?cursor=%%%`, `?name=ZQ%`):
+ *   {@link undecodableParameter}.
+ *
+ * The server checks this on every route, after its security rules
+ * ({@link secured}) and a write route's media type, and before it binds a
+ * parameter or body, so every route calls this first, whether or not it
+ * reads a parameter.
+ */
+function queryValues(request: Request): ReadResult<QueryValues> {
+  const instance = pathOf(request);
   const values = new Map<string, string[]>();
-  for (const pair of url.search.slice(1).split('&')) {
+  for (const pair of new URL(request.url).search.slice(1).split('&')) {
     const equals = pair.indexOf('=');
-    const name = decodeQueryPart(equals < 0 ? pair : pair.slice(0, equals));
+    const rawName = equals < 0 ? pair : pair.slice(0, equals);
+    if (rawName === '') {
+      if (equals < 0) {
+        continue;
+      }
+      return { ok: false, response: requestNotValid(instance, 'parameter without a name') };
+    }
+    const name = decodeQueryPart(rawName);
     const value = decodeQueryPart(equals < 0 ? '' : pair.slice(equals + 1));
-    if (name === undefined || value === undefined || name === '') {
-      continue;
+    if (name === undefined || value === undefined) {
+      return { ok: false, response: undecodableParameter(instance, name) };
     }
     const list = values.get(name);
     if (list === undefined) {
@@ -2165,7 +2374,7 @@ function queryValues(url: URL): QueryValues {
       list.push(value);
     }
   }
-  return values;
+  return { ok: true, value: values };
 }
 
 /**
@@ -3000,21 +3209,31 @@ function searchPage(
  * MSW matches them against jsdom's `location`, the origin `setup.ts` resolves
  * relative `fetch` URLs against.
  *
- * Every route runs behind {@link secured}, the server's security rules:
- * `/api/messages` is public, the reads need INQUIRY, review and the writes
- * MAINTENANCE (which implies INQUIRY), and credentials supplied anywhere are
- * checked, so a test gets 401 APP0401 or 403 APP0403 by signing in as the user
- * it needs. Customers live in the store: an add or update persists, and every
+ * Every route runs behind {@link secured}, the server's connector checks and
+ * security rules: `/api/messages` is public, the reads need INQUIRY, review
+ * and the writes MAINTENANCE (which implies INQUIRY), and credentials
+ * supplied anywhere are checked, so a test gets 401 APP0401 or 403 APP0403 by
+ * signing in as the user it needs. Every route then parses its query string
+ * ({@link queryValues}), so a parameter that does not decode is 400 APP0400
+ * on any route, never served as absent. Customers live in the store: an add
+ * or update persists, and every
  * read sees it, until `server.resetHandlers()` (or {@link resetHandlerState})
  * restores the seed rows and the id sequence. No handler mutates a fixture,
  * and every response body is a fresh object.
  */
 export const handlers = resettingStore([
   // Public: the whole catalog as one JSON object.
-  http.get('/api/messages', secured('public', () => HttpResponse.json({ ...catalog }))),
+  http.get('/api/messages', secured('public', ({ request }) => {
+    const query = queryValues(request);
+    return query.ok ? HttpResponse.json({ ...catalog }) : query.response;
+  })),
 
   // The signed-in user and roles, or 401 APP0401.
   http.get('/api/session', secured('INQUIRY', ({ request }) => {
+    const query = queryValues(request);
+    if (!query.ok) {
+      return query.response;
+    }
     const user = principal(request);
     return HttpResponse.json({ username: user.username, roles: user.roles });
   })),
@@ -3023,9 +3242,12 @@ export const handlers = resettingStore([
   // LIKE '%<filter>%' against the padded uppercase name, so `%` and `_` are
   // wildcards; `sort` = name (absent or empty too) or code, exactly.
   http.get('/api/states', secured('INQUIRY', ({ request }) => {
-    const url = new URL(request.url);
-    const instance = url.pathname;
-    const query = queryValues(url);
+    const instance = pathOf(request);
+    const parsed = queryValues(request);
+    if (!parsed.ok) {
+      return parsed.response;
+    }
+    const query = parsed.value;
     const nameContains = textParam(query, 'nameContains');
     const sortParam = textParam(query, 'sort');
     const filterViolation = entryViolation('nameContains', nameContains, NAME_CONTAINS_WIDTH);
@@ -3052,9 +3274,12 @@ export const handlers = resettingStore([
   // exact state, active-only unless includeInactive, keyset pages of `size`
   // rows behind the API's base64url cursor, capped at 9,999 rows (DEM0006).
   http.get('/api/customers', secured('INQUIRY', ({ request }) => {
-    const url = new URL(request.url);
-    const instance = url.pathname;
-    const query = queryValues(url);
+    const instance = pathOf(request);
+    const parsed = queryValues(request);
+    if (!parsed.ok) {
+      return parsed.response;
+    }
+    const query = parsed.value;
 
     // Binding, in the controller's parameter order (name, city, state,
     // includeInactive, size, cursor); the first parameter that does not
@@ -3115,6 +3340,10 @@ export const handlers = resettingStore([
   // exactly four characters of A-Z and 0-9.
   http.get<{ custId: string }>('/api/customers/:custId', secured('INQUIRY', ({ request, params }) => {
     const instance = pathOf(request);
+    const query = queryValues(request);
+    if (!query.ok) {
+      return query.response;
+    }
     const { custId } = params;
     if (!isCustIdPath(custId)) {
       return requestNotValid(instance, [{ field: 'custId', reason: 'custId has an invalid format' }]);

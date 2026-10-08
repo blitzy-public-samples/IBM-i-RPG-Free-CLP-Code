@@ -163,7 +163,8 @@ class DataSourceCredentialsGuardTest {
      * Asserts that the context failed because of the guard and returns the guard's message.
      *
      * @param context the context the runner tried to start
-     * @return the message of the root cause, the guard's {@link IllegalStateException}
+     * @return the message of the root cause, the guard's
+     *         {@link DataSourceCredentialsGuard.MissingCredentialsException}, an {@link IllegalStateException}
      */
     private static String guardMessage(AssertableApplicationContext context) {
         assertThat(context).hasFailed();
@@ -172,6 +173,7 @@ class DataSourceCredentialsGuardTest {
             root = root.getCause();
         }
         assertThat(root).isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(DataSourceCredentialsGuard.MissingCredentialsException.class)
                 .hasMessageStartingWith("Database credentials missing: ");
         return root.getMessage();
     }
