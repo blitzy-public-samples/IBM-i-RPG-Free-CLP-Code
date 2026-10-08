@@ -5,9 +5,12 @@
  * Every request is answered by MSW (`../test/server`, started by
  * `../test/setup.ts` with `onUnhandledFrame: 'error'`), so the suite is
  * offline. A test overrides a route for itself with `server.use(...)`, which
- * `setup.ts` resets after each test; the client's own module state (stored
- * credentials, the 401 handler) is reset in this file's `afterEach`, so every
- * test passes in any order.
+ * `setup.ts` resets after each test. `setup.ts` also closes, after each test,
+ * every connection left open without a request on it, such as the one undici
+ * opens after an aborted read, so no test sends on a connection another test
+ * left behind. The client's own module state (stored credentials, the 401
+ * handler) is reset in this file's `afterEach`, so every test passes in any
+ * order.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw/http';
@@ -741,11 +744,10 @@ describe('a 401 for a call sent before the stored credentials changed', () => {
   const CUSTOMER_ROUTE = '/api/customers/:custId';
 
   /**
-   * `response` sent with `Connection: close`, so no request of these cases
-   * leaves a kept-alive connection behind. MSW intercepts below `fetch`, at
-   * the socket, and a later request that reuses such a connection can lose
-   * its answer: the 'aborting a read' cases that follow, which hold an answer
-   * or its body open, then failed intermittently.
+   * `response` sent with `Connection: close`, so undici closes the
+   * connection the held call used once the answer has arrived: each case's
+   * exchange ends with its own connection, and the pool a later test draws
+   * on holds none of them.
    */
   function closing(response: Response): Response {
     response.headers.set('Connection', 'close');

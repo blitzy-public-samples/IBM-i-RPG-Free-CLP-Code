@@ -19,8 +19,6 @@
  * `onBeforeCommand`. A catalog probe gates message assertions, because until
  * the catalog has loaded `format` returns the bare code.
  */
-import { subscribe, unsubscribe } from 'node:diagnostics_channel';
-import type { Socket } from 'node:net';
 import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -309,91 +307,8 @@ async function releaseHolds(): Promise<void> {
   heldAnswers.length = 0;
 }
 
-// Closing the window aborts its pending read, and the undici that Node 24
-// bundles (7.x) then opens a new connection to the origin with nothing to
-// send on it. MSW's socket interception passes a connection that carries no
-// request through to the real network, where `localhost:3000` refuses it
-// later; a request the next test sends on that pooled connection meanwhile
-// fails with ECONNREFUSED instead of reaching its handler. The connections
-// are observed through the diagnostics channels undici publishes, and the
-// teardown closes every one that carried no request
-// ({@link closeIdleConnections}).
-
-/** Connection attempts undici began in the current test that have neither connected nor failed yet. */
-let connecting = 0;
-
-/** Every socket undici connected or wrote a request on in the current test, mapped to whether it carried one. */
-const connectedSockets = new Map<Socket, boolean>();
-
-/** Waits for {@link connecting} to reach zero. */
-const connectWaiters: Array<() => void> = [];
-
-function onBeforeConnect(): void {
-  connecting += 1;
-}
-
-function onConnectSettled(): void {
-  connecting = Math.max(0, connecting - 1);
-  if (connecting === 0) {
-    for (const wake of connectWaiters.splice(0)) {
-      wake();
-    }
-  }
-}
-
-/** `undici:client:connected`: the attempt's socket, which has carried no request yet. */
-function onConnected(message: unknown): void {
-  const { socket } = message as { socket: Socket };
-  connectedSockets.set(socket, connectedSockets.get(socket) ?? false);
-  onConnectSettled();
-}
-
-function onSendHeaders(message: unknown): void {
-  const { socket } = message as { socket: Socket };
-  connectedSockets.set(socket, true);
-}
-
-const CONNECTION_CHANNELS: ReadonlyArray<readonly [string, (message: unknown) => void]> = [
-  ['undici:client:beforeConnect', onBeforeConnect],
-  ['undici:client:connected', onConnected],
-  ['undici:client:connectError', onConnectSettled],
-  ['undici:client:sendHeaders', onSendHeaders],
-];
-
-/**
- * Waits until every connection attempt of the current test has connected or
- * failed, then destroys each connected socket that never carried a request
- * and waits for it to close; again while that started more attempts. Runs
- * once every `fetch` of the test has settled, so no request is cut short.
- */
-async function closeIdleConnections(): Promise<void> {
-  for (;;) {
-    if (connecting > 0) {
-      await new Promise<void>((resolve) => {
-        connectWaiters.push(resolve);
-      });
-    }
-    const idle = [...connectedSockets].filter(([socket, carried]) => !carried && !socket.destroyed).map(([socket]) => socket);
-    if (idle.length === 0) {
-      return;
-    }
-    await Promise.all(
-      idle.map(
-        (socket) =>
-          new Promise<void>((resolve) => {
-            socket.once('close', () => resolve());
-            socket.destroy();
-          }),
-      ),
-    );
-  }
-}
-
 beforeEach(() => {
   draining = false;
-  for (const [channel, listener] of CONNECTION_CHANNELS) {
-    subscribe(channel, listener);
-  }
   fetchCalls = vi.spyOn(globalThis, 'fetch');
   // Stored as after a real sign-in: every customer route answers 401 without them.
   setCredentials({ username: MAINTENANCE_USER.username, password: MAINTENANCE_USER.password });
@@ -414,15 +329,13 @@ beforeEach(() => {
 afterEach(async () => {
   // A response a failed test left held is released and settled here, while
   // the tree is still mounted, the credentials still set and the test's
-  // handlers still in place (src/test/setup.ts unmounts and resets them after
-  // this hook), so nothing it resolves can reach the next test.
+  // handlers still in place, so nothing it resolves can reach the next test.
+  // The `afterEach` of src/test/setup.ts runs after this hook: it unmounts
+  // the tree, closes every connection left without a request (such as the
+  // one undici opens after the window aborted its read), then resets the
+  // handlers, so every request of the test has settled before any
+  // connection is closed.
   await releaseHolds();
-  await closeIdleConnections();
-  for (const [channel, listener] of CONNECTION_CHANNELS) {
-    unsubscribe(channel, listener);
-  }
-  connectedSockets.clear();
-  connecting = 0;
   fetchCalls = undefined;
   server.events.removeListener('request:start', recordRequest);
   setCredentials(null);

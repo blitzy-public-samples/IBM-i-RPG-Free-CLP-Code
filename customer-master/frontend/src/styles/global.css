@@ -578,7 +578,6 @@ textarea[aria-invalid="true"] {
   color: var(--color-accent);
 }
 
-
 /*
  * Results subfile (customer list, state list, conflict comparison).
  * Cells use overflow-wrap: anywhere, which lowers the table's minimum

@@ -276,13 +276,20 @@ function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId
 
 /**
  * The key scope while the stored customer is being read and no window is
- * shown yet. It sits on top of the screen beneath from the moment the user
- * asked for the window, so a key pressed during the read can never reach the
- * search list (no second option processing, no second window). F12 and
- * Escape close; Enter, PageUp, PageDown and every other function key are
- * ignored, because nothing is displayed for them to act on, so paging never
- * scrolls the screen beneath either. Removed as soon as the read settles and
- * the window takes over with its own scope.
+ * shown yet. It is the topmost scope from the moment the user asked for the
+ * window, so no command key the scope contract dispatches (F1–F24, Escape,
+ * PageUp, PageDown, and Enter in a text or option field) reaches the search
+ * list's scope. F12 and Escape close; Enter, PageUp, PageDown and every other
+ * function key are ignored, because nothing is displayed for them to act on,
+ * and prevented, so paging never scrolls the screen beneath either. Keys the
+ * contract leaves native (Enter or Space on a focused button, Tab, printable
+ * characters, modifier chords) and mouse clicks still act on the screen
+ * beneath, which is not inert until the window opens. A row action button
+ * pressed then is its option plus Enter, as at any time: a new search when
+ * the criteria changed, else a fresh option walk over every option still
+ * typed, which keeps this window, and its read, only when the walk's first
+ * option is this customer in this mode. Removed as soon as the read settles
+ * and the window takes over with its own scope.
  */
 function PendingScope({ onClose }: Pick<SessionProps, 'onClose'>) {
   useFunctionKeys(
