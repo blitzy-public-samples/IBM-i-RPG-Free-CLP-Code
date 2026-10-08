@@ -340,7 +340,6 @@ public class CustomerSearchService {
         return new SearchPage.Notice(code, messageCatalog.text(code));
     }
 
-
     /**
      * Encodes the position after {@code last}: its stored sort keys and the rows served so far, as
      * base64url (no padding) over the UTF-8 JSON the payload record serializes to.

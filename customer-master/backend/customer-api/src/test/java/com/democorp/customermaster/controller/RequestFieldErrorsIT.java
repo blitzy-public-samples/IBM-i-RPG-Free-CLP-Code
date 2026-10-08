@@ -43,19 +43,20 @@ import org.springframework.http.ResponseEntity;
  * name ending in U+1F600 (41 UTF-16 units), or 21 or 40 of U+1F600, is accepted and stored with that
  * {@code char_length}; one character more is 400 APP0400 "{field} is too long" on that field.
  *
- * <p><b>U+0000.</b> PostgreSQL text columns cannot hold NUL. Before {@code @StorableText}, a review
- * echoed such a value with 200 and an add failed at the {@code INSERT} as 500 DEM9999 after consuming
- * the allocated id. Each of the nine text fields of review, add and update is now rejected with 400
- * APP0400 on that field before the service runs, so no id is consumed: the next valid add still gets
- * {@link DatabaseCleaner#FIRST_INTERACTIVE_ID}.
+ * <p><b>U+0000.</b> PostgreSQL text columns cannot hold NUL. Without the {@code @StorableText} check, a
+ * review would echo such a value with 200 and an add would fail at the {@code INSERT} as 500 DEM9999
+ * after consuming the allocated id. A NUL in any of the nine text fields of review, add and update is
+ * therefore rejected with 400 APP0400 on that field before the service runs, so no id is consumed: the
+ * next valid add gets {@link DatabaseCleaner#FIRST_INTERACTIVE_ID}.
  *
  * <p><b>Unpaired surrogates.</b> A JSON escape of a lone high or low surrogate binds to a Java string
- * the driver cannot encode, so it stored {@code ?} instead: a review answered 200 and an add 201 echoing
- * a value other than the one stored. The same nine fields now reject it as U+0000 is rejected, while a
- * high and a low escape in order are one supplementary character, accepted and stored.
+ * the driver cannot encode. Without the check the driver would store {@code ?} instead, so a review would
+ * answer 200 and an add 201 echoing a value other than the one stored. The same nine fields reject it as
+ * they reject U+0000, while a high and a low escape in order are one supplementary character, accepted
+ * and stored.
  *
- * <p><b>Unchanged business rules.</b> A blank or missing field still reaches {@code CustomerValidator}
- * (422 DEM0502), and an add without {@code active} still stores {@code Y}.
+ * <p><b>Business rules.</b> The text checks leave the field rules to {@code CustomerValidator}: a blank
+ * or missing field reaches it (422 DEM0502), and an add without {@code active} stores {@code Y}.
  *
  * <p>The base context variant: no mocked beans. Bodies are serialized with the application's mapper, which
  * writes a NUL as the JSON escape {@code \u005Cu0000}.
@@ -377,7 +378,6 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
                 "SELECT row_version FROM custmast WHERE custid = ?", Long.class, custId)).isZero();
     }
 
-
     // ---------------------------------------------------------------------------------------------
     // No invented fields
     // ---------------------------------------------------------------------------------------------
@@ -576,7 +576,6 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
         assertThat(storedLength("name", custId)).isEqualTo(5);
     }
 
-
     // ---------------------------------------------------------------------------------------------
     // Business rules unchanged
     // ---------------------------------------------------------------------------------------------
@@ -738,7 +737,6 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
         return maintenanceXhr().put().uri(CUSTOMERS + "/" + custId).contentType(MediaType.APPLICATION_JSON)
                 .body(json).retrieve().toEntity(String.class);
     }
-
 
     /**
      * Asserts a 400 APP0400 problem whose {@code detail} and {@code args} carry the given reason.

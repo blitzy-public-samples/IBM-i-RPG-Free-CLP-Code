@@ -331,7 +331,6 @@ public class ProblemFactory {
         return Optional.empty();
     }
 
-
     /**
      * Wraps a problem in a response entity with no extra headers.
      *

@@ -470,4 +470,3 @@ class CustomerSearchApiIT extends AbstractPostgresIT {
         }
     }
 }
-

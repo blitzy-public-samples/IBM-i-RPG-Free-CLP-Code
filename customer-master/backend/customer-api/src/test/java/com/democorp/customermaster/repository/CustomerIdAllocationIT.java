@@ -415,7 +415,6 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
         assertThat(count("SELECT count(*) FROM custmast")).isZero();
     }
 
-
     /**
      * Releases every parked worker, ends the worker threads, proves that no other client backend holds or
      * awaits a lock on {@code custmast} (background workers such as autovacuum are excluded), and
@@ -608,4 +607,3 @@ class CustomerIdAllocationIT extends AbstractPostgresIT {
         return jdbcTemplate.queryForList(SESSIONS_SQL, String.class);
     }
 }
-

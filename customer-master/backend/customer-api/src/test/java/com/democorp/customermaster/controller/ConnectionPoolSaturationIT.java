@@ -39,10 +39,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.TestPropertySource;
 
 /**
- * Proves that requests waiting on locks, by holding every pooled connection, no longer turn an add or
- * an update into 500 {@code DEM9999} or the readiness probe into DOWN: an add or update that cannot
- * borrow a connection within the connection timeout while PostgreSQL answers is 409 {@code DEM1001},
- * the answer of the lock wait it is, and readiness stays UP.
+ * Proves that an add or update that cannot borrow a connection within the connection timeout, while
+ * PostgreSQL answers, is 409 {@code DEM1001}, the answer of the lock wait it is, not 500 {@code DEM9999},
+ * and that readiness stays UP, not DOWN, while requests waiting on locks hold every pooled connection.
  *
  * <ul>
  *   <li><b>Load lock, reads holding the pool.</b> A separate JDBC connection holds
@@ -53,7 +52,7 @@ import org.springframework.test.context.TestPropertySource;
  *       probe; once the lock is released, the reads holding connections answer 200. The reads beyond
  *       the pool size get no connection and answer 500 {@code DEM9999} after the connection timeout:
  *       reads wait for a load without a bound, and a read that cannot even borrow a connection is not
- *       a write, so that answer is unchanged.</li>
+ *       a write, so it is answered as any other unexpected failure.</li>
  *   <li><b>Row lock, more writers than connections.</b> A separate JDBC connection holds the row lock
  *       of an {@code UPDATE}. More updates of that row than the pool has connections run at once: those
  *       holding a connection wait out the lock timeout, the others the connection timeout, which is
@@ -206,7 +205,7 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
                     .allSatisfy(answer -> assertThat(json(answer).path("custId").asText()).isEqualTo(custId));
             assertThat(notServed)
                     .as("the reads beyond the pool size get no connection: the documented cost of reads"
-                            + " waiting for a load, which this change leaves as it was")
+                            + " waiting for a load without a bound, answered 500 DEM9999")
                     .hasSize(READERS - POOL_SIZE)
                     .allSatisfy(answer -> {
                         assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);

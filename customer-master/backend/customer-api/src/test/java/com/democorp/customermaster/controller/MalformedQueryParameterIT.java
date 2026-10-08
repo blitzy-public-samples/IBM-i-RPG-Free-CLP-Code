@@ -30,14 +30,14 @@ import org.springframework.lang.Nullable;
  * Specifies the answer to a query parameter Tomcat cannot decode, a {@code %} not followed by two
  * hexadecimal digits in its name or value: 400 {@code application/problem+json} {@code APP0400}
  * "Request is not valid: cursor has an invalid value" with one {@code errors[]} item on the parameter,
- * the shape a {@code size=abc} type mismatch gets, instead of the 200 Tomcat's silent drop of the
- * parameter used to produce (the first page for a malformed cursor, the unfiltered list for a malformed
+ * the shape a {@code size=abc} type mismatch gets, rather than the 200 that Tomcat's silent drop of the
+ * parameter would produce (the first page for a malformed cursor, the unfiltered list for a malformed
  * filter).
  *
- * <p><b>Controls.</b> Escaped percent signs keep their meaning: {@code cursor=%25%25%25} is still the
- * search service's own "cursor is not valid" and {@code name=ZQ%25} still a wildcard search. Security
- * decides first: an anonymous request with a malformed query is still 401 {@code APP0401}, and the public
- * message catalog answers the same 400 as any other route.
+ * <p><b>Controls.</b> Escaped percent signs keep their meaning: {@code cursor=%25%25%25} is the search
+ * service's own "cursor is not valid" and {@code name=ZQ%25} a wildcard search. Security decides first:
+ * an anonymous request with a malformed query is 401 {@code APP0401}, and the public message catalog
+ * answers the same 400 as any other route.
  *
  * <p><b>Why a raw socket.</b> {@code java.net.URI}, and with it the JDK {@code HttpClient} behind
  * {@link AbstractPostgresIT}'s clients, rejects a malformed escape such as {@code %%%} before sending,

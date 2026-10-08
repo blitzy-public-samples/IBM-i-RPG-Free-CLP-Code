@@ -44,9 +44,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * record's start line and the city column used ({@code city} or {@code primary_city}), raised before
  * {@link CustomerLoader} is ever called. The character is never removed or replaced.
  *
- * <p><b>What stays as it was.</b> Only a city in a row the 20-character rule and the STATES rule keep is checked,
- * so rows those rules drop stay dropped. Blank cities, non-ASCII cities, other control characters such as a tab,
- * and every other column are unchanged, and the bundled sample still loads its 200 rows.
+ * <p><b>What the check leaves alone.</b> Only a city in a row the 20-character rule and the STATES rule keep is
+ * checked, so a row those rules drop is dropped, with any NUL it holds, without an error. Blank cities, non-ASCII
+ * cities, other control characters such as a tab, and every other column are left to the reader's other rules,
+ * and the bundled sample loads its 200 rows.
  *
  * <p>Plain JUnit 5, Mockito and AssertJ: a real {@link CszSource} over a mocked {@link StateService}, CSV files
  * written with real {@code 0x00} bytes into a {@link TempDir}, and the runner through its package-private

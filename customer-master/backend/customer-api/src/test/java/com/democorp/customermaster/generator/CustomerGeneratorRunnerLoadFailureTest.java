@@ -50,8 +50,8 @@ import org.springframework.transaction.TransactionSystemException;
  * text and, of the exception graph, only types, stack frames and SQLSTATEs; the cases plant sentinels and
  * line breaks in every message of the graph and find none of them in the captured log.
  *
- * <p><b>What stays as it was.</b> A lock wait ends the load before anything commits, and still prints
- * LOADCUST2's {@code Cannot allocate CUSTMAST} [5250_Subfile/LOADCUST2.CLLE:10-18].
+ * <p><b>Lock waits.</b> A lock wait ends the load before anything commits and prints LOADCUST2's
+ * {@code Cannot allocate CUSTMAST} [5250_Subfile/LOADCUST2.CLLE:10-18].
  *
  * <p>Plain JUnit 5, Mockito and AssertJ over the runner's package-private constructor, with the outcome line
  * printed to a {@link ByteArrayOutputStream} and the log captured by {@link OutputCaptureExtension}: no Spring

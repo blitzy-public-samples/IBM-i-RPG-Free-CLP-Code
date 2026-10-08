@@ -192,7 +192,6 @@ final class StorableTextValidatorTest {
         });
     }
 
-
     @ParameterizedTest(name = "[{index}] {0}.{1}")
     @MethodSource("recordProperties")
     @DisplayName("an ordinary value in one text component raises no violation")
