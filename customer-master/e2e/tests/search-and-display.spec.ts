@@ -11,9 +11,9 @@
  *   3. Inactive customers are excluded by default (`ACTIVE BETWEEN 'Y' AND 'Y'`,
  *      [5250_Subfile/PMTCUSTR.SQLRPGLE:647-653]): `A AUCTOR` matches only inactive rows, so the
  *      list is empty and DEM0002 is shown [5250_Subfile/PMTCUSTR.SQLRPGLE:532-545].
- *   4. F9 includes them [5250_Subfile/PMTCUSTR.SQLRPGLE:406-413]: both rows appear in red
- *      (`COLOR(RED)` on indicator 83, [5250_Subfile/PMTCUSTD.DSPF:66-72]) with a visually hidden
- *      "Inactive" label, and the legend switches to "F9=Exclude Inactive".
+ *   4. F9 includes them [5250_Subfile/PMTCUSTR.SQLRPGLE:406-413]: both rows appear in red,
+ *      `rgb(180, 35, 24)` (`COLOR(RED)` on indicator 83, [5250_Subfile/PMTCUSTD.DSPF:66-72]),
+ *      with a visually hidden "Inactive" label, and the legend switches to "F9=Exclude Inactive".
  *   5. Option 5 plus Enter opens the detail window in Display mode with every field protected
  *      (ProtectAll, [5250_Subfile/MTNCUSTR.SQLRPGLE:181-191]).
  *   6. F12 closes it, the one screen I/O of Display mode, and focus returns to the option field.
@@ -54,6 +54,12 @@ const PAGE_SIZE = 12;
 
 /** Inputs of the detail window: the protected Customer Id plus the nine customer fields. */
 const DETAIL_INPUT_COUNT = 10;
+
+/**
+ * COLOR(RED) of inactive rows [5250_Subfile/PMTCUSTD.DSPF:66-72]: the computed value of
+ * `--color-inactive` (#b42318, tokens.css).
+ */
+const INACTIVE_RED = 'rgb(180, 35, 24)';
 
 /** One customer as the list and the detail window show it. */
 type SeedCustomer = {
@@ -198,8 +204,10 @@ test.describe('search and display (Inquiry)', () => {
       await expectRowShows(row, NIBH);
       await expect(row).not.toHaveClass(/row--inactive/);
 
-      // The colour of an active row's name, compared with the inactive rows in the F9 step.
-      return colorOf(cellsOf(row).name);
+      // An active row is not red; its name colour is compared with the inactive rows in the F9 step.
+      const nameColor = await colorOf(cellsOf(row).name);
+      expect(nameColor, `colour of ${NIBH.name}, an active row`).not.toBe(INACTIVE_RED);
+      return nameColor;
     });
 
     await test.step(`inactive rows are excluded by default: ${INACTIVE_ONLY_PREFIX} gives DEM0002`, async () => {
@@ -221,7 +229,12 @@ test.describe('search and display (Inquiry)', () => {
         await expectRowShows(row, customer);
         await expect(row).toHaveClass(/row--inactive/);
         await expect(row).toContainText('Inactive');
-        expect(await colorOf(cellsOf(row).name), `colour of ${customer.name} against an active row`).not.toBe(
+        // Every data cell renders exactly COLOR(RED), and the name differs from the active row's.
+        const cells = cellsOf(row);
+        for (const cell of [cells.name, cells.city, cells.state, cells.zip5]) {
+          await expect(cell).toHaveCSS('color', INACTIVE_RED);
+        }
+        expect(await colorOf(cells.name), `colour of ${customer.name} against an active row`).not.toBe(
           activeColor,
         );
       }
