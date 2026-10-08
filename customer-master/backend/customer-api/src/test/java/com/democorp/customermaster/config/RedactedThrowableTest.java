@@ -1,4 +1,4 @@
-package com.democorp.customermaster.controller;
+package com.democorp.customermaster.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -77,14 +77,14 @@ final class RedactedThrowableTest {
             assertThat(rendering).doesNotContain(SENTINELS);
             assertThat(rendering.lines())
                     .noneMatch(line -> line.startsWith("FORGED"))
-                    .anyMatch(line -> line.contains("at com.democorp.customermaster.controller."
+                    .anyMatch(line -> line.contains("at com.democorp.customermaster.config."
                             + "RedactedThrowableTest.withholdsEveryMessageAndKeepsDiagnostics("));
             assertThat(rendering).contains(
                     "RedactedThrowable: java.lang.RuntimeException [message withheld]",
-                    "Caused by: com.democorp.customermaster.controller.RedactedThrowable: java.sql.SQLException"
+                    "Caused by: com.democorp.customermaster.config.RedactedThrowable: java.sql.SQLException"
                             + " [SQLSTATE 23505, vendor code 42; message withheld]",
                     "java.io.IOException [message withheld]",
-                    "Suppressed: com.democorp.customermaster.controller.RedactedThrowable:"
+                    "Suppressed: com.democorp.customermaster.config.RedactedThrowable:"
                             + " java.lang.IllegalStateException [message withheld]",
                     "SQLSTATE 40001, vendor code 7",
                     "SQLSTATE 08006, vendor code 0");

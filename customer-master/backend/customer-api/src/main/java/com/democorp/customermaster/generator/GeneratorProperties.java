@@ -24,66 +24,34 @@ import org.springframework.validation.annotation.Validated;
  * {@code parm_recds packed(15 : 5)} and assigns it to {@code p_recds int(10)} before its
  * {@code for nRecds = 1 to p_recds} loop ({@code 5250_Subfile/LOADCUSTR.SQLRPGLE}, lines 21-24 and
  * 132-134). The source has no start id, file or seed parameter: it always numbers rows from
- * {@code '1001'}, always reads table {@code CSZ}, and draws from Db2 {@code RANDOM()}. Here:
- * <ul>
- *   <li>{@link #count()} is the row count, an integer in 1..{@value #MAX_COUNT}, defaulting to
- *       300, the size of the {@code Custmast.sql} seed. The source has no default because the CL
- *       parameter is required.</li>
- *   <li>{@link #startId()} overrides the first customer id. Null or empty, which is how the bridge
- *       binds an option that was not given, means "automatic": {@code CustomerGeneratorRunner}
- *       then starts at LOADCUSTR's {@code 1001}, or at {@code AAAA} when the count exceeds the
- *       385,245 ids that remain from {@code 1001}.</li>
- *   <li>{@link #cszFile()} names the city/state/ZIP CSV that replaces table {@code CSZ}; by default
- *       the bundled sample {@value #DEFAULT_CSZ_FILE}.</li>
- *   <li>{@link #seed()} makes the random data reproducible; null means an unseeded generator.</li>
- * </ul>
+ * {@code '1001'}, always reads table {@code CSZ}, and draws from Db2 {@code RANDOM()}.
  *
- * <p><b>Binding contract.</b> The keys are filled by the option bridge in
- * {@code application-generator.yml}, because Spring Boot exposes {@code --count=N} as the flat
- * property {@code count}, not as {@code customer-master.generator.count}:
- * <pre>{@code
- * customer-master:
- *   generator:
- *     count: ${count:${GENERATOR_COUNT:300}}
- *     start-id: ${start-id:${GENERATOR_START_ID:}}
- *     csz-file: ${csz-file:${GENERATOR_CSZ_FILE:classpath:generator/csz-sample.csv}}
- *     seed: ${seed:${GENERATOR_SEED:}}
- * }</pre>
- * Precedence is therefore: command-line flag ({@code --count}, {@code --start-id},
- * {@code --csz-file}, {@code --seed}), then the {@code GENERATOR_COUNT}, {@code GENERATOR_START_ID},
- * {@code GENERATOR_CSZ_FILE} or {@code GENERATOR_SEED} environment variable, then the default. A
- * fully qualified {@code --customer-master.generator.count=N} also works, because command-line
- * properties outrank the profile file. An empty bridge value means "not given": {@code startId}
- * binds as {@code ""}, and {@code seed} binds as {@code null}, because Spring's String-to-Number
- * conversion maps an empty string to null. A {@code count} that resolves to an empty or
- * whitespace-only value, as {@code GENERATOR_COUNT=} or {@code --count=} gives, binds as the
- * default 300: the bridge falls back only when a variable is absent, and the null that conversion
- * would make of the blank cannot be assigned to the primitive {@code int}, so
- * {@code BlankCountAdvisor} leaves the key unbound and the {@code @DefaultValue} applies. A flag or
- * qualified property that carries a number still wins over a blank {@code GENERATOR_COUNT}.
- * {@code CustomerGeneratorRunner} rejects every other command-line option before any write.
+ * <p><b>Binding.</b> The option bridge in {@code application-generator.yml} fills these keys,
+ * because Spring Boot exposes {@code --count=N} as the flat property {@code count}. A command-line
+ * flag ({@code --count}, {@code --start-id}, {@code --csz-file}, {@code --seed}) wins over its
+ * {@code GENERATOR_*} environment variable, which wins over the default; a fully qualified
+ * {@code --customer-master.generator.count=N} also works, because command-line properties outrank
+ * the profile file. An empty value means "not given": {@code startId} binds as {@code ""},
+ * {@code seed} as {@code null}, and an empty or whitespace-only {@code count} as the default
+ * through {@code BlankCountAdvisor}.
  *
- * <p><b>Validation.</b> Validation is part of binding: a {@code count} outside
- * 1..{@value #MAX_COUNT}, a {@code startId} that is neither empty nor four characters of
- * {@code [A-Z0-9]} (for example a lower-case {@code b000}, or blanks only), a non-blank
- * {@code count} that is not a number (for example {@code abc}), or a {@code seed} that is not a
- * number fails context startup with a message naming the key, such as
- * {@code customer-master.generator.count}, and the generator process exits with a non-zero status
- * before it touches the database. Only a blank {@code count} is treated as "not given". Whether
- * {@code startId} plus {@code count} fits the id space is a cross-field rule that
- * {@code CustomerGeneratorRunner} checks after binding.
+ * <p><b>Validation.</b> Binding validates the options: a value outside the ranges and formats
+ * below, such as a {@code startId} of blanks only, or a non-blank {@code count} or a {@code seed}
+ * that is not a number, fails context startup with a message naming the key, and the generator
+ * process exits with a non-zero status before it touches the database. Whether {@code startId}
+ * plus {@code count} fits the id space is a cross-field rule that {@code CustomerGeneratorRunner}
+ * checks after binding.
  *
- * <p><b>Registration.</b> The record carries no stereotype annotation, and the application declares
- * no {@code @ConfigurationPropertiesScan}. {@code CustomerGeneratorRunner}, which exists only under
- * the {@code generator} profile, is its only registrar through
- * {@code @EnableConfigurationProperties(GeneratorProperties.class)}, next to which it imports
- * {@code BlankCountAdvisor}, so the web application and the test contexts never bind or validate it
- * and never contain the advisor.
+ * <p><b>Registration.</b> Only {@code CustomerGeneratorRunner}, which exists only under the
+ * {@code generator} profile, registers the record, together with {@code BlankCountAdvisor}, so the
+ * web application and the test contexts never bind it.
  *
  * @param count   {@code customer-master.generator.count}: rows to generate, 1..{@value #MAX_COUNT};
- *                default 300, also when the resolved value is empty or whitespace only
+ *                default 300, the size of the {@code Custmast.sql} seed, also when the resolved
+ *                value is empty or whitespace only
  * @param startId {@code customer-master.generator.start-id}: first customer id, four characters of
- *                {@code [A-Z0-9]}; null or empty selects the automatic start
+ *                {@code [A-Z0-9]}; null or empty selects the automatic start that
+ *                {@code CustomerGeneratorRunner} chooses
  * @param cszFile {@code customer-master.generator.csz-file}: location of the city/state/ZIP CSV,
  *                a {@code classpath:} resource or a file such as the mounted {@code /data/csz.csv},
  *                resolved by {@code CszSource}; default {@value #DEFAULT_CSZ_FILE}

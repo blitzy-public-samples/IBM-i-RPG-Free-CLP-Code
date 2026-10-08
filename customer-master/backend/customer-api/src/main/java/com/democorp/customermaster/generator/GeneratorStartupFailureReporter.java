@@ -2,6 +2,7 @@ package com.democorp.customermaster.generator;
 
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
 import com.democorp.customermaster.config.DataSourceSchemaGuard.InvalidSchemaException;
+import com.democorp.customermaster.config.RedactedThrowable;
 import com.democorp.customermaster.repository.LockWaitingReads.InvalidLockTimeoutException;
 import java.io.PrintStream;
 import java.net.SocketException;
@@ -64,7 +65,9 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
  * </ul>
  * The line passes through {@link CustomerGeneratorRunner#oneLine(String)}, goes to {@code System.out}
  * like the runner's lines, and carries no credential: no message it is built from holds the password,
- * and the URL contributes its authority alone. The full exception is logged at DEBUG.
+ * and the URL contributes its authority alone. The same line and the exception's value-free
+ * {@link RedactedThrowable} copy (types, stack frames and SQLSTATE, every message withheld) are logged at
+ * DEBUG.
  *
  * <p><b>What it leaves to Spring Boot.</b> Every other failure returns {@code false}, so the next
  * reporter, Spring Boot's {@code FailureAnalyzers}, still reports it: an invalid option value such as
@@ -75,8 +78,10 @@ import org.springframework.jdbc.CannotGetJdbcConnectionException;
  * <p><b>Registration.</b> Spring Boot instantiates every {@link SpringBootExceptionReporter} listed in
  * {@code META-INF/spring.factories} with the failed context, which is {@code null} when the start failed
  * before the context was created, and asks them in order. {@link Order} with
- * {@link Ordered#HIGHEST_PRECEDENCE} puts this one first. It never throws: anything unexpected while
- * reporting returns {@code false}, which leaves the failure to Spring Boot's normal handling.
+ * {@link Ordered#HIGHEST_PRECEDENCE} puts this one first. A {@link RuntimeException} raised while
+ * reporting is logged at DEBUG as its value-free copy and returns {@code false}, which leaves the
+ * failure to Spring Boot's normal handling; an {@link Error}, or a failure raised while that copy is
+ * logged, propagates.
  */
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public final class GeneratorStartupFailureReporter implements SpringBootExceptionReporter {
@@ -111,7 +116,10 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
     /** The authority pgjdbc accepts: one or more comma-separated hosts, each with an optional port. */
     private static final Pattern AUTHORITY = Pattern.compile(HOST_PORT + "(?:," + HOST_PORT + ")*");
 
-    /** Receives the full exception of a reported failure, at DEBUG. */
+    /**
+     * Receives, at DEBUG, the value-free copy of a failure's exception: types, stack frames and SQLSTATE,
+     * with every message withheld.
+     */
     private static final Logger LOG = LoggerFactory.getLogger(GeneratorStartupFailureReporter.class);
 
     /** The context whose start failed; {@code null} when the start failed before it was created. */
@@ -163,12 +171,14 @@ public final class GeneratorStartupFailureReporter implements SpringBootExceptio
             if (line.isEmpty()) {
                 return false;
             }
-            LOG.debug("generator.startup failed: {}", line.get(), failure);
-            out.println(CustomerGeneratorRunner.oneLine(line.get()));
+            final String shown = CustomerGeneratorRunner.oneLine(line.get());
+            LOG.debug("generator.startup failed: {}", shown, RedactedThrowable.of(failure));
+            out.println(shown);
             out.flush();
             return true;
         } catch (RuntimeException unexpected) {
-            LOG.debug("generator.startup failure left to Spring Boot's report", unexpected);
+            LOG.debug("generator.startup failure left to Spring Boot's report",
+                    RedactedThrowable.of(unexpected));
             return false;
         }
     }

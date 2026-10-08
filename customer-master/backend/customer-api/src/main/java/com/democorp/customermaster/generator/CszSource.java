@@ -30,80 +30,51 @@ import org.springframework.stereotype.Component;
  * Reads the city/state/ZIP (CSZ) file the test-data generator draws every customer's city, state and
  * ZIP from.
  *
- * <p><b>What it replaces.</b> LOADCUSTR read table {@code CSZ} in two statements
- * [5250_Subfile/LOADCUSTR.SQLRPGLE:101-129]: {@code select count(*) … where length(trim(city)) <= 20} to
- * size its array, then cursor {@code csz_cur}, {@code select zip, type, upper(city), trim(state) … where
- * length(trim(city)) <= 20}, fetched into {@code csz_a(1..N)} in cursor order. The record was {@code zip
- * int(10)}, {@code ziptype char(10)}, {@code city char(20)}, {@code st char(2)}
- * [5250_Subfile/LOADCUSTR.SQLRPGLE:38-43]. The table itself was a spreadsheet upload of the
- * unitedstateszipcodes.org ZIP database, cut down to zip, type, primary_city (renamed city) and state
- * [5250_Subfile/README.md:86-107]. Here the table becomes a CSV file and both statements become one
- * pass of {@link #load(String)}, which accepts that download unedited.
+ * <p><b>What it replaces.</b> LOADCUSTR's two statements over table {@code CSZ}, a count and the cursor
+ * {@code csz_cur} fetched into {@code csz_a} [5250_Subfile/LOADCUSTR.SQLRPGLE:101-129], with its
+ * {@code csz} record [5250_Subfile/LOADCUSTR.SQLRPGLE:38-43], become one pass of {@link #load(String)}
+ * over a CSV file. The table was an upload of the unitedstateszipcodes.org ZIP database
+ * [5250_Subfile/README.md:86-107], and that download is accepted unedited.
  *
- * <p><b>Locations.</b>
- * <ul>
- *   <li>{@code classpath:generator/csz-sample.csv}, the bundled 200-row sample and the generator's
- *       default: the prefix and any leading {@code /} are removed and the resource is opened through
- *       the thread context class loader, then this class's own loader.</li>
- *   <li>Anything else is a filesystem path, with an optional {@code file:} prefix, such as the
- *       read-only Compose mount {@code /data/csz.csv}. A bare path is never looked up on the class path,
- *       so a mistyped file name fails as "not found" instead of silently reading the sample.</li>
- * </ul>
+ * <p><b>Locations.</b> A {@code classpath:} location, such as the default bundled sample
+ * {@code classpath:generator/csz-sample.csv}, is opened through the thread context class loader, then
+ * this class's own. Anything else is a filesystem path with an optional {@code file:} prefix, such as
+ * the Compose mount {@code /data/csz.csv}, and is never looked up on the class path.
  *
- * <p><b>File format.</b> UTF-8 CSV per RFC 4180: comma-separated fields, optionally double-quoted;
- * inside quotes {@code ""} is one literal {@code "}, and commas and line breaks are literal. A
- * {@code "} inside an unquoted field, such as {@code TEST"VILLE}, is a malformed record and fails the
- * load with a {@link CszFileException}; write it as {@code "TEST""VILLE"}. Lines may
- * end in {@code \n}, {@code \r\n} or {@code \r}. A leading byte-order mark is ignored, and blank lines
- * (including a trailing newline) are skipped. The first non-blank record is the header; column names
- * match case-insensitively after trimming:
- * <ul>
- *   <li>required: {@code zip}, {@code state}, and {@code city} or its alias {@code primary_city}
- *       ({@code city} is used when both are present);</li>
- *   <li>optional: {@code type};</li>
- *   <li>every other column (for example {@code decommissioned}, {@code acceptable_cities},
- *       {@code county}) is ignored. When a name repeats, its first column is used.</li>
- * </ul>
+ * <p><b>File format.</b> UTF-8 CSV per RFC 4180, in which a {@code "} inside an unquoted field makes the
+ * record malformed. Lines end in {@code \n}, {@code \r\n} or {@code \r}, a leading byte-order mark is
+ * ignored, blank lines are skipped, and the first non-blank record is the header. Header names match
+ * case-insensitively after trimming: {@code zip}, {@code state}, and {@code city} or its alias
+ * {@code primary_city} are required ({@code city} wins when both are present), {@code type} is
+ * optional, every other column is ignored, and a repeated name uses its first column.
  *
  * <p><b>Row rules,</b> applied to every data record in file order:
  * <ol>
  *   <li>{@code zip}, trimmed, must be a non-negative integer that fits the source's {@code int(10)};
  *       {@code 00501} reads as 501. Anything else fails the whole load.</li>
- *   <li>The city, trimmed, is kept only when it is at most {@value #CITY_MAX_LENGTH} characters (code
- *       points): the source's {@code length(trim(city)) <= 20}, the width of {@code custmast.city}. A
- *       blank city is kept, as in the source. The kept city is trimmed and uppercased by
- *       {@link TextNormalizer#filter(String)}, the source's {@code upper(city)}.</li>
+ *   <li>The city, trimmed, is kept only when it is at most {@value #CITY_MAX_LENGTH} code points, the
+ *       source's {@code length(trim(city)) <= 20}. A blank city is kept, as in the source. The kept
+ *       city is uppercased by {@link TextNormalizer#filter(String)}, the source's
+ *       {@code upper(city)}.</li>
  *   <li>The state, trimmed (the source's {@code trim(state)}, not uppercased), is kept only when
  *       {@link StateService#exists(String)} knows it. This rule is new: the {@code custmast_state_fk}
- *       foreign key would reject any other row, while the source had no such key. Codes in the
- *       download such as AP, FM, MH and PW are therefore dropped. {@code exists} matches
- *       case-insensitively; {@code CustomerDataGenerator} normalizes the state it writes.</li>
- *   <li>A city in a row the two rules above keep must not contain U+0000 (NUL), which PostgreSQL text
- *       and therefore {@code custmast.city} cannot store: such a row fails the whole load before any
- *       write, naming its line and the city column used ({@code city} or {@code primary_city}). The
- *       character is never removed or replaced. A row those rules drop is dropped whatever it holds.</li>
+ *       foreign key would reject any other row. {@code exists} matches case-insensitively;
+ *       {@code CustomerDataGenerator} normalizes the state it writes.</li>
+ *   <li>A city that the two rules above keep must not contain U+0000 (NUL), which {@code custmast.city}
+ *       cannot store: such a row fails the whole load before any write. A row those rules drop is
+ *       dropped whatever it holds.</li>
  *   <li>{@code type} is trimmed, or {@code ""} when the file has no such column.</li>
  * </ol>
  * Retained rows keep their file order and are never deduplicated, because {@code CustomerDataGenerator}
  * draws them by index and a seeded run must repeat exactly. The counts read, kept and dropped are logged
  * at INFO. A file with no usable row yields an empty list; {@code CustomerGeneratorRunner} reports it.
  *
- * <p><b>Errors.</b> Every failure is a {@link CszFileException} with a one-line message that names the
- * location and, for a record, the 1-based physical line on which the record starts, for example
- * {@code CSZ file /data/csz.csv line 17: zip "12A45" is not a number}. The runner prints it verbatim
- * and exits with status 1. A failure of {@link StateService#exists(String)} itself (an empty STATES
- * table) propagates unchanged.
+ * <p><b>Errors.</b> Every failure is a {@link CszFileException} with a one-line message naming the
+ * location and, for a record, the line it starts on; a failure of {@link StateService#exists(String)}
+ * itself propagates unchanged.
  *
- * <p><b>Scope.</b> The class only reads; it never writes the file or the database, and it reaches
- * STATES only through the {@link StateService} cache. It holds no state between calls and is
- * thread-safe. It carries no profile, so tests can use it in any context.
- *
- * <p>Example:
- * <pre>{@code
- * List<CszSource.CszRow> rows = cszSource.load("classpath:generator/csz-sample.csv"); // 200 rows
- * List<CszSource.CszRow> full = cszSource.load("/data/csz.csv");
- * // zip,type,primary_city,state  /  00501,UNIQUE,Holtsville,NY  ->  CszRow[501, UNIQUE, HOLTSVILLE, NY]
- * }</pre>
+ * <p><b>Scope.</b> The class only reads, reaches STATES only through {@link StateService}, holds no
+ * state between calls, is thread-safe and carries no profile.
  */
 @Component
 public class CszSource {
@@ -119,19 +90,15 @@ public class CszSource {
     /** Optional prefix of a filesystem location. */
     public static final String FILE_PREFIX = "file:";
 
-    /** Header name of the ZIP column. */
     private static final String COLUMN_ZIP = "zip";
 
-    /** Header name of the city column. */
     private static final String COLUMN_CITY = "city";
 
     /** Header alias of the city column, as named in the unedited unitedstateszipcodes.org download. */
     private static final String COLUMN_PRIMARY_CITY = "primary_city";
 
-    /** Header name of the state column. */
     private static final String COLUMN_STATE = "state";
 
-    /** Header name of the optional ZIP type column. */
     private static final String COLUMN_TYPE = "type";
 
     /** Value of {@link CszRow#type()} when the file has no {@code type} column. */
@@ -140,10 +107,8 @@ public class CszSource {
     /** Byte-order mark a spreadsheet may write at the start of a UTF-8 file. */
     private static final char BYTE_ORDER_MARK = '\uFEFF';
 
-    /** Field delimiter. */
     private static final char COMMA = ',';
 
-    /** Field quote. */
     private static final char QUOTE = '"';
 
     /** Longest field value quoted in an error message before it is shortened. */

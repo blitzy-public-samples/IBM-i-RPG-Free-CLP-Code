@@ -1,61 +1,23 @@
 /**
- * Messages display: the one place the application shows messages.
+ * Messages display: the one place the application shows messages. It replaces
+ * the 5250 message subfile, the MSGSFL/MSGCTL records of PMTCUSTD, MTNCUSTD
+ * and PMTSTATED, which SndMsgPgmQ filled (QMHSNDPM) and ClrMsgPgmQ emptied
+ * (QMHRMVPM) once per screen cycle. Here a message is plain data: a caller
+ * publishes an already-formatted text.
  *
- * Replaces the 5250 message subfile, the MSGSFL/MSGCTL records of PMTCUSTD,
- * MTNCUSTD and PMTSTATED, which SndMsgPgmQ filled (QMHSNDPM) and ClrMsgPgmQ
- * emptied (QMHRMVPM) once per screen cycle. Here a message is plain data: a
- * caller publishes an already-formatted text, and the text stays on screen
- * until the user's next action clears it.
+ * Lifetime: a toast stays until the next user action. A click anywhere (mouse,
+ * or Enter/Space on a button, which the browser turns into a click) clears the
+ * list here; a command key (Enter, a function key, Escape, PageUp/PageDown)
+ * clears it through `KeyScopeProvider`'s `onBeforeCommand`, which `src/App.tsx`
+ * wires to `clear`. Typing text clears nothing, as the 5250 cleared its message
+ * subfile per screen cycle, not per keystroke. There is no auto-dismiss timer
+ * and no dismiss button.
  *
- * - `ToastProvider` owns the message list and renders the only
- *   `<ToastRegion />`, after its children. `src/App.tsx` mounts it once, above
- *   `KeyScopeProvider` and every screen and dialog, so the region is the last
- *   child of the app root (the flex column of src/styles/global.css) and sits
- *   outside every dialog. Screens and dialogs never render another host.
- * - `useToasts()` returns `{ publish, clear }`. Both functions are stable for
- *   the provider's lifetime, and a component that only publishes does not
- *   re-render when the list changes.
- * - Lifetime: a toast stays until the next user action. A click anywhere
- *   (mouse, or Enter/Space on a button, which the browser turns into a click)
- *   clears the list here; a command key (Enter, a function key, Escape,
- *   PageUp/PageDown) clears it through `KeyScopeProvider`'s `onBeforeCommand`,
- *   which `src/App.tsx` wires to `clear`. Typing text clears nothing, as the
- *   5250 cleared its message subfile per screen cycle, not per keystroke. There
- *   is no auto-dismiss timer and no dismiss button.
- * - Roles: `status` (polite) carries information and confirmations, such as
- *   DEM0000, DEM0009, DEM0002 and DEM0006. `alert` (assertive) carries errors:
- *   every problem `detail` and the client-raised DEM0003, DEM0004 and DEM0005.
- *   The caller chooses the kind; this file inspects no message code and holds
- *   no message text.
- *
- * Layering: this file imports React only, never `api/`, `errors/`,
- * `features/` or `keyboard/`.
- *
- * @example Publishing from a component (text from the message catalog)
- * ```tsx
- * const { publish } = useToasts();
- * const { format } = useMessages();
- * publish({ kind: 'alert', text: format('DEM0003') });
- * ```
- *
- * @example Wiring in src/App.tsx
- * ```tsx
- * function KeyedScreens({ children }: { children: ReactNode }) {
- *   const { clear } = useToasts();
- *   return <KeyScopeProvider onBeforeCommand={clear}>{children}</KeyScopeProvider>;
- * }
- *
- * <ToastProvider>
- *   <KeyedScreens>{routes}</KeyedScreens>
- * </ToastProvider>
- * ```
- *
- * Test guidance: a component test that publishes must render inside
- * `ToastProvider`. Query messages through their region, for example
- * `within(screen.getByRole('alert')).getByText(text)` or
- * `within(screen.getByRole('status')).getByText(text)`. Both regions always
- * exist, even when empty, and `FormField` renders field messages too, so a bare
- * `screen.getByText(text)` can match twice.
+ * Roles: `status` (polite) carries information and confirmations, such as
+ * DEM0000, DEM0009, DEM0002 and DEM0006; `alert` (assertive) carries errors:
+ * every problem `detail` and the client-raised DEM0003, DEM0004 and DEM0005.
+ * The caller chooses the kind; this file inspects no message code and holds no
+ * message text.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -63,10 +25,8 @@ import type { ReactNode } from 'react';
 /** One displayed message. `id` is unique for the life of the page. */
 export type Toast = { id: number; kind: 'status' | 'alert'; text: string };
 
-/** What a caller passes to `publish`: the role and the formatted text. */
 type ToastMessage = { kind: Toast['kind']; text: string };
 
-/** The publishing interface returned by `useToasts()`. */
 type ToastApi = {
   /**
    * Appends a message to the list. Text that is empty or only blanks is
@@ -94,8 +54,10 @@ const ToastListContext = createContext<readonly Toast[] | null>(null);
 let nextToastId = 0;
 
 /**
- * Owns the message list, clears it on every click, and renders `children`
- * followed by the only `<ToastRegion />`.
+ * Owns the message list and renders `children` followed by the only
+ * `<ToastRegion />`. Mount it once, above every screen and dialog, so the
+ * region sits outside every dialog; `Dialog` keeps that live region out of
+ * `inert`. Screens and dialogs never render another host.
  */
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<readonly Toast[]>([]);
@@ -114,8 +76,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((list) => [...list, toast]);
   }, []);
 
-  // Returning the same empty array lets React skip the re-render when there is
-  // nothing to clear.
   const clear = useCallback(() => {
     setToasts((list) => (list.length === 0 ? list : []));
   }, []);

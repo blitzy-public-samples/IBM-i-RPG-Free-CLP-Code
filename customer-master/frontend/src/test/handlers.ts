@@ -1,94 +1,51 @@
 /**
- * Default MSW handlers and shared fixtures for the Vitest suites.
+ * Default MSW handlers and shared fixtures for the Vitest suites: every `/api`
+ * call a component makes under Vitest is answered here, so no test reaches a
+ * network.
  *
- * Part of the frontend test base, with `server.ts` (the one MSW server, built
- * from `handlers` below) and `setup.ts` (its lifecycle). Every `/api` call a
- * component makes under Vitest is answered here, so no test reaches a network.
- * A test that needs another answer overrides one route for itself:
+ * The fixture and wire types are type-only aliases of the generated
+ * `../api/schema`, the one source of API types, erased at compile time, so the
+ * only runtime import is `msw/http` and no import cycle forms. `UserFixture`,
+ * the demo credentials, is the one shape declared here, because it is
+ * test-only data.
  *
- * ```ts
- * server.use(
- *   http.post('/api/customers/review', () =>
- *     problem(422, 'DEM0502', {
- *       args: ['Name'],
- *       errors: [{ field: 'name', code: 'DEM0502', message: messageText('DEM0502', ['Name']) }],
- *     }),
- *   ),
- * );
- * ```
- *
- * Layering. The fixture and wire types are type-only aliases of the generated
- * `../api/schema` (from `customer-master/openapi/customer-master-api.yaml`),
- * the one source of API types, and are erased at compile time, so this file's
- * only runtime import is `msw/http`. `schema.d.ts` imports nothing, so the
- * tests that import this file form no import cycle with it. `UserFixture`, the
- * demo credentials, is the one shape declared here, because it is test-only
- * data.
- *
- * Fixture data. The states are the 58 rows of 5250_Subfile/States.sql; the
- * customers are the first 30 seed rows of 5250_Subfile/Custmast.sql after the
- * seed migration's transforms (base-36 re-keying, uppercase name and city,
- * even ids made active, the special-character names of ids 3, 4 and 6); the
- * message texts are the backend catalog `messages.properties`. All exported
- * fixtures are deep-frozen, so neither a handler nor a test can change them
- * and every test starts from the same data.
- *
- * MSW 3 serves `http` and `HttpResponse` from the `msw/http` entry point;
- * `setupServer` stays in `msw/node`, which only `server.ts` imports.
+ * The states are the 58 rows of 5250_Subfile/States.sql, the customers the
+ * first 30 seed rows of 5250_Subfile/Custmast.sql after the seed migration's
+ * transforms, and the message texts the backend catalog `messages.properties`.
+ * All exported fixtures are deep-frozen, so neither a handler nor a test can
+ * change them and every test starts from the same data.
  */
 import { http, HttpResponse } from 'msw/http';
 import type { DefaultBodyType, PathParams } from 'msw';
 import type { HttpHandler, HttpResponseResolver } from 'msw/http';
 import type { components } from '../api/schema';
 
-// ---------------------------------------------------------------------------
-// Fixture types (aliases of the generated OpenAPI schemas in ../api/schema)
-// ---------------------------------------------------------------------------
-
-/** The generated OpenAPI component schemas. */
 type Schemas = components['schemas'];
 
-/** A role as `GET /api/session` reports it: an element of schema `SessionResponse`'s `roles`. */
 export type Role = Schemas['SessionResponse']['roles'][number];
 
-/** One row of `GET /api/states`: alias of schema `StateResponse`. */
 export type StateFixture = Schemas['StateResponse'];
 
-/** One search result row: alias of schema `CustomerSummaryResponse`. */
 export type CustomerSummaryFixture = Schemas['CustomerSummaryResponse'];
 
-/**
- * The nine editable customer fields of schema `CustomerFields`, as schema
- * `CustomerResponse` carries them: always present, never `null`.
- */
+/** The nine editable fields as schema `CustomerResponse` carries them: always present, never `null`. */
 export type CustomerFieldsFixture = Pick<Schemas['CustomerResponse'], keyof Schemas['CustomerFields']>;
 
-/** A stored customer: alias of schema `CustomerResponse`; `chgTime` is an ISO-8601 instant or `null`. */
 export type CustomerResponseFixture = Schemas['CustomerResponse'];
 
-/** One entry of a problem's `errors`, the first receiving focus: alias of schema `FieldError`. */
+/** One entry of a problem's `errors`; the first receives focus. */
 export type FieldErrorFixture = Schemas['FieldError'];
 
-/** The problem+json body: alias of schema `Problem`. */
 type ProblemBody = Schemas['Problem'];
 
 /**
- * Optional members of a problem built by {@link problem}, each typed as schema
- * `Problem` declares it:
- *
- * - `args`: substitution values for the catalog text; also sent as `args`.
- * - `instance`: the request path; defaults to `/api/customers/review` when
- *   `stateAccepted` is given, and to `/api` otherwise. `null` leaves the
- *   member out, as the server does for a request its connector refused
- *   before reading a path.
- * - `detail`: overrides the catalog text, e.g. for DEM9898's USPS description.
- * - `errors`: the fields at fault; never empty, and 400 or 422 only.
- * - `current`: 409 DEM1002 only, and required there: the customer as now stored.
- * - `stateAccepted`: 422 and 502 review failures after the State rule passed;
- *   `instance` then defaults to `/api/customers/review`, the only path allowed.
- * - `errorId`: 500 only, a UUID; defaults to {@link DEFAULT_ERROR_ID}.
- *
- * {@link problem} throws when a member breaks this contract.
+ * Optional members of a problem built by {@link problem}, typed as schema
+ * `Problem` declares them; {@link problem} states where each is allowed and
+ * throws when one breaks that contract. `args` are the catalog text's
+ * substitution values. `instance` defaults to `/api/customers/review` when
+ * `stateAccepted` is given and to `/api` otherwise; `null` leaves it out, as
+ * the server does for a request its connector refused before reading a path.
+ * `detail` overrides the catalog text, e.g. for DEM9898's USPS description.
  */
 export type ProblemExtra = Partial<
   Pick<ProblemBody, 'args' | 'detail' | 'errors' | 'current' | 'stateAccepted' | 'errorId'> & {
@@ -103,12 +60,7 @@ interface UserFixture {
   roles: Role[];
 }
 
-/** A non-error message carried in a success payload: alias of schema `Notice`. */
 type NoticeFixture = Schemas['Notice'];
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 
 /** The `chgTime` of every fixture customer and of every write answered here. */
 export const FIXTURE_CHG_TIME = '2026-10-05T14:03:09Z';
@@ -116,35 +68,27 @@ export const FIXTURE_CHG_TIME = '2026-10-05T14:03:09Z';
 /** The stamp user of seed and generated rows. */
 const SYSTEM_USER = '*SYSTEM*';
 
-/** The first id an interactive add receives on a fresh database. */
 const FIRST_ADDED_ID = 'EEEF';
 
-/** The base-36 digits of a customer id in ordinal order: A..Z = 0..25, 0..9 = 26..35. */
 const CUST_ID_DIGITS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-/** The ordinal of `9999`, the last customer id (36^4 - 1); no add follows it. */
 const MAX_CUST_ID_ORDINAL = 36 ** 4 - 1;
 
-/** Search page size the UI uses, and the API's upper bound. */
 const DEFAULT_PAGE_SIZE = 12;
 const MAX_PAGE_SIZE = 100;
 
-/** Four characters of the base-36 alphabet, as the API validates path ids. */
 const CUST_ID_PATTERN = /^[A-Z0-9]{4}$/;
 
-/** The length of a customer id, in code points, that a `custId` path value must have exactly. */
 const CUST_ID_LENGTH = 4;
 
-/** The search's row cap (MAXSFLRECDS): the page that brings the rows served to it ends the list with DEM0006. */
+/** The search's row cap, the source's MAXSFLRECDS. */
 const MAX_SEARCH_ROWS = 9999;
 
-/** The longest search cursor, in UTF-16 units, the API decodes; a longer one is not valid. */
 const MAX_CURSOR_LENGTH = 1024;
 
 /** Widths, in code points, of the search entries `name` and `city` (SC_NAME, SC_CITY) and of their LIKE pattern. */
 const FILTER_WIDTH = 13;
 
-/** Width, in code points, of the state picker's `nameContains` entry. */
 const NAME_CONTAINS_WIDTH = 10;
 
 /** Widths, in code points, of the stored columns: `name`, `city`, `state` and the state table's `name`. */
@@ -239,10 +183,6 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-// ---------------------------------------------------------------------------
-// Message catalog
-// ---------------------------------------------------------------------------
-
 /**
  * The 22 catalog texts, identical to the backend's
  * `customer-api/src/main/resources/messages/messages.properties` (checked key
@@ -276,10 +216,6 @@ export const catalog: Readonly<Record<string, string>> = deepFreeze({
   APP0502: 'Address service is unavailable. Try again later.',
   APP0503: 'No customer ids are left. Contact IT.',
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Returns the catalog text of `code` with every `{n}` replaced literally by
@@ -322,14 +258,11 @@ export const users: readonly UserFixture[] = deepFreeze([
   { username: 'sales', password: 'sales-demo', roles: ['MAINTENANCE'] },
 ]);
 
-// ---------------------------------------------------------------------------
-// Request target (the servlet container's connector, before any filter)
-// ---------------------------------------------------------------------------
-
 /**
- * The printable characters the server's connector refuses anywhere in the
- * raw request target, path and query alike, while it reads the request line;
- * the controls, the space, DEL and every non-ASCII character are refused too.
+ * The printable characters the server's connector (the servlet container's,
+ * which runs before any filter) refuses anywhere in the raw request target,
+ * path and query alike, while it reads the request line; the controls, the
+ * space, DEL and every non-ASCII character are refused too.
  */
 const TARGET_REFUSED: ReadonlySet<string> = new Set(['"', '#', '<', '>', '\\', '^', '`', '{', '|', '}']);
 
@@ -446,11 +379,6 @@ function connectorRejection(request: Request): Response | undefined {
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Security (the server's filter chain: firewall, HTTP Basic, access rules)
-// ---------------------------------------------------------------------------
-
-/** Who may call a route: anyone, or a user granted the role or one implying it. */
 type Access = 'public' | Role;
 
 /**
@@ -477,7 +405,6 @@ const BASE64_DIGITS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234
  */
 const FIREWALL_REJECTED: readonly string[] = [';', '%3b', '%25', '%2e', '%0d', '%0a', '%e2%80%a8', '%e2%80%a9', '//'];
 
-/** The user each request was admitted as by {@link secured}, read by {@link principal}. */
 const principals = new WeakMap<Request, Schemas['SessionResponse']>();
 
 /** `value` without the leading and trailing characters at or below U+0020, as Java's `String.trim()`. */
@@ -576,7 +503,6 @@ function authenticate(request: Request): Authentication {
   return { outcome: 'authenticated', user: { username: user.username, roles: [...user.roles] } };
 }
 
-/** Whether `roles` grant `role`, `MAINTENANCE` implying `INQUIRY`. */
 function grants(roles: readonly Role[], role: Role): boolean {
   return roles.includes(role) || (role === 'INQUIRY' && roles.includes('MAINTENANCE'));
 }
@@ -763,7 +689,6 @@ export function problem(status: number, code: string, extra: ProblemExtra = {}) 
   });
 }
 
-/** One property or parameter at fault in a {@link requestNotValid} problem. */
 export interface RequestViolation {
   /** The JSON property, or the path or query parameter, that `errors[].field` names. */
   readonly field: string;
@@ -926,12 +851,10 @@ function normalizeFilter(value: string | null | undefined): string {
   return value === undefined || value === null ? '' : upper(javaStrip(value));
 }
 
-/** The path a problem's `instance` names. */
 function pathOf(request: Request): string {
   return new URL(request.url).pathname;
 }
 
-/** A success-payload notice with its catalog text. */
 function notice(code: string): NoticeFixture {
   return { code, message: messageText(code) };
 }
@@ -980,11 +903,6 @@ function customerFields(text: TextFields, defaultActive: boolean): CustomerField
   };
 }
 
-// ---------------------------------------------------------------------------
-// Write requests (the server's media type check, JSON binding and bean validation)
-// ---------------------------------------------------------------------------
-
-/** The APP0400 reason of a body the server cannot read as the request's JSON object. */
 const MALFORMED_BODY = 'malformed request body';
 
 /**
@@ -1011,10 +929,8 @@ const TEXT_PROPERTIES: readonly (readonly [keyof CustomerFieldsFixture, number])
  */
 type PropertyKind = 'text' | 'purpose' | 'version';
 
-/** A write request's properties by name; any other name is an unknown property. */
 type RequestShape = ReadonlyMap<string, PropertyKind>;
 
-/** The nine text properties plus `extra`, the one property a request adds to them. */
 function requestShape(extra?: readonly [string, PropertyKind]): RequestShape {
   const shape = new Map<string, PropertyKind>(TEXT_PROPERTIES.map(([name]): [string, PropertyKind] => [name, 'text']));
   if (extra !== undefined) {
@@ -1023,19 +939,14 @@ function requestShape(extra?: readonly [string, PropertyKind]): RequestShape {
   return shape;
 }
 
-/** `POST /api/customers`: schema `CustomerFields`. */
 const ADD_REQUEST = requestShape();
 
-/** `POST /api/customers/review`: schema `ReviewRequest`, `purpose` and the nine fields. */
 const REVIEW_REQUEST = requestShape(['purpose', 'purpose']);
 
-/** `PUT /api/customers/{custId}`: schema `CustomerUpdateRequest`, the nine fields and `version`. */
 const UPDATE_REQUEST = requestShape(['version', 'version']);
 
-/** The review purposes, matched exactly: `add` or `ADD ` is refused. */
 type Purpose = 'ADD' | 'EDIT';
 
-/** Java's `Long.MIN_VALUE` and `Long.MAX_VALUE`, the range of `version`. */
 const JAVA_LONG_MIN = -9223372036854775808n;
 const JAVA_LONG_MAX = 9223372036854775807n;
 
@@ -1052,22 +963,15 @@ interface BoundBody {
   readonly version: bigint | null;
 }
 
-/** A request read for its endpoint, or the response that refuses it. */
 type ReadResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly response: Response };
 
-/** The bean-validation violation of a review without `purpose`. */
 const PURPOSE_REQUIRED: RequestViolation = { field: 'purpose', reason: 'purpose is required' };
 
-/** The bean-validation violation of an update without `version`. */
 const VERSION_REQUIRED: RequestViolation = { field: 'version', reason: 'version is required' };
 
-/** The method-validation violation of an update whose path `custId` is not a customer id. */
 const CUST_ID_INVALID: RequestViolation = { field: 'custId', reason: 'custId has an invalid format' };
 
-/**
- * Ends binding with the APP0400 cause the server reports: a reason that names
- * no field (malformed body, unknown property) or a property's violation.
- */
+/** Ends binding with the APP0400 cause the server reports. */
 class BindingFailure extends Error {
   readonly failure: string | RequestViolation;
 
@@ -1293,7 +1197,6 @@ class JsonReader {
     }
   }
 
-  /** Fails the read: the body is malformed. */
   malformed(): never {
     throw new BindingFailure(MALFORMED_BODY);
   }
@@ -1311,12 +1214,11 @@ class JsonReader {
     return this.readValue();
   }
 
-  /** The UTF-16 code unit at the read position, or `undefined` at the end of the text. */
   private code(): number | undefined {
     return this.index < this.text.length ? this.text.charCodeAt(this.index) : undefined;
   }
 
-  /** Skips JSON whitespace, after the content of a string whose first token was read and not used. */
+  /** Skips JSON whitespace, first reading through the content of a pending string. */
   private skipWhitespace(): void {
     if (this.pendingString) {
       this.readString();
@@ -1326,7 +1228,6 @@ class JsonReader {
     }
   }
 
-  /** Consumes `char`, or fails. */
   private expect(char: string): void {
     if (this.text.charAt(this.index) !== char) {
       this.malformed();
@@ -1591,7 +1492,6 @@ function bodyViolations(text: TextFields, missing: readonly RequestViolation[]):
   return violations.sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0));
 }
 
-/** A refused request: 400 APP0400 for `violations`, in reporting order. */
 function refused(request: Request, violations: readonly [RequestViolation, ...RequestViolation[]]): ReadResult<never> {
   return { ok: false, response: requestNotValid(pathOf(request), violations) };
 }
@@ -1606,7 +1506,7 @@ async function readAddRequest(request: Request): Promise<ReadResult<TextFields>>
   return first === undefined ? { ok: true, value: bound.value.text } : refused(request, [first, ...rest]);
 }
 
-/** A review request (schema `ReviewRequest`), bound and validated; `purpose` is required. */
+/** A review request (schema `ReviewRequest`), bound and validated. */
 async function readReviewRequest(
   request: Request,
 ): Promise<ReadResult<{ readonly purpose: Purpose; readonly text: TextFields }>> {
@@ -1625,9 +1525,9 @@ async function readReviewRequest(
 
 /**
  * An update request (schema `CustomerUpdateRequest`) for path id `custId`,
- * bound and validated; `version` is required. A body the server cannot bind
- * is refused first; otherwise an invalid path id (not a customer id, per
- * {@link isCustIdPath}) is reported before the body's violations.
+ * bound and validated. A body the server cannot bind is refused first;
+ * otherwise an invalid path id (not a customer id, per {@link isCustIdPath};
+ * the server's method validation) is reported before the body's violations.
  */
 async function readUpdateRequest(
   request: Request,
@@ -1647,14 +1547,8 @@ async function readUpdateRequest(
   return { ok: true, value: { version, text } };
 }
 
-// ---------------------------------------------------------------------------
-// Field rules and address review (the server's validator and the stub address service)
-// ---------------------------------------------------------------------------
-
-/** The State rule's place in source order; a review failing at a later rule carries `stateAccepted`. */
 const STATE_RULE = 5;
 
-/** A field rule's failure: its place in source order (1–9), the field it names, its catalog code and arguments. */
 interface RuleFailure {
   readonly rule: number;
   readonly field: keyof CustomerFieldsFixture;
@@ -1668,12 +1562,12 @@ function isStateCode(code: string): boolean {
 }
 
 /**
- * The first failure of the nine field rules over normalized fields, in source
- * order, or `undefined` when all pass: 1 `active` is `Y` or `N` (DEM0501);
- * 2–4 `name`, `addr`, `city` not blank (DEM0502); 5 `state` a STATES code
- * (DEM0503, no args); 6–9 `zip`, `acctPhone`, `acctMgr`, `corpPhone` not
- * blank. Blank is Java's `isBlank()`: a no-break space is not blank, an em
- * space is.
+ * The first failure of the server validator's nine field rules over normalized
+ * fields, in source order, or `undefined` when all pass: 1 `active` is `Y` or
+ * `N` (DEM0501); 2–4 `name`, `addr`, `city` not blank (DEM0502); 5 `state` a
+ * STATES code (DEM0503, no args); 6–9 `zip`, `acctPhone`, `acctMgr`,
+ * `corpPhone` not blank. Blank is Java's `isBlank()`: a no-break space is not
+ * blank, an em space is.
  */
 function firstRuleFailure(fields: CustomerFieldsFixture): RuleFailure | undefined {
   const required = (rule: number, field: keyof CustomerFieldsFixture, label: string): RuleFailure | undefined =>
@@ -1726,14 +1620,12 @@ interface AddressResult {
   readonly errorDescription: string;
 }
 
-/** One stub fixture: the request it matches and the standardized address it returns. */
 interface StubAddressFixture {
   readonly description: string;
   readonly input: Pick<AddressRequest, 'address2' | 'city' | 'state' | 'zip5'>;
   readonly output: Omit<AddressResult, 'errorDescription'>;
 }
 
-/** The marker that makes the stub answer `Address Not Found.` for any address line containing it. */
 const BAD_ADDRESS_MARKER = 'BADADDR';
 
 /**
@@ -1882,11 +1774,7 @@ function reviewAddress(instance: string, purpose: Purpose, fields: CustomerField
   });
 }
 
-// ---------------------------------------------------------------------------
-// States (5250_Subfile/States.sql, insertion order, names as written)
-// ---------------------------------------------------------------------------
-
-/** The 58 STATES rows in source insertion order. */
+/** The 58 STATES rows in source insertion order, names as written. */
 export const states: readonly StateFixture[] = deepFreeze([
   { state: 'AA', name: 'Armed Forces America' },
   { state: 'AE', name: 'Armed Forces' },
@@ -1947,11 +1835,6 @@ export const states: readonly StateFixture[] = deepFreeze([
   { state: 'VI', name: 'Virgin Islands' },
   { state: 'WY', name: 'Wyoming' },
 ]);
-
-
-// ---------------------------------------------------------------------------
-// Customers (first 30 seed rows of 5250_Subfile/Custmast.sql, as seeded)
-// ---------------------------------------------------------------------------
 
 /**
  * Seed rows 1..30 as the search returns them, ordered by name, city, state and
@@ -2033,13 +1916,12 @@ const AAAG_DETAIL: CustomerResponseFixture = deepFreeze({
   version: 0,
 });
 
-/** Full records of the two seed rows the e2e specs also use, by custId. */
+/** Full records of the two seed rows the e2e specs also use. */
 export const customerDetails: Readonly<Record<string, CustomerResponseFixture>> = deepFreeze({
   AAAD: AAAD_DETAIL,
   AAAG: AAAG_DETAIL,
 });
 
-/** The default detail fixture: `NIBH L'LOR COMPANY` (AAAD). */
 export const customerDetail: CustomerResponseFixture = AAAD_DETAIL;
 
 /**
@@ -2069,11 +1951,6 @@ function seedRow(summary: CustomerSummaryFixture): CustomerResponseFixture {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Customer store (per test: the seed rows plus the test's own writes)
-// ---------------------------------------------------------------------------
-
-/** The outcome of {@link insertCustomer}: the stored row, or no id left after `9999` (503 APP0503). */
 type InsertResult = { status: 'inserted'; row: CustomerResponseFixture } | { status: 'exhausted' };
 
 /**
@@ -2096,7 +1973,6 @@ const store = new Map<string, Readonly<CustomerResponseFixture>>();
 /** The ordinal of the id the next add receives, or `undefined` once `9999` was issued. */
 let nextIdOrdinal: number | undefined;
 
-/** The base-36 ordinal of a customer id ({@link CUST_ID_DIGITS}, most significant first). */
 function idOrdinal(custId: string): number {
   let ordinal = 0;
   for (const digit of custId) {
@@ -2116,7 +1992,7 @@ function idOf(ordinal: number): string {
   return id;
 }
 
-/** A stored row of the nine fields, in the API's member order, with the stamp and version. */
+/** A stored row, its members in the API's order. */
 function storedRow(custId: string, fields: CustomerFieldsFixture, chgUser: string, version: number): CustomerResponseFixture {
   return {
     custId,
@@ -2237,22 +2113,14 @@ function resettingStore(list: HttpHandler[]): HttpHandler[] {
 
 resetHandlerState();
 
-// ---------------------------------------------------------------------------
-// Query parameters (the API's query-string decoding and parameter binding)
-// ---------------------------------------------------------------------------
-
-/** The decoded query parameters of a request: each name with its values, in request order. */
 type QueryValues = ReadonlyMap<string, readonly string[]>;
 
-/** The lower-case texts the API binds to `true` and to `false` for a boolean parameter. */
 const TRUE_TEXTS: ReadonlySet<string> = new Set(['true', 'on', 'yes', '1']);
 const FALSE_TEXTS: ReadonlySet<string> = new Set(['false', 'off', 'no', '0']);
 
-/** The range of a Java `int`, the type of `size`. */
 const INT_MIN = -(2 ** 31);
 const INT_MAX = 2 ** 31 - 1;
 
-/** The prefixes after which `Integer.decode`, and so the API's `size`, reads hexadecimal digits. */
 const HEX_PREFIXES: readonly string[] = ['0x', '0X', '#'];
 
 /**
@@ -2515,14 +2383,9 @@ function entryViolation(field: string, value: string | null, width: number): Req
   return value.includes('\u0000') ? { field, reason: `${field} must not contain U+0000` } : undefined;
 }
 
-/** Whether a `custId` path value is a customer id: exactly {@link CUST_ID_LENGTH} code points of {@link CUST_ID_PATTERN}. */
 function isCustIdPath(value: string): boolean {
   return codePointLength(value) === CUST_ID_LENGTH && CUST_ID_PATTERN.test(value);
 }
-
-// ---------------------------------------------------------------------------
-// Database collation (customer_sort: ICU root order with the digit tailoring)
-// ---------------------------------------------------------------------------
 
 /**
  * The options of both collators below, which compare in ICU's root order as
@@ -2576,17 +2439,14 @@ const TAILORING_RESET = '\u03b1';
 /** The combining grapheme joiner (U+034F): ICU ignores it at every level, and canonical reordering never moves a mark across it. */
 const REORDER_BLOCKER = '\u034f';
 
-/** At most this many entries are kept by each collation memo; a memo starts afresh when it is full. */
 const COLLATION_MEMO_LIMIT = 4096;
 
 /** {@link collationInput} and {@link primaryForm} results by text: the fixture names, cities and states are compared on every search. */
 const collationInputMemo = new Map<string, string>();
 const primaryFormMemo = new Map<string, string>();
 
-/** Whether a code point beyond ASCII is primary-equal to {@link TAILORING_RESET}, by code point. */
 const resetPrimaryMemo = new Map<number, boolean>();
 
-/** `memo`'s entry for `key`, built by `build` and kept when it is absent. */
 function remember<K, V>(memo: Map<K, V>, key: K, build: () => V): V {
   const known = memo.get(key);
   if (known !== undefined) {
@@ -2700,7 +2560,6 @@ function bpchar(value: string): string {
   return value.slice(0, end);
 }
 
-/** The sort keys of a search row or of a cursor position. */
 interface SearchKeys {
   readonly name: string;
   readonly city: string;
@@ -2722,10 +2581,6 @@ function compareSearchKeys(a: SearchKeys, b: SearchKeys): number {
     compareText(bpchar(a.custId), bpchar(b.custId))
   );
 }
-
-// ---------------------------------------------------------------------------
-// LIKE matching (PostgreSQL LIKE over blank-padded values, as the API queries)
-// ---------------------------------------------------------------------------
 
 /** One element of a LIKE pattern: a literal code point, `_` (exactly one code point) or `%` (any run, empty included). */
 type LikeToken = { readonly kind: 'literal'; readonly char: string } | { readonly kind: 'one' } | { readonly kind: 'any' };
@@ -2829,11 +2684,6 @@ function statePattern(filter: string): string {
   return filter === '' ? '%%' : `%${escapeBackslashes(filter)}%`;
 }
 
-// ---------------------------------------------------------------------------
-// Search cursor (base64url JSON keyset position, as the API issues and checks it)
-// ---------------------------------------------------------------------------
-
-/** The outcome of reading one request input: its value, or the violation the API reports for it. */
 type Bound<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly violation: RequestViolation };
 
 /** Where a search page starts: after the row with these sort keys, with `served` rows already served. */
@@ -2853,13 +2703,10 @@ type JsonValue = null | boolean | string | JsonNumber | JsonValue[] | Map<string
 /** The one violation every cursor failure reports; it never says which check failed. */
 const CURSOR_INVALID: RequestViolation = { field: 'cursor', reason: 'cursor is not valid' };
 
-/** The properties of a cursor object, exactly these and in the order the API writes them. */
 const CURSOR_KEYS: readonly string[] = ['name', 'city', 'state', 'custid', 'served'];
 
-/** The characters JSON allows between tokens. */
 const JSON_WHITESPACE = ' \t\n\r';
 
-/** The single-character escapes of a JSON string and the characters they stand for. */
 const STRICT_JSON_ESCAPES: ReadonlyMap<string, string> = new Map([
   ['"', '"'], ['\\', '\\'], ['/', '/'], ['b', '\b'], ['f', '\f'], ['n', '\n'], ['r', '\r'], ['t', '\t'],
 ]);
@@ -3003,7 +2850,6 @@ function readStrictJson(text: string): JsonValue | undefined {
   }
 }
 
-/** The number of code points of `text`, the unit of every width the API checks. */
 function codePointLength(text: string): number {
   return [...text].length;
 }
@@ -3141,7 +2987,6 @@ function encodeCursor(last: SearchKeys, served: number): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
-/** The normalized search filters: `name` and `city` entries, a 2-character `state` or `''`, and the F9 toggle. */
 interface SearchFilters {
   readonly name: string;
   readonly city: string;
@@ -3196,39 +3041,21 @@ function searchPage(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Default handlers
-// ---------------------------------------------------------------------------
-
 /**
- * One handler per API route, answering as the backend does for valid input
- * and with its 400 problems for the parameter guards. The writes bind and
- * validate their JSON bodies (415 and 400 APP0400), run the nine field rules
- * (422) and, for review only, the default stub address service, as the
- * backend does. Paths are relative, so
- * MSW matches them against jsdom's `location`, the origin `setup.ts` resolves
- * relative `fetch` URLs against.
- *
- * Every route runs behind {@link secured}, the server's connector checks and
- * security rules: `/api/messages` is public, the reads need INQUIRY, review
- * and the writes MAINTENANCE (which implies INQUIRY), and credentials
- * supplied anywhere are checked, so a test gets 401 APP0401 or 403 APP0403 by
- * signing in as the user it needs. Every route then parses its query string
- * ({@link queryValues}), so a parameter that does not decode is 400 APP0400
- * on any route, never served as absent. Customers live in the store: an add
- * or update persists, and every
- * read sees it, until `server.resetHandlers()` (or {@link resetHandlerState})
- * restores the seed rows and the id sequence. No handler mutates a fixture,
- * and every response body is a fresh object.
+ * One handler per API route, answering as the backend does. Paths are
+ * relative, so MSW matches them against jsdom's `location`, the origin
+ * `setup.ts` resolves relative `fetch` URLs against. Every route runs behind
+ * {@link secured}, so a test gets 401 APP0401 or 403 APP0403 by signing in as
+ * the user it needs. An add or update persists in the store, and every read
+ * sees it, until `server.resetHandlers()` ({@link resetHandlerState}). No
+ * handler mutates a fixture, and every response body is a fresh object.
  */
 export const handlers = resettingStore([
-  // Public: the whole catalog as one JSON object.
   http.get('/api/messages', secured('public', ({ request }) => {
     const query = queryValues(request);
     return query.ok ? HttpResponse.json({ ...catalog }) : query.response;
   })),
 
-  // The signed-in user and roles, or 401 APP0401.
   http.get('/api/session', secured('INQUIRY', ({ request }) => {
     const query = queryValues(request);
     if (!query.ok) {
@@ -3270,9 +3097,6 @@ export const handlers = resettingStore([
     return HttpResponse.json(rows);
   })),
 
-  // Customer search: LIKE prefix filters over the padded name and city,
-  // exact state, active-only unless includeInactive, keyset pages of `size`
-  // rows behind the API's base64url cursor, capped at 9,999 rows (DEM0006).
   http.get('/api/customers', secured('INQUIRY', ({ request }) => {
     const instance = pathOf(request);
     const parsed = queryValues(request);
@@ -3336,8 +3160,7 @@ export const handlers = resettingStore([
     return HttpResponse.json(searchPage(matches, position.value, pageSize));
   })),
 
-  // One customer, or 404 DEM0599. The path value, as decoded, must be
-  // exactly four characters of A-Z and 0-9.
+  // The path value is checked as decoded.
   http.get<{ custId: string }>('/api/customers/:custId', secured('INQUIRY', ({ request, params }) => {
     const instance = pathOf(request);
     const query = queryValues(request);
@@ -3355,11 +3178,8 @@ export const handlers = resettingStore([
     return HttpResponse.json({ ...detail });
   })),
 
-  // Review: 415/400 APP0400 for a body the server refuses; the nine field
-  // rules in source order (the first failure is 422; after the State rule
-  // with `stateAccepted`); then the stub address service: the standardized
-  // values with the confirmation notice, or 422 DEM9898 / DEM0503 with
-  // `stateAccepted`. Tests override the route for 502 APP0502.
+  // Never 502 APP0502: the stub address service is always available, so a
+  // test that needs it overrides this route.
   http.post('/api/customers/review', secured('MAINTENANCE', async ({ request }) => {
     const instance = pathOf(request);
     const read = await readReviewRequest(request);
@@ -3375,10 +3195,7 @@ export const handlers = resettingStore([
     return reviewAddress(instance, purpose, fields);
   })),
 
-  // Add: 415/400 APP0400 for a body the server refuses; the nine field rules
-  // (422, no address standardization, no id consumed); then 201 with the next
-  // id from EEEF, version 0, the principal as stamp user and a relative
-  // Location; 503 APP0503 once 9999 has been issued.
+  // The field rules, but no address standardization: only review standardizes.
   http.post('/api/customers', secured('MAINTENANCE', async ({ request }) => {
     const instance = pathOf(request);
     const read = await readAddRequest(request);
@@ -3400,11 +3217,8 @@ export const handlers = resettingStore([
     });
   })),
 
-  // Update: 415/400 APP0400 for a body the server refuses, an invalid path id
-  // reported before the body's violations; the nine field rules (422, before
-  // existence and version, no address standardization); then 200 with the
-  // version incremented and the principal as stamp user, 404 DEM0599 for an
-  // absent id, 409 DEM1002 with `current` for a stale version.
+  // The field rules, before the existence and version checks; no address
+  // standardization.
   http.put<{ custId: string }>('/api/customers/:custId', secured('MAINTENANCE', async ({ request, params }) => {
     const instance = pathOf(request);
     const { custId } = params;

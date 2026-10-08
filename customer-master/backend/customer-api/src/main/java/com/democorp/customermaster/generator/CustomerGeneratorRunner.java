@@ -1,5 +1,6 @@
 package com.democorp.customermaster.generator;
 
+import com.democorp.customermaster.config.RedactedThrowable;
 import com.democorp.customermaster.domain.CustomerId;
 import java.io.PrintStream;
 import java.sql.SQLException;
@@ -44,70 +45,53 @@ import org.springframework.stereotype.Component;
  *       runs synchronously in this process and its outcome is the process exit status.</li>
  *   <li>LOADCUST's identical guard [5250_Subfile/LOADCUST.CLLE:6-14].</li>
  *   <li>LOADCUSTR's fixed first id {@code varCUSTID = '1001'}, advanced by BASE36ADD per row
- *       [5250_Subfile/LOADCUSTR.SQLRPGLE:132-137], [BASE36/SRV_BASE36.RPGLE:29-55].</li>
+ *       [5250_Subfile/LOADCUSTR.SQLRPGLE:132-137], [BASE36/SRV_BASE36.RPGLE:29-55]. BASE36ADD rolls
+ *       {@code 9999} over to {@code AAAA} [BASE36/SRV_BASE36.RPGLE:9-13]; here a load whose last id
+ *       would lie beyond {@code 9999} is refused before anything is read or written.</li>
  * </ul>
  *
  * <p><b>Invocation.</b> {@code java -jar app.jar --spring.profiles.active=generator [--count=N]
  * [--start-id=XXXX] [--csz-file=LOCATION] [--seed=L]}, or under Compose
  * {@code docker compose --profile tools run --rm generator --count=1000000}. Profile {@code generator}
- * ({@code application-generator.yml}) runs with no web server and no Flyway, and bridges the four flat
- * flags to {@link GeneratorProperties}: a flag wins over its {@code GENERATOR_*} variable, which wins
- * over the default. {@code CustomerMasterApplication.main} closes the non-web context once the runner
- * has returned and exits the JVM with {@link #getExitCode()}.
+ * ({@code application-generator.yml}) runs without a web server or Flyway and bridges the four flags to
+ * {@link GeneratorProperties}, a flag winning over its {@code GENERATOR_*} variable and that over the
+ * default; {@code CustomerMasterApplication.main} exits the JVM with {@link #getExitCode()}.
  *
- * <p><b>Steps of {@link #execute(ApplicationArguments)}</b>, each failure printing one line and
- * returning {@value #EXIT_FAILURE}:
- * <ol>
- *   <li><b>Strict options.</b> Only {@code --count}, {@code --start-id}, {@code --csz-file},
- *       {@code --seed}, their fully qualified properties {@code --customer-master.generator.count},
- *       {@code .start-id} (also {@code .startId} or {@code .start_id}), {@code .csz-file} (also
- *       {@code .cszFile} or {@code .csz_file}) and {@code .seed}, all matched exactly
- *       ({@link #QUALIFIED_OPTIONS}), and {@code --spring.*} are accepted, so a mistyped flag or
- *       qualified property cannot silently fall back to its default. The first other option, in
- *       sorted order, prints {@code Unknown option --<name>}, for example
- *       {@code Unknown option --customer-master.generator.cuont}; failing that, the first non-option
- *       argument prints {@code Unknown option <arg>}. Spring Boot's own {@code --debug} and
- *       {@code --trace} are rejected too; {@code --logging.level...} likewise. Logging can still be
- *       tuned through {@code LOGGING_LEVEL_*} environment variables. Once every argument is accepted,
- *       the first flag or qualified property given without a value, in sorted order,
- *       prints {@code Option --<name> requires a value}: a bare {@code --seed} would otherwise bind
- *       as empty and select a default. An explicitly empty value ({@code --start-id=},
- *       {@code --csz-file=}, {@code --seed=}) still selects the automatic start, the bundled sample or
- *       a random seed, and a bare {@code --spring.*} option is accepted.</li>
- *   <li><b>Start id.</b> {@link #resolveStart(String, int)}: the given {@code --start-id}, otherwise
- *       {@code 1001} as LOADCUSTR, or {@code AAAA} when {@code count} exceeds the
- *       {@value #AUTO_AAAA_THRESHOLD} ids that remain from {@code 1001}.</li>
- *   <li><b>Capacity, before any read or write.</b> {@link #fitsCapacity(CustomerId, int)}: the last id
- *       must not lie beyond {@code 9999}. The source has no such check: BASE36ADD rolls {@code 9999}
- *       over to {@code AAAA} [BASE36/SRV_BASE36.RPGLE:9-13].</li>
- *   <li><b>CSZ rows</b> from {@link CszSource#load(String)}; an unusable file prints the source's
- *       one-line message, an empty result prints {@code CSZ file <location> has no usable rows}.</li>
- *   <li><b>Generator.</b> {@link NameGenerator#seeded(long)} when {@code --seed} is given, otherwise
- *       {@link NameGenerator#random()}; every row is stamped with the load start from the injected
- *       {@link Clock}, truncated to microseconds, the precision of {@code chgtime timestamptz(6)}.</li>
- *   <li><b>Load.</b> {@link CustomerLoader#load(CustomerLoader.Plan)} replaces the table and restarts
- *       the id sequence in one transaction, which has committed when it returns. A lock not granted
- *       within the loader's 5-second {@code lock_timeout} prints {@code Cannot allocate CUSTMAST}; any
- *       other load failure prints {@code Load failed: <cause>; verify custmast and custmast_id_seq before
- *       retrying}.</li>
- *   <li><b>Statistics.</b> {@code ANALYZE custmast}, after the commit, as an auto-commit statement:
- *       this class is not transactional. A failure is logged at WARN and the run still succeeds,
- *       because the rows are committed.</li>
- *   <li><b>Report.</b> {@code Loaded <n> customers <first>..<last> in <s> s} and status
- *       {@value #EXIT_SUCCESS}, for example {@code Loaded 500 customers B000..B1EV in 0.4 s}. The
- *       elapsed time runs from just before step 4 to after step 7.</li>
- * </ol>
+ * <p><b>Strict options.</b> Only the four flags, the fully qualified properties of
+ * {@link #QUALIFIED_OPTIONS} and {@code --spring.*} are accepted, so a mistyped option cannot silently
+ * fall back to its default: any other option prints {@code Unknown option --<name>}, and a non-option
+ * argument {@code Unknown option <arg>} ({@link #firstUnknownOption(ApplicationArguments)}). Spring
+ * Boot's {@code --debug}, {@code --trace} and {@code --logging.*} are rejected too; logging is tuned
+ * through {@code LOGGING_LEVEL_*} environment variables instead. A generator option given without a
+ * value prints {@code Option --<name> requires a value}
+ * ({@link #firstValuelessOption(ApplicationArguments)}).
  *
- * <p><b>Failure contract.</b> {@link #execute(ApplicationArguments)} never throws. Every failure
- * before step 6 has written nothing. In step 6, a lock not granted and an invalid plan leave the
- * table, the sequence and the next interactive id as they were, and so does every failure the loader's
- * transaction rolled back, which restores the rows and the sequence together. A failure of the
- * {@code COMMIT} itself, such as a connection lost before the commit was acknowledged, leaves the
- * outcome unknown: the new rows and the restarted sequence may already be committed. Its exception
- * type does not set it apart from a rolled-back statement failure, so every other step-6 failure is
- * reported without a claim about the table, advising to verify {@code custmast} (row count, first and
- * last {@code custid}) and {@code custmast_id_seq} before retrying. Printed lines never carry a stack
- * trace; the details go to the log. Nothing printed or logged carries a credential.
+ * <p><b>Steps.</b> {@code executeSteps} checks the options, the start id
+ * ({@link #resolveStart(String, int)}) and the id capacity ({@link #fitsCapacity(CustomerId, int)}),
+ * reads the rows of {@link CszSource#load(String)}, generates the customers with {@link NameGenerator}
+ * and {@link CustomerDataGenerator}, stamped with the load start truncated to the microsecond precision
+ * of {@code chgtime}, loads them through {@link CustomerLoader#load(CustomerLoader.Plan)}, which replaces
+ * the table and restarts the id sequence in one transaction, and runs {@code ANALYZE custmast} after the
+ * commit. Each step is documented where it is implemented.
+ *
+ * <p><b>Exit status.</b> {@value #EXIT_SUCCESS} after printing
+ * {@code Loaded <n> customers <first>..<last> in <s> s}, for example
+ * {@code Loaded 500 customers B000..B1EV in 0.4 s}; {@value #EXIT_FAILURE} after printing one line for
+ * the failure, such as {@code Cannot allocate CUSTMAST} when the loader's 5-second {@code lock_timeout}
+ * expires.
+ *
+ * <p><b>Failure contract.</b> {@link #execute(ApplicationArguments)} reports every failure the steps
+ * raise as a {@link RuntimeException} with one printed line and status {@value #EXIT_FAILURE}; an
+ * {@link Error}, or a failure raised while that report is logged or printed, propagates. Nothing is
+ * written before the load. A lock not granted, an invalid plan and every failure the loader's
+ * transaction rolled back leave the table, the sequence and the next interactive id as they were. A
+ * failure of the {@code COMMIT} itself, such as a connection lost before the commit was acknowledged,
+ * leaves the outcome unknown: the new rows and the restarted sequence may already be committed. Its
+ * exception type does not set it apart from a rolled-back statement failure, so every other load
+ * failure is reported without a claim about the table, advising to verify {@code custmast} (row count,
+ * first and last {@code custid}) and {@code custmast_id_seq} before retrying. Printed lines never carry
+ * a stack trace; the log carries the exception only as its value-free {@link RedactedThrowable} copy.
+ * Nothing printed or logged carries a credential.
  *
  * <p><b>Scope.</b> The runner touches the database only through {@link CustomerLoader} and the one
  * {@code ANALYZE}; id allocation and the sequence reset belong to {@code CustomerIdAllocator}, reached
@@ -118,10 +102,8 @@ import org.springframework.stereotype.Component;
  * <p><b>Registration.</b> The bean exists only under profile {@value #PROFILE}, and it is the only
  * registrar of {@link GeneratorProperties}, through {@link EnableConfigurationProperties}: the
  * application declares no properties scan, so the web and test contexts neither bind nor validate the
- * generator options. Next to it, {@link Import} brings in {@code GeneratorProperties.BlankCountAdvisor},
- * which binds an empty or whitespace-only count as the default 300, so that advisor too exists only
- * in this context. Tests may construct the runner directly and call
- * {@link #execute(ApplicationArguments)} with {@code new DefaultApplicationArguments(...)}.
+ * generator options. {@link Import} brings in {@code GeneratorProperties.BlankCountAdvisor}, which binds
+ * an empty or whitespace-only count as the default 300, into this context only.
  */
 @Component
 @Profile(CustomerGeneratorRunner.PROFILE)
@@ -292,21 +274,22 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
-     * Validates the options, loads the customers and prints exactly one outcome line.
+     * Validates the options, loads the customers and prints one outcome line. A failure the steps raise
+     * as a {@link RuntimeException} is reported as that one line and returns {@value #EXIT_FAILURE}; an
+     * {@link Error}, or a failure raised while the report is logged or printed, propagates.
      *
      * @param args the parsed command line; its option names, its non-option arguments and whether
      *             each generator option carries a value are checked, while the values themselves
      *             arrive already bound in {@link GeneratorProperties}
-     * @return {@value #EXIT_SUCCESS} when the rows are committed, otherwise {@value #EXIT_FAILURE};
-     *         never throws
+     * @return {@value #EXIT_SUCCESS} when the rows are committed, otherwise {@value #EXIT_FAILURE}
      */
     public int execute(ApplicationArguments args) {
         try {
             return executeSteps(args);
         } catch (RuntimeException unexpected) {
-            // Every expected failure is mapped inside the steps; this keeps the never-throws contract
-            // for anything else, such as a null argument.
-            LOG.error("generator.failed unexpected error", unexpected);
+            // Every expected failure is mapped inside the steps; this maps any other RuntimeException,
+            // such as a null argument, to status 1.
+            LOG.error("generator.failed unexpected error", RedactedThrowable.of(unexpected));
             return fail("Load failed: " + rootMessage(unexpected));
         }
     }
@@ -502,10 +485,10 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
      * </ul>
      * Any other failure may come from the {@code COMMIT} itself, and its type does not tell: a connection
      * lost before the commit was acknowledged leaves the outcome unknown, so the new rows and the
-     * restarted sequence may already be committed. It is logged at ERROR with the exception, claiming
-     * nothing about the table, and both that log line and the printed
-     * {@code Load failed: <cause>; verify custmast and custmast_id_seq before retrying} advise checking
-     * the database before a retry.
+     * restarted sequence may already be committed. It is logged at ERROR with the exception's value-free
+     * {@link RedactedThrowable} copy, claiming nothing about the table, and both that log line and the
+     * printed {@code Load failed: <cause>; verify custmast and custmast_id_seq before retrying} advise
+     * checking the database before a retry.
      *
      * @param failure the exception the CSZ read, the generator setup or the load raised
      * @return the line to print
@@ -528,7 +511,8 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
         LOG.error("generator.load failed; if the COMMIT itself failed, for example on a connection lost before"
                 + " the commit was acknowledged, the outcome is unknown and the new rows and the restarted id"
                 + " sequence may already be committed; verify custmast (row count, first and last custid) and"
-                + " custmast_id_seq against this run's count and start before retrying", failure);
+                + " custmast_id_seq against this run's count and start before retrying",
+                RedactedThrowable.of(failure));
         return "Load failed: " + rootMessage(failure) + "; verify custmast and custmast_id_seq before retrying";
     }
 

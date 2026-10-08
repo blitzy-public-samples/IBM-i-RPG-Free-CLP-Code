@@ -20,8 +20,7 @@ import java.util.Objects;
  * [5250_Subfile/LOADCUSTR.SQLRPGLE:59-88]. The random building blocks ({@code Rand_Int},
  * {@code genWord}, {@code genPhone}) live in {@link NameGenerator}; the city/state/ZIP rows come from
  * {@link CszSource}; this class combines them into {@link Customer} rows exactly as the loop body
- * assigns {@code Fld}. Writing the rows ({@code insert into custmast values(:Fld)}) belongs to
- * {@code CustomerCopyWriter}, and the transaction, lock and sequence restart to {@code CustomerLoader}.
+ * assigns {@code Fld}.
  *
  * <p><b>Row rules,</b> for the 1-based row number n (the source's {@code nRecds}):
  * <table>
@@ -56,10 +55,10 @@ import java.util.Objects;
  * the tests assert. Reordering any step changes generated data.
  *
  * <p><b>Normalization.</b> Every data value passes {@link TextNormalizer#field(String)}, so output is
- * uppercase with no trailing blanks, as values written through the API are. Generated words are already
- * uppercase ASCII; the call strips the trailing blank a name or street without a type suffix keeps, and
- * the blank a 40-character cut can leave, as a {@code CHAR(40)} column ignored its padding. The CSZ state
- * is uppercased here, because {@link CszSource} keeps it as written in the file.
+ * uppercase with no trailing blanks, as values written through the API are. The call strips the blank
+ * that a name or street without a type suffix, or a 40-character cut, leaves at the end, as a
+ * {@code CHAR(40)} column ignored its padding, and uppercases the CSZ state, which {@link CszSource}
+ * keeps as written in the file.
  *
  * <p><b>Intentional differences</b> (recorded in {@code docs/deviations-and-open-questions.md}):
  * <ul>
@@ -74,15 +73,6 @@ import java.util.Objects;
  * instance over its own {@link NameGenerator}, which is not thread-safe. Instances, and the iterators
  * {@link #generate(CustomerId, int)} returns, must be used by one thread at a time. The CSZ rows are
  * held as an immutable copy in file order, because the index draw depends on that order.
- *
- * <p>Example:
- * <pre>{@code
- * CustomerDataGenerator generator = new CustomerDataGenerator(
- *         NameGenerator.seeded(7), cszSource.load("classpath:generator/csz-sample.csv"),
- *         OffsetDateTime.now(clock).truncatedTo(ChronoUnit.MICROS));
- * Iterator<Customer> rows = generator.generate(CustomerId.parse("AAAA"), 1_000_000);
- * copyWriter.copy(connection, rows);   // rows AAAA, AAAB, ... built one at a time as COPY streams
- * }</pre>
  */
 public final class CustomerDataGenerator {
 
@@ -224,7 +214,9 @@ public final class CustomerDataGenerator {
                 ? ActiveStatus.N.code()
                 : ActiveStatus.Y.code();
 
-        // csz_I = Rand_Int(1 : %elem(csz_a)): rows 1..N-1 uniformly, row N only at r = 1.
+        // csz_I = Rand_Int(1 : %elem(csz_a)). In exact arithmetic: rows 1..N-1 uniformly for r < 1,
+        // row N at r = 1. In IEEE double an r just below 1 also rounds up to row N for some N; see
+        // NameGenerator.randInt(int, int).
         final CszSource.CszRow place = csz.get(names.randInt(1, csz.size()) - 1);
         final String zip = String.format(Locale.ROOT, "%05d", place.zip() % ZIP_MODULUS);
 

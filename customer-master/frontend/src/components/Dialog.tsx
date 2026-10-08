@@ -7,31 +7,8 @@
  * the screen beneath is shown but cannot be keyed, and there is no way to
  * dismiss the window except through the keys its program enables. This
  * component supplies the browser equivalent of that modality and nothing
- * more:
- *
- * - a backdrop that dims the screen beneath (`.dialog__backdrop`);
- * - a `<dialog open aria-modal="true">` named by the owner's ScreenHeader
- *   through `aria-labelledby`;
- * - a page beneath that cannot be keyed: while a window is the topmost one
- *   open, everything outside it except its own backdrop, the windows it is
- *   nested in and live regions (the shared toast host's among them) is
- *   `inert`; clicks dispatched beneath anyway (access keys, `click()`), live
- *   regions included, are stopped; and focus that still reaches something
- *   beneath that stays live (an enclosing window, a focusable wrapper, a
- *   control in a live region) is moved back into the window. The page's own
- *   inert state is restored when it closes;
- * - focus moved into the window when it opens, a Tab / Shift+Tab focus trap
- *   while it is open, and focus returned to the invoking element when it
- *   closes. Focus targets and the ends of the trap are the controls a user
- *   can actually reach: focusable (natively, as an editing host, or through
- *   a valid `tabindex`), enabled, rendered (not hidden by CSS, a `hidden` or
- *   `inert` subtree or a closed `details`), owned by this window rather than
- *   a nested one, and, for radios, the checked radio of a group, or every
- *   radio of a group with none checked, at its own place in the tab order.
- *
- * Because the keyboard scope stack never moves focus (KeyScopeProvider), this
- * component is the only place where focus enters and leaves a window, so
- * focus and key handling return to the screen beneath together.
+ * more. Its public contract is documented on `Dialog`; the helpers below
+ * define the focus targets, the tab order and the modality registry.
  *
  * What it deliberately does not do:
  *
@@ -47,9 +24,6 @@
  *   browser, so no native `cancel` closes it behind the owner's back.
  * - It renders no text. Titles come from the owner's ScreenHeader.
  * - It closes on nothing by itself: a 5250 window has no click-away close.
- *
- * Imports are React only: components never reach into api/, errors/,
- * features/ or keyboard/.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, ReactNode, RefObject } from 'react';
@@ -320,7 +294,6 @@ function sequenceKey(element: HTMLElement): number {
   return index > 0 ? index : Number.POSITIVE_INFINITY;
 }
 
-/** True for a radio button. */
 function isRadio(element: Element): element is HTMLInputElement {
   return element instanceof HTMLInputElement && element.type === 'radio';
 }
@@ -535,7 +508,6 @@ const LIVE_REGION_SELECTOR = [
   '[role="log"]',
 ].join(', ');
 
-/** Elements that never render, so making them inert would change nothing. */
 const NOT_RENDERED = new Set(['script', 'style', 'template', 'link', 'meta', 'noscript']);
 
 /** An open window, as the modality registry below knows it. */
@@ -829,23 +801,17 @@ function registerWindow(entry: OpenWindow): () => void {
  * Modal window: backdrop, `<dialog open aria-modal="true">`, an inert page
  * beneath, focus in on open, Tab trap while open, focus return on close.
  *
- * Modality is kept by a registry shared by every open window. While a window
- * is the topmost one open, every element beside it and beside each of its
- * ancestors up to `<body>` carries `inert`, plus a capture-phase click guard
- * for the access keys and `click()` calls that `inert` lets through; an
- * element added beneath while the window is open is covered too. The
- * window's own backdrop, its ancestors (the detail window around a nested
- * State picker) and live regions (the shared toast host's among them) stay
- * live, so nothing in them is made inert: the live regions and the
- * containers around them carry the click guard as well, and the registry
- * listens for `focusin` on these live elements (never on `document` or
- * `window`), remembers the last element focused inside the window, and
- * moves focus back there, or to where the window would put it on opening,
- * whenever it lands beneath. Nothing beneath can therefore keep focus or be
- * activated by pointer, access key or script. When the window closes or
- * unmounts, in whatever order windows close, the registry removes only the
- * `inert`, guards and listeners it added and hands modality to the window
- * beneath, if any, before focus returns to the invoker.
+ * While a window is the topmost one open, everything beneath it is `inert`
+ * except its own backdrop, the windows it is nested in (the detail window
+ * around a nested State picker) and live regions (the shared toast host's
+ * among them), which must keep announcing. Clicks that still reach beneath
+ * (access keys, `click()`) are stopped, and focus that lands beneath is moved
+ * back to the element last focused in the window, or to where the window
+ * would put it on opening. An element added beneath while the window is open
+ * is covered too. When the window closes or unmounts, in whatever order
+ * windows close, only the `inert`, guards and listeners it added are removed,
+ * and modality passes to the window beneath, if any, before focus returns to
+ * the invoker.
  *
  * Initial focus is owned here. The element that had focus when the window
  * opened (the invoking option field, button or State field) is captured while
@@ -855,15 +821,18 @@ function registerWindow(entry: OpenWindow): () => void {
  * focuses `initialFocusRef` when that element is a usable target inside it,
  * else its first editable field in tab order, else its first tab stop, else
  * itself, moving down that list whenever an element does not actually take
- * focus, so that choice always wins at open. Owners
- * therefore pick the opening field through `initialFocusRef` (Name in the
- * detail window, the filter in the pickers) rather than with `autoFocus` or a
- * focusing mount effect, which this component would override. A child may
- * still move focus later, from a handler or when it remounts while the window
- * stays open (the detail form focusing the first field in error).
+ * focus, so that choice always wins at open. Owners therefore pick the
+ * opening field through `initialFocusRef` (Name in the detail window, the
+ * filter in the pickers) rather than with `autoFocus` or a focusing mount
+ * effect, which this component would override. A child may still move focus
+ * later, from a handler or when it remounts while the window stays open (the
+ * detail form focusing the first field in error).
  *
  * Keys are not handled here; the owner closes the window from its
- * `useFunctionKeys` scope by setting `open` to false.
+ * `useFunctionKeys` scope by setting `open` to false. Because the keyboard
+ * scope stack never moves focus (KeyScopeProvider), this component is the
+ * only place where focus enters and leaves a window, so focus and key
+ * handling return to the screen beneath together.
  *
  * @example
  * const filterRef = useRef<HTMLInputElement>(null);
@@ -888,7 +857,6 @@ export function Dialog({ open, labelledBy, className, initialFocusRef, children 
 
 type DialogWindowProps = Omit<DialogProps, 'open'>;
 
-/** The open window; mounted only while {@link Dialog} is open. */
 function DialogWindow({ labelledBy, className, initialFocusRef, children }: DialogWindowProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);

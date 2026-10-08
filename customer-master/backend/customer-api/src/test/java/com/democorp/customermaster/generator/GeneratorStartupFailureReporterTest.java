@@ -7,6 +7,14 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.classic.spi.IThrowableProxy;
+import ch.qos.logback.classic.spi.ThrowableProxy;
+import ch.qos.logback.classic.spi.ThrowableProxyUtil;
+import ch.qos.logback.core.read.ListAppender;
 import com.democorp.customermaster.config.AppProperties;
 import com.democorp.customermaster.config.DataSourceCredentialsGuard;
 import com.democorp.customermaster.config.DataSourceCredentialsGuard.MissingCredentialsException;
@@ -16,6 +24,7 @@ import com.democorp.customermaster.repository.LockWaitingReads;
 import com.democorp.customermaster.repository.LockWaitingReads.InvalidLockTimeoutException;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
@@ -30,6 +39,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLState;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeanInstantiationException;
 import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.beans.factory.UnsatisfiedDependencyException;
@@ -51,6 +61,7 @@ import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.env.MockEnvironment;
+import org.springframework.util.StringUtils;
 
 /**
  * Specifies {@link GeneratorStartupFailureReporter}: a generator start that fails for want of its
@@ -64,7 +75,9 @@ import org.springframework.mock.env.MockEnvironment;
  * Spring wraps them during the context refresh; the schema guard's and the lock-timeout check's failures
  * on their own; the precedence of credentials over schema over lock timeout over connection failures;
  * failures that are not about the database; the web context; a {@code null} context; URLs whose query or
- * user information carries a secret; cyclic and chained cause graphs; the
+ * user information carries a secret; cyclic and chained cause graphs; the DEBUG lines of a reported
+ * failure and of a failure while reporting, which carry the exception graph value-free (types, stack
+ * frames, SQLSTATEs) whatever data and line breaks its messages hold; the
  * {@code META-INF/spring.factories} registration and its order ahead of Spring Boot's
  * {@code FailureAnalyzers}; and starts through {@link SpringApplication} with and without the profile,
  * with the real {@link DataSourceSchemaGuard} or the real {@link LockWaitingReads}.
@@ -96,6 +109,14 @@ final class GeneratorStartupFailureReporterTest {
 
     /** Spring Boot's own reporter, a package-private class, asked after this one. */
     private static final String FAILURE_ANALYZERS = "org.springframework.boot.diagnostics.FailureAnalyzers";
+
+    /**
+     * Message text of the DEBUG cases that no log line may carry; every CR or LF in those messages is
+     * followed by {@code FORGED}, so a line break that survived would carry it too.
+     */
+    private static final List<String> SENTINELS = List.of(
+            "TOP-SENTINEL", "CONNECTION-SENTINEL", "CAUSE-SENTINEL", "NEXT-SENTINEL", "SUPPRESSED-SENTINEL",
+            "CONTEXT-SENTINEL", "FORGED");
 
     /** Receives the reporter's line. */
     private final ByteArrayOutputStream printed = new ByteArrayOutputStream();
@@ -450,6 +471,72 @@ final class GeneratorStartupFailureReporterTest {
     }
 
     @Test
+    @DisplayName("DEBUG of a reported failure: the printed line once, then only the graph's types, SQLSTATEs, frames")
+    void reportedFailureIsLoggedValueFree() {
+        PSQLException authorization = new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD,
+                new IOException("CAUSE-SENTINEL\r\nFORGED cause line"));
+        authorization.setNextException(new SQLException("NEXT-SENTINEL\nFORGED next line", "08006"));
+        BeanCreationException failure = new BeanCreationException("jdbcDialect", "TOP-SENTINEL\rFORGED top line",
+                new CannotGetJdbcConnectionException("CONNECTION-SENTINEL\r\nFORGED connection line", authorization));
+        failure.addSuppressed(new IllegalStateException("SUPPRESSED-SENTINEL\nFORGED suppressed line"));
+        assertThat(ThrowableProxyUtil.asString(new ThrowableProxy(failure)))
+                .as("the original graph would carry the sentinels")
+                .contains("TOP-SENTINEL", "CAUSE-SENTINEL", "SUPPRESSED-SENTINEL", "\nFORGED");
+        String line = "Cannot connect to database " + AUTHORITY + ": " + AUTH_FAILED;
+
+        List<ILoggingEvent> events = reporterDebugEvents(() -> assertThat(
+                reporter(URL, CustomerGeneratorRunner.PROFILE).reportException(failure)).isTrue());
+
+        assertThat(printedLines()).containsExactly(line);
+        assertThat(events).singleElement().satisfies(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
+            assertThat(event.getFormattedMessage()).isEqualTo("generator.startup failed: " + line);
+            String rendering = rendering(event);
+            assertThat(StringUtils.countOccurrencesOf(rendering, line)).isOne();
+            assertThat(rendering)
+                    .contains(BeanCreationException.class.getName() + " [message withheld]")
+                    .contains(CannotGetJdbcConnectionException.class.getName() + " [message withheld]")
+                    .contains(PSQLException.class.getName() + " [SQLSTATE 28P01, vendor code 0; message withheld]")
+                    .contains("java.sql.SQLException [SQLSTATE 08006, vendor code 0; message withheld]")
+                    .contains("java.io.IOException [message withheld]")
+                    .contains("java.lang.IllegalStateException [message withheld]")
+                    .doesNotContain(SENTINELS);
+            assertThat(rendering.lines())
+                    .anyMatch(text -> text.contains("\tat " + GeneratorStartupFailureReporterTest.class.getName()))
+                    .noneMatch(text -> text.strip().startsWith("FORGED"));
+        });
+    }
+
+    @Test
+    @DisplayName("DEBUG of a failure while reporting: false, nothing printed, the graph logged value-free")
+    void failureWhileReportingIsLoggedValueFree() {
+        IllegalStateException closed = new IllegalStateException("CONTEXT-SENTINEL\r\nFORGED context line",
+                new SQLException("CAUSE-SENTINEL\nFORGED cause line", "08003"));
+        closed.addSuppressed(new IllegalArgumentException("SUPPRESSED-SENTINEL\rFORGED suppressed line"));
+        ConfigurableApplicationContext context = mock(ConfigurableApplicationContext.class);
+        when(context.getEnvironment()).thenThrow(closed);
+        RuntimeException failure = startupFailure(new PSQLException(AUTH_FAILED, PSQLState.INVALID_PASSWORD));
+
+        List<ILoggingEvent> events = reporterDebugEvents(() -> assertThat(
+                new GeneratorStartupFailureReporter(context, printStream()).reportException(failure)).isFalse());
+
+        assertThat(printedLines()).isEmpty();
+        assertThat(events).singleElement().satisfies(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
+            assertThat(event.getFormattedMessage()).isEqualTo("generator.startup failure left to Spring Boot's report");
+            String rendering = rendering(event);
+            assertThat(rendering)
+                    .contains("java.lang.IllegalStateException [message withheld]")
+                    .contains("java.sql.SQLException [SQLSTATE 08003, vendor code 0; message withheld]")
+                    .contains("java.lang.IllegalArgumentException [message withheld]")
+                    .contains("\tat ")
+                    .doesNotContain(SENTINELS)
+                    .doesNotContain(AUTH_FAILED);
+            assertThat(rendering.lines()).noneMatch(text -> text.strip().startsWith("FORGED"));
+        });
+    }
+
+    @Test
     @DisplayName("META-INF/spring.factories registers the reporter, and Spring Boot asks it before FailureAnalyzers")
     void registeredAheadOfFailureAnalyzers() {
         GenericApplicationContext context = new GenericApplicationContext();
@@ -615,6 +702,44 @@ final class GeneratorStartupFailureReporterTest {
      */
     private List<String> printedLines() {
         return printed.toString(UTF_8).lines().toList();
+    }
+
+    /**
+     * Runs an action with the reporter's logger at DEBUG and collects what it logs there, then restores the
+     * logger's level, so the case does not depend on whatever configured logging before it.
+     *
+     * @param action the action that reports a failure
+     * @return the events the reporter's logger received while the action ran
+     */
+    private static List<ILoggingEvent> reporterDebugEvents(Runnable action) {
+        LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+        Logger reporterLogger = loggerContext.getLogger(GeneratorStartupFailureReporter.class);
+        ListAppender<ILoggingEvent> events = new ListAppender<>();
+        Level originalLevel = reporterLogger.getLevel();
+        events.setContext(loggerContext);
+        events.start();
+        reporterLogger.setLevel(Level.DEBUG);
+        reporterLogger.addAppender(events);
+        try {
+            action.run();
+        } finally {
+            reporterLogger.detachAppender(events);
+            events.stop();
+            reporterLogger.setLevel(originalLevel);
+        }
+        return List.copyOf(events.list);
+    }
+
+    /**
+     * Renders a logging event's message and throwable as Logback's console pattern does.
+     *
+     * @param event the event
+     * @return the formatted message, then the throwable's rendering when the event has one
+     */
+    private static String rendering(ILoggingEvent event) {
+        IThrowableProxy throwable = event.getThrowableProxy();
+        return event.getFormattedMessage() + System.lineSeparator()
+                + (throwable == null ? "" : ThrowableProxyUtil.asString(throwable));
     }
 
     /**

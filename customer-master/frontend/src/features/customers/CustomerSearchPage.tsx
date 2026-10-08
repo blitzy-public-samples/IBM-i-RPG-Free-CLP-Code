@@ -1,112 +1,36 @@
 /**
- * CustomerSearchPage and CustomerSearchPanel: the customer search screen.
+ * CustomerSearchPage and CustomerSearchPanel: the customer search screen,
+ * replacing PMTCUSTR and its display file PMTCUSTD (layout
+ * 5250_Subfile/Images/Inquiry_Subfile.png). The caller-asserted mode `I`,
+ * `M` or `S` is replaced by the signed-in user's role (Inquiry,
+ * Maintenance) and the Customer picker context (Selection); it never comes
+ * from a URL or a parameter the browser could forge.
  *
- * What it replaces. PMTCUSTR and its display file PMTCUSTD
- * (5250_Subfile/PMTCUSTR.SQLRPGLE, 5250_Subfile/PMTCUSTD.DSPF; layout
- * 5250_Subfile/Images/Inquiry_Subfile.png): the full-screen expanding
- * subfile that searched CUSTMAST by name, city and state and offered list
- * options per mode. Its first parameter, the caller-asserted mode `I`, `M`
- * or `S`, is replaced by the signed-in user's role (Inquiry, Maintenance)
- * and by the Customer picker context (Selection); the mode never comes from
- * a URL or a parameter the browser could forge.
+ * The business rules (DEM0007, the 9,999-row cap, the DEM0002/DEM0006
+ * notices) are the server's; this file applies only the option validity per
+ * mode and the key routing. Messages, from the server or the catalog, show as
+ * toasts in place of the SndSflMsg message subfile; the strings here are
+ * screen labels and key legends only.
  *
- *   PMTCUSTR / PMTCUSTD                          Here
- *   Init: SH_FUNCT Inquiry / Maintenance /       `ScreenHeader` function line and
- *     Selection, SC_OPTIONS (:712-767)             the options line per {@link SearchMode}
- *   SflFirstPage on entry in `I` (:252-256)      `useCustomerSearch({ initial })`
- *   NewSearchCriteria = *on at start (:243)      `pendingNewSearch`: the first Enter searches
- *   Enter: new criteria, else ProcessOption      `enter()` (:261-285, :427-515)
- *   PageDown: SflFillPage, DEM0006 at 9,999,     `pageDown()` (:287-299)
- *     DEM0003 with no list
- *   ProcessFunctionKey F3 F4 F5 F6 F9 F12,        the one `useFunctionKeys` scope and
- *     other keys DEM0003 (:355-420)               `FunctionKeyBar` built from the same handlers
- *   BldFkeyText (:676-702)                       the key legends, F9's switching text
- *   CustDsp(MTNCUSTR) E / D / A                  `CustomerDetailDialog` edit / display / add
- *   PmtState(PMTSTATER) from SC_STATE            `StatePicker` from the State filter
- *   SndSflMsg to the message subfile             `useToasts().publish` and `useProblemPresenter`
- *   'Demo Corp of America' footer (:128)         `.footer-brand`
+ * Enter: new search criteria take precedence over options. A search runs
+ * when one is pending (at entry, NewSearchCriteria = *on, :243; after F5, an
+ * F4 prompt that left a State differing from the applied one, DEM0002 or a
+ * failed search) or when the typed Name, City or State differ from the
+ * criteria last applied. Otherwise the typed options are processed over every
+ * loaded row in list order, as READC read every changed record, their windows
+ * opened one at a time. With nothing to process the last page loaded so far
+ * is shown (the preserved ProcessOption defect, :506-513).
  *
- * Behaviour carried from the source (the business rules themselves, such as
- * DEM0007, the 9,999-row cap and the DEM0002/DEM0006 notices, are the
- * server's; this file applies only the option validity per mode and the key
- * routing, which are screen behaviour):
- * - **Enter.** New search criteria take precedence over options: a new
- *   search runs when one is pending (no list yet, after F5, after a State
- *   chosen through F4 that differs from the applied one, after DEM0002 or a
- *   failed search such as DEM0007) or when the typed Name, City or State
- *   differ from the criteria last applied. Otherwise the typed options are
- *   processed over every loaded row in list order, as READC read every
- *   changed subfile record: `1` (Selection) returns the id and ends; `2`
- *   (Maintenance) opens the change window and `5` (any mode) the display
- *   window, one at a time, each option cleared once its window closes and a
- *   saved row updated in place; any other entry is DEM0004 with the option
- *   typed, its input marked reverse image and described by that alert's
- *   text, which outlasts the alert; a blank clears an earlier error.
- *   With options processed the page of the first invalid option is shown and
- *   its input focused, else the page of the last processed option. With
- *   nothing to process the last page loaded so far is shown (the preserved
- *   ProcessOption defect, :506-513).
- * - **F4** prompts only from the State filter, the field marked "+"; F4
- *   anywhere else is DEM0005. After the prompt closes, whether a code was
- *   chosen or not, a State that differs from the one last applied clears the
- *   list, so the next Enter searches (:376-381, PmtState returns the field
- *   unchanged on cancel).
- * - **F5** clears the criteria, turns inactive rows off and empties the list;
- *   the next Enter searches. No request is sent.
- * - **F6** adds a customer in Maintenance only; the list stays as it was
- *   afterwards, with no message (:397-400). Elsewhere it is not bound and
- *   answers DEM0003.
- * - **F9** toggles inactive rows, switches its legend and reloads the first
- *   page with the criteria on screen, in every mode (:406-413).
- * - **F3 and F12** (Escape is F12) leave through `onExit`.
- * - **PageDown / PageUp** page through the loaded list; with no list both are
- *   DEM0003. PageUp needs no request (the loaded pages are the cursor stack).
- * - Any other function key is DEM0003 and changes nothing.
+ * Keys: one scope with the panel's `<section>` as its container, so Enter is
+ * a command in the filters, the option fields and the panel itself. The
+ * detail window and the State picker render inside the panel and stack their
+ * own scopes when open, so only the topmost window receives keys.
  *
- * Keyboard and focus. The panel registers one key scope with its own
- * `<section>` as the container, so Enter is a command in the filters, in the
- * option fields and on the panel itself (the section takes focus when the
- * user clicks its plain text). The detail window and the State picker are
- * rendered inside the panel as siblings of the list; they push their own
- * scopes on top when they open, so only the topmost window receives keys.
- * Rows are keyed by customer id, so a page change unmounts the field that
- * had focus: when focus was lost that way, it follows to the first row of the
- * page the key asked for (the 5250 cursor on the first record of the page,
- * SFLRCDNBR CURSOR). Each such request names its destination page and waits
- * until that page is the one shown, so it is never spent on the rows of a
- * page about to be replaced, and a later key's request replaces it. A new
- * search or F5 moves focus to the Name filter. The Name
- * filter receives focus on open: Inquiry positions the cursor there
- * explicitly (SC_NAME_PC, :745-748) and in the other modes it is the first
- * input field, where the 5250 cursor lands by default.
- *
- * Messages. Notices and problems arrive as data: a page's notice is a
- * `status` toast, a failed request goes through `useProblemPresenter`, which
- * highlights and focuses the filter it names (DEM0007 on State). The client
- * raised DEM0003, DEM0004 and DEM0005 come from the message catalog. The
- * strings below are screen labels and key legends only.
- *
- * List status. One polite live region under the table (`aria-live="polite"`,
- * `aria-atomic="true"`; not `role="status"`, which is the toast host's)
- * announces the list's state as screen labels, never as toasts: "Searching..."
- * while a first page loads; with a list, a visually hidden summary of the page
- * shown ("Page 2, rows 13 to 23.") before the visible SFLEND indicator
- * "More..." or "Bottom"; and "Loading next page..." while PageDown fetches.
- * A pending request shows its label and marks the table `aria-busy` only
- * while it can change the page shown: a first page always; a next page only
- * while the deepest loaded page is shown, the page that load continues (a
- * PageDown there joins it). After a PageUp the load runs on unannounced,
- * since the page shown already has its next page, and paging back to the
- * deepest page before it arrives shows the label and `aria-busy` again.
- * With no list the region shows nothing (ERASE(SFL)); DEM0002 and DEM0006
- * stay status toasts.
- *
- * Pending requests. No key or button is disabled while a request is pending,
- * and each key and its legend button run the same handler. A newer command
- * supersedes a pending one: a search, F9 or F5 starts a new list generation,
- * so only that list's responses are shown, and a later page change supersedes
- * a page load still pending (the hook's navigation token), so the late page
- * never replaces the page the user moved to.
+ * Pending requests: no key or button is disabled while one is pending. A
+ * search, F9 or F5 starts a new list generation, so only that list's responses
+ * are shown, and a later page change supersedes a page load still pending
+ * (the hook's navigation token), so the late page never replaces the page the
+ * user moved to.
  *
  * Layer rule: imports come only from `api/` (types), `errors/`,
  * `components/`, `keyboard/`, `messages/`, `auth/`, `features/states/` and
@@ -115,17 +39,6 @@
  * Rendering requires, above it: `QueryClientProvider`, a router (for
  * `CustomerSearchPage`), `AuthProvider`, `MessageCatalogProvider`,
  * `ToastProvider` and `KeyScopeProvider`.
- *
- * @example
- * ```tsx
- * // The /customers route: mode from the session, exit to the home page.
- * <RequireRole role="INQUIRY"><CustomerSearchPage /></RequireRole>
- *
- * // The Customer picker: Selection mode inside a Dialog named by the header.
- * <Dialog open labelledBy="customer-picker-title customer-picker-function" className="dialog dialog--picker">
- *   <CustomerSearchPanel mode="selection" headerId="customer-picker" onSelect={selectOnce} onExit={onCancel} />
- * </Dialog>
- * ```
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -155,10 +68,6 @@ import type { FilterField } from './SearchFilters';
 import { useCustomerSearch } from './useCustomerSearch';
 import type { SearchCriteria } from './useCustomerSearch';
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
  * The function the screen performs, the PMTCUSTR first parameter:
  * `inquiry` (`I`, role INQUIRY), `maintenance` (`M`, role MAINTENANCE) or
@@ -166,7 +75,6 @@ import type { SearchCriteria } from './useCustomerSearch';
  */
 export type SearchMode = 'inquiry' | 'maintenance' | 'selection';
 
-/** Props of {@link CustomerSearchPanel}. */
 export interface CustomerSearchPanelProps {
   /** The screen's function; fixes the header, the options offered, F6 and whether the list loads on open. */
   mode: SearchMode;
@@ -193,7 +101,7 @@ export interface CustomerSearchPanelProps {
  *
  * The panel is keyed by its mode, so a change of role (sign-out and sign-in
  * as another user) starts a fresh screen, as each call of PMTCUSTR ran
- * `Init` again.
+ * `Init` again (:712-767).
  */
 export function CustomerSearchPage() {
   const { mode } = useAuth();
@@ -206,10 +114,6 @@ export function CustomerSearchPage() {
     </main>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Constants and pure helpers
-// ---------------------------------------------------------------------------
 
 /** SH_FUNCT of each mode: HdrInq, HdrMaint, HdrSelect (PMTCUSTR :726-728). */
 const FUNCTION_TEXT: Readonly<Record<SearchMode, string>> = {
@@ -239,16 +143,13 @@ const ALLOWED_OPTIONS: Readonly<Record<SearchMode, RowOption[]>> = {
 /** The criteria fields after F5 or on open: all blank (`clear SearchCriteria`, :391). */
 const BLANK_FILTERS: Readonly<Record<FilterField, string>> = Object.freeze({ name: '', city: '', state: '' });
 
-/** What a valid option does: return the id (option 1) or open the detail window (2 = edit, 5 = display). */
 type OptionKind = 'select' | Extract<DetailMode, 'edit' | 'display'>;
 
-/** One valid option the Enter walk will run, in list order. */
 interface OptionAction {
   custId: string;
   kind: OptionKind;
 }
 
-/** One option the Enter walk rejected (DEM0004), with the value as typed. */
 interface RejectedOption {
   custId: string;
   option: string;
@@ -260,7 +161,6 @@ interface RejectedOption {
  * only by handlers, never during render.
  */
 interface OptionWalk {
-  /** Valid options not yet run, in list order. */
   remaining: OptionAction[];
   /** Rejected options in list order; their DEM0004 messages are published when the walk ends. */
   rejected: RejectedOption[];
@@ -268,7 +168,6 @@ interface OptionWalk {
   lastProcessed: string | null;
 }
 
-/** The detail window requested: its function, its customer (absent on add), and whether an option walk opened it. */
 interface DetailRequest {
   mode: DetailMode;
   custId?: string;
@@ -302,7 +201,7 @@ interface FocusRequest {
   onlyIfLost: boolean;
 }
 
-/** What each mode does with a typed option: the action, or null for DEM0004 (ProcessOption, :437-499). */
+/** ProcessOption, :437-499. */
 function classifyOption(mode: SearchMode, option: string): OptionKind | null {
   if (option === '1' && mode === 'selection') {
     return 'select';
@@ -316,7 +215,7 @@ function classifyOption(mode: SearchMode, option: string): OptionKind | null {
   return null;
 }
 
-/** Whether an option field is blank: never typed, emptied, or blanks only (SF_OPT = ' ', :470). */
+/** SF_OPT = ' ', :470. */
 function isBlankOption(option: string | undefined): boolean {
   return option === undefined || option.trim() === '';
 }
@@ -344,7 +243,6 @@ function isFocusLost(): boolean {
   return active === null || active === document.body || !active.isConnected;
 }
 
-/** Whether a problem's field names one of the three filters. */
 function isFilterField(field: string): field is FilterField {
   return field === 'name' || field === 'city' || field === 'state';
 }
@@ -365,11 +263,7 @@ function toSummary(saved: CustomerResponse): CustomerSummaryResponse {
   };
 }
 
-/**
- * The visually hidden summary of the page shown, read with the SFLEND
- * indicator: its 1-based number and its rows' range over the loaded list,
- * such as "Page 2, rows 13 to 23.".
- */
+/** The hidden page summary read with the SFLEND indicator, such as "Page 2, rows 13 to 23.". */
 function describePage(pages: readonly CustomerSummaryResponse[][], position: number): string {
   const before = pages.slice(0, position).reduce((count, items) => count + items.length, 0);
   const shown = pages[position]?.length ?? 0;
@@ -377,17 +271,10 @@ function describePage(pages: readonly CustomerSummaryResponse[][], position: num
   return shown === 0 ? `Page ${number}.` : `Page ${number}, rows ${before + 1} to ${before + shown}.`;
 }
 
-// ---------------------------------------------------------------------------
-// The panel
-// ---------------------------------------------------------------------------
-
 /**
- * The customer search screen body, shared by the `/customers` page and the
- * Customer picker: header, criteria, options line, one page of results, the
- * list status (paging indicator and pending labels), the footer and the key
- * legend, plus the detail window
- * and the State picker it opens. Owns the search state and the one key scope
- * of the screen.
+ * The search screen body shared by the `/customers` page and the Customer
+ * picker; it owns the search state, the screen's one key scope and the
+ * detail window and State picker it opens.
  */
 export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, headerId }: CustomerSearchPanelProps) {
   const { username } = useAuth();
@@ -396,7 +283,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   const { present } = useProblemPresenter();
   const idPrefix = useId();
 
-  // --- State ---------------------------------------------------------------
   // The criteria as shown on screen (SC_NAME, SC_CITY, SC_STATE).
   const [typed, setTyped] = useState<Record<FilterField, string>>(() => ({
     ...BLANK_FILTERS,
@@ -410,23 +296,18 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   // subfile kept it, and dropped whenever the list is cleared (SflClear).
   const [options, setOptions] = useState<Record<string, string>>({});
   // Rows whose option the last Enter rejected (DSPATR(RI), indicator 81),
-  // each with the DEM0004 text it was rejected with, which stays its input's
-  // description after the alert clears.
+  // each with the DEM0004 text it was rejected with.
   const [invalid, setInvalid] = useState<Record<string, string>>({});
-  // The detail window shown, if any (CustDsp).
+  // CustDsp (MTNCUSTR).
   const [detail, setDetail] = useState<DetailRequest | null>(null);
-  // Whether the State prompt (PmtState) is open.
+  // PmtState (PMTSTATER).
   const [pickerOpen, setPickerOpen] = useState(false);
-  // A row option field to focus once its page is on screen.
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
 
-  // --- Refs (written by callback refs, effects and handlers; never read during render)
   const containerRef = useRef<HTMLElement | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
   const stateRef = useRef<HTMLInputElement | null>(null);
-  // The rendered Opt inputs by customer id, filled by callback refs.
   const optionInputs = useRef(new Map<string, HTMLInputElement>());
-  // The option processing of the current Enter, while windows are shown.
   const walkRef = useRef<OptionWalk | null>(null);
   // The detail window currently open; a second close of the same window is ignored.
   const openDetailRef = useRef<DetailRequest | null>(null);
@@ -434,14 +315,11 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   const focusSeqRef = useRef(0);
   const handledFocusRef = useRef(0);
 
-  // --- Message and focus helpers -------------------------------------------
-
   /** DEM0003 "Key is not active now": every key or action the screen does not enable now. */
   function keyNotActive(): void {
     publish({ kind: 'alert', text: format('DEM0003') });
   }
 
-  /** The input of one filter, by the id SearchFilters gives it. */
   function filterInput(field: FilterField): HTMLElement | null {
     return document.getElementById(`${idPrefix}-${field}`);
   }
@@ -464,7 +342,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     }
   }
 
-  /** Whether focus is in a row of the list: its Opt field or one of its action buttons. */
   function isFocusInRows(): boolean {
     const active = document.activeElement;
     if (active === null) {
@@ -499,8 +376,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     setFocusRequest({ seq: focusSeqRef.current, target, onlyIfLost });
   }
 
-  // --- The list --------------------------------------------------------------
-
   const list = useCustomerSearch({
     // Inquiry loads the first page with the criteria on screen at entry
     // (:252-256); Maintenance and Selection wait for the first Enter.
@@ -509,7 +384,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     onError: (error) => present(error, { setFieldErrors: showFilterErrors, focusField: focusFilter }),
   });
 
-  /** The index of the last page loaded so far, the page `list.toLastLoaded()` shows. */
   function lastLoadedPage(): number {
     return Math.max(list.pages.length - 1, 0);
   }
@@ -549,7 +423,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     }
   }, [focusRequest, list.page, list.position]);
 
-  /** Forgets the typed options and their errors (the SflClear half of the source). */
+  /** The SflClear half of the source: the typed options and their errors. */
   function clearOptions(): void {
     walkRef.current = null;
     setOptions({});
@@ -567,9 +441,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     list.search(criteria);
   }
 
-  // --- Option processing (ProcessOption, :427-515) ---------------------------
-
-  /** Opens the detail window for one request. */
   function openDetail(request: DetailRequest): void {
     openDetailRef.current = request;
     setDetail(request);
@@ -641,7 +512,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
 
   /**
    * Processes the options typed on every loaded row, in list order, as READC
-   * read every changed subfile record.
+   * read every changed subfile record (ProcessOption, :427-515).
    *
    * @param typedOptions the Opt fields to process; a row action passes its
    *   option already applied, before the state update has rendered
@@ -690,7 +561,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     processOptions(typedOptions);
   }
 
-  /** The Enter key and its legend button. */
   function enter(): void {
     submit(options);
   }
@@ -705,12 +575,11 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     submit(typedOptions);
   }
 
-  /** Stores a row's option as typed, uppercased by the shared rule (no CHECK(LC) on SF_OPT). */
+  /** Uppercased by the shared rule; SF_OPT has no CHECK(LC). */
   function changeOption(custId: string, value: string): void {
     setOptions((previous) => ({ ...previous, [custId]: upperField(value) }));
   }
 
-  /** Stores one filter as typed (SearchFilters' inputs already uppercase it). */
   function changeFilter(field: FilterField, value: string): void {
     setTyped((previous) => ({ ...previous, [field]: value }));
   }
@@ -739,14 +608,14 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     }
   }
 
-  // --- Function keys (ProcessFunctionKey, :355-420) --------------------------
-
-  /** F3 and F12 (Escape): leave the screen. */
   function exit(): void {
     onExit();
   }
 
-  /** F4: the State prompt from the State filter only (SC_PMT_FLD = 'SC_STATE'); anywhere else DEM0005. */
+  /**
+   * F4: the State prompt from the State filter only, the field marked "+"
+   * (SC_PMT_FLD = 'SC_STATE', :376); anywhere else DEM0005.
+   */
   function prompt(): void {
     const stateInput = stateRef.current;
     if (stateInput !== null && document.activeElement === stateInput) {
@@ -758,9 +627,10 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
 
   /**
    * The State prompt closed, with a chosen code or without one. As after
-   * `PmtState(SC_STATE)`, a State that now differs from the one last applied
-   * clears the list so the next Enter searches (:377-381). Focus returns to
-   * the State filter through the picker's Dialog.
+   * `PmtState(SC_STATE)`, which returns the field unchanged on cancel, a
+   * State that now differs from the one last applied clears the list so the
+   * next Enter searches (:377-381). Focus returns to the State filter through
+   * the picker's Dialog.
    */
   function closePicker(code: string | null): void {
     setPickerOpen(false);
@@ -777,7 +647,10 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     }
   }
 
-  /** F5: blank criteria, inactive rows off, the list emptied; the next Enter searches (:389-394). */
+  /**
+   * F5: blank criteria, inactive rows off, the list emptied with no request;
+   * the next Enter searches (:389-394).
+   */
   function resetAll(): void {
     keepFocusOutOfRows();
     setTyped({ ...BLANK_FILTERS });
@@ -804,14 +677,14 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
    * DEM0003; at the 9,999-row cap the hook re-sends DEM0006 and the page
    * stays; at the bottom the page stays, as it does when a newer key took
    * over while the page loaded. Focus that was on the page left behind
-   * follows to the first row of the new page, once that page is shown.
+   * follows to the first row of the new page, once that page is shown, as
+   * the 5250 cursor landed on the page's first record (SFLRCDNBR(CURSOR)).
    */
   function pageDown(): void {
     if (!list.hasList) {
       keyNotActive();
       return;
     }
-    // The page after the one shown now: where 'moved' and 'loaded' both land.
     const destination = list.position + 1;
     list.next().then(
       (outcome) => {
@@ -826,8 +699,9 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   }
 
   /**
-   * PageUp: the previous loaded page, with no request; DEM0003 with no list;
-   * at the first page it stays. Focus follows as for PageDown.
+   * PageUp: the previous loaded page, with no request (the loaded pages are
+   * the cursor stack); DEM0003 with no list; at the first page it stays.
+   * Focus follows as for PageDown.
    */
   function pageUp(): void {
     if (!list.hasList) {
@@ -840,8 +714,9 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     }
   }
 
-  // One handler per action, shared by the key binding and its legend button.
-  // F6 is bound in Maintenance only; elsewhere it reaches onUnbound (DEM0003).
+  // ProcessFunctionKey (:355-420): one handler per action, shared by the key
+  // binding and its legend button. F6 is bound in Maintenance only; elsewhere
+  // it reaches onUnbound (DEM0003).
   const bindings: KeyBindings = {
     Enter: enter,
     F3: exit,
@@ -855,8 +730,8 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   };
   useFunctionKeys(bindings, { onUnbound: keyNotActive, containerRef });
 
-  // SFT_KEYS in BldFkeyText order (:687-701), then the keys a browser user
-  // cannot assume: Enter and the two paging keys.
+  // SFT_KEYS with BldFkeyText's texts in its order (:676-702), then the keys
+  // a browser user cannot assume: Enter and the two paging keys.
   const keys: FunctionKeyBarItem[] = [
     { key: 'F3', label: 'F3=Exit', onPress: exit },
     { key: 'F4', label: 'F4=Prompt+', onPress: prompt },
@@ -873,7 +748,6 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     { key: 'PageDown', label: 'Page Down', onPress: pageDown },
   ];
 
-  /** Ref factory for the Opt inputs, so a rejected option or a new page's first row can receive focus. */
   function optionRef(custId: string): (element: HTMLInputElement | null) => void {
     return (element) => {
       const inputs = optionInputs.current;
@@ -885,7 +759,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     };
   }
 
-  // The pending states the page shown waits on (see "List status" above): a
+  // The pending states the page shown waits on (see "List status" below): a
   // first page, or the next page of the deepest loaded page while that page
   // is the one shown.
   const searching = list.loading && !list.loadingNext;
@@ -919,13 +793,18 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
         busy={searching || loadingNextInView}
       />
       {/*
-        The list's one polite live region, always present so every change of
-        its whole text is announced. SFLEND(*MORE) after the hidden page
-        summary; nothing while the subfile holds no records (ERASE(SFL),
-        PMTCUSTD :84-88). A pending label shows only while its request can
-        change the page shown: "Searching..." for a first page, and "Loading
-        next page..." only while the deepest loaded page, whose next page is
-        loading, is shown.
+        List status: the list's one polite live region (aria-atomic; not
+        role="status", which is the toast host's), always present so every
+        change of its whole text is announced, as screen labels and never as
+        toasts. With a list, a visually hidden summary of the page shown, then
+        the SFLEND(*MORE) indicator "More..." or "Bottom"; with no list,
+        nothing (ERASE(SFL), PMTCUSTD :84-88), and DEM0002 and DEM0006 stay
+        status toasts. A pending label, and the table's aria-busy, show only
+        while its request can change the page shown: "Searching..." for a
+        first page always; "Loading next page..." only while the deepest loaded
+        page, whose next page is loading, is shown (a PageDown there joins that
+        load). After a PageUp the load runs on unannounced, and paging back to
+        the deepest page before it arrives shows the label and aria-busy again.
       */}
       <div aria-live="polite" aria-atomic="true">
         {list.hasList ? (
@@ -937,6 +816,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
         {searching ? <p className="paging-indicator">Searching...</p> : null}
         {loadingNextInView ? <p className="paging-indicator">Loading next page...</p> : null}
       </div>
+      {/* The SFT_FKEY footer constant, PMTCUSTD :128. */}
       <p className="footer-brand">Demo Corp of America</p>
       <FunctionKeyBar keys={keys} />
       <CustomerDetailDialog

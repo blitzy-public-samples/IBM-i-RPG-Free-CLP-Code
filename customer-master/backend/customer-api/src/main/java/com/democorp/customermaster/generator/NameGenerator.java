@@ -21,51 +21,29 @@ import java.util.random.RandomGenerator;
  *
  * <h2>Random policy</h2>
  * <p>{@code Rand_Int} scales Db2 {@code RANDOM()}, which returns a value r with
- * 0 &le; r &le; 1, as {@code %int(r * (p_High - p_Low) + p_Low)}. In exact
- * arithmetic the result is {@code low..high-1} uniformly for r &lt; 1, and
- * {@code high} only when r is exactly 1, which the source documents as
- * "p_High is much less frequently returned". The expression is evaluated in
- * IEEE double, as the source's {@code float(8)} is, so for some ranges an r
- * within a few ulps of 1 also rounds up to {@code high}, for example (5, 11) at
- * {@code Math.nextDown(1.0)}; {@link #randInt(int, int)} gives the details.
- * Both halves are kept on purpose:
+ * 0 &le; r &le; 1, as {@code %int(r * (p_High - p_Low) + p_Low)}: in exact
+ * arithmetic {@code low..high-1} uniformly for r &lt; 1 and {@code high} at
+ * r = 1, which the source documents as "p_High is much less frequently
+ * returned". Both halves are kept on purpose:
  * <ul>
- *   <li>The unit source is <em>inclusive</em> of 1. {@link #inclusiveUnit(RandomGenerator)}
- *       draws k/2<sup>53</sup> for k in 0..2<sup>53</sup>, so r = 1 is reachable and
- *       rare. {@link RandomGenerator#nextDouble()} and PostgreSQL {@code random()}
- *       cover [0, 1) and omit the exact r = 1 endpoint, so {@code high} would be
- *       unreachable in every range where only r = 1 yields it, such as the
- *       generator's ranges (5, 28), (1, 21), (1, 28), (1, 5000), (100, 900),
- *       (1, 998), (1, 9900) and (1, 45). Neither is used.</li>
+ *   <li>The unit source, {@link #inclusiveUnit(RandomGenerator)}, is
+ *       <em>inclusive</em> of 1, so r = 1 is reachable and rare.
+ *       {@link RandomGenerator#nextDouble()} and PostgreSQL {@code random()} cover
+ *       [0, 1), which would make {@code high} unreachable wherever only r = 1
+ *       yields it, and are not used.</li>
  *   <li>The scaling truncates toward zero, as {@code %int} does, through a plain
  *       {@code (int)} cast of the whole expression.</li>
  * </ul>
+ * {@link #randInt(int, int)} states how IEEE-double rounding also lets an r just
+ * below 1 reach {@code high} in some ranges.
  *
- * <h2>Determinism</h2>
- * <p>Every public method consumes unit values in a fixed, documented order, so
- * instances built by {@link #seeded(long)} with the same seed yield the same
- * sequence of draws, words and phone numbers on the same Java runtime,
- * including in separate runs of the generator, each in its own JVM process.
- * The generator's {@code --seed} option relies on this to make a load
- * reproducible on the project's pinned runtime. The promise stops at that
- * runtime: the JDK specifies {@link SplittableRandom}'s repeatability only for
- * the same seed within the same program, not a fixed algorithm across JDK
- * implementations or releases, so a different Java runtime may produce a
- * different sequence for the same seed.
+ * <p>Draws happen in the order each method documents, so generators built by
+ * {@link #seeded(long)} with one seed repeat a load; that method states the
+ * limits of this promise.
  *
- * <h2>Thread safety</h2>
- * <p>Instances are <strong>not</strong> thread-safe. The JDK generators behind
+ * <p>Instances are <strong>not</strong> thread-safe: the JDK generators behind
  * {@link #seeded(long)} and {@link #random()} are not, and a shared instance
- * would interleave draws and destroy the reproducible order. Use one instance
- * per load.
- *
- * <p>Example:
- * <pre>{@code
- * NameGenerator names = NameGenerator.seeded(7);
- * int maxLength = names.randInt(5, 40 - 12);   // 5..28, 28 only at r = 1
- * String word = names.genWord(5, 11);          // 6..12 letters
- * String phone = names.genPhone();             // e.g. "(415) 007-0420"
- * }</pre>
+ * would interleave draws. Use one instance per load.
  */
 public final class NameGenerator {
 

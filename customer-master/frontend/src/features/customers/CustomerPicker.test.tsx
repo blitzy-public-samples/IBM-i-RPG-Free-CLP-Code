@@ -1,60 +1,11 @@
 /**
- * Tests of the Customer picker: `CustomerPicker` (`./CustomerPicker`), the
- * customer search in Selection mode inside a modal window, rendered with its
- * real collaborators: `CustomerSearchPanel` and the windows it opens, the
- * message catalog, the toast host and the key scope stack.
- *
- * What it replaces. PMTCUSTR called with mode `S` and its return parameter
- * (5250_Subfile/PMTCUSTR.SQLRPGLE, 5250_Subfile/PMTCUSTD.DSPF):
- * - **Init** (:750-767): with `pParmType = 'S'` and a second parameter, the
- *   function line is "Selection", the options line `1=Select 5=Display`, and
- *   only Opt1_OK is set; Maint_OK never is, so 2=Edit and F6=Add are absent
- *   whatever the caller is allowed elsewhere.
- * - **First page** (:243, :252-256): only Inquiry loads on entry; Selection
- *   waits for the first Enter.
- * - **ProcessOption** (:427-445): option 1 moves SF_CUST_H into pCustID,
- *   closes down and returns, so the caller receives exactly one id; option 5
- *   displays; any other option is DEM0004 with the option typed.
- * - **ProcessFunctionKey** (:355-420): F3 and F12 close down and return with
- *   pCustID still cleared (:245-249); F6 is not enabled outside `M` and
- *   answers DEM0003.
- *
- * What is pinned down here (AAP 0.8.3, `CustomerPicker.test.tsx`: "Only
- * options 1 and 5; `onSelect` fires once with the id; F12 and Escape →
- * `onCancel`"; the picker contract of AAP 0.3.8):
- * - the window is named by its header, "Customer Master" and "Selection",
- *   offers `1=Select 5=Display`, and opens with focus in "Name starts with:";
- * - nothing is searched before Enter, and every row then offers only Select
- *   and Display, for a MAINTENANCE user too, with no F6=Add;
- * - option 1, typed or through the row's Select button, calls `onSelect`
- *   once per opening with that row's id;
- * - option 2 is DEM0004 and opens no window; option 5 opens the display
- *   window over the picker;
- * - F3, F12 and Escape call `onCancel` and return no id; F6 is DEM0003;
- * - closed, the picker renders nothing and sends no request;
- * - in its production host, the "Order entry" form (`HostFormDemoPage`, route
- *   `/demo/selection`): "Customer id +" takes four characters, uppercased as
- *   typed; the "Look up customer" button, F4 with focus on the field or on
- *   that button, and the F4=Prompt+ legend button with focus in the field
- *   open the picker, while either F4 with focus anywhere else is DEM0005
- *   and opens nothing;
- *   option 1 writes the id into the field and leaves focus in the field, not
- *   on the button that opened the picker; F3, F12 and Escape in the picker
- *   close it with the field unchanged, focus in it and the host still shown,
- *   because the picker's scope is topmost and the host's own exits never run;
- *   a reopened picker searches anew; with the picker closed, the host's F3,
- *   F12 and Escape leave for `/` and F6 is DEM0003;
- * - every panel and every opening owns its list: two Selection panels with
- *   the same criteria under one query client each request their own first
- *   page and page independently, and a picker reopened after paging requests
- *   and shows page 1 again.
- *
- * Fixtures. The default `GET /api/customers` handler of `src/test/handlers.ts`
- * serves the 30 seed rows of its `customers` fixture (23 active, 12 per page)
- * and the default `GET /api/customers/:custId` handler their records. Every
- * `/api` request is logged from MSW's `request:start` event in
- * {@link traffic}, so the default handlers keep answering. The message texts
- * are the CUSTMSGF catalog served by the default `/api/messages` handler.
+ * Tests of `CustomerPicker` with its real collaborators (`CustomerSearchPanel`
+ * and the windows it opens, the message catalog, the toast host and the key
+ * scope stack), and of its production host, the Order entry form
+ * (`HostFormDemoPage`) at `/demo/selection`. Source: PMTCUSTR called with mode
+ * `S` (5250_Subfile/PMTCUSTR.SQLRPGLE: Init :750-767, entry :243-256,
+ * ProcessOption :427-499, ProcessFunctionKey :355-420). Spec: AAP 0.8.3 and
+ * the picker contract of AAP 0.3.8.
  *
  * Evidence. These tests are derived from reading the IBM i source and the
  * plan; they are not executed against the IBM i program and do not establish
@@ -63,13 +14,10 @@
  * Harness. The providers are mounted in the order `src/App.tsx` uses, with a
  * fresh `QueryClient` per test and the toast `clear` wired to the key scope's
  * `onBeforeCommand`, under a `MemoryRouter`. The host tests render the
- * production `HostFormDemoPage` at `/demo/selection` in a route table whose
- * `/` is a marker standing in for the menu, so the host's exits show as that
- * marker appearing; the picker inside it is the real one, with no test
- * callback between them. The session is the MAINTENANCE demo user, which
- * proves the role adds nothing to Selection. A probe reads
- * `useMessages().ready`, so message assertions start only once the catalog
- * has loaded (until then `format` returns the bare code).
+ * production `HostFormDemoPage` in a route table whose `/` is a marker
+ * standing in for the menu, so the host's exits show as that marker
+ * appearing; the picker inside it is the real one, with no test callback
+ * between them.
  */
 import type { ReactElement, ReactNode } from 'react';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -92,10 +40,6 @@ import { CustomerPicker } from './CustomerPicker';
 import type { CustomerPickerProps } from './CustomerPicker';
 import { CustomerSearchPanel } from './CustomerSearchPage';
 
-// ---------------------------------------------------------------------------
-// Fixtures and constants
-// ---------------------------------------------------------------------------
-
 /**
  * The MAINTENANCE demo user (`sales`). Selection is open to every signed-in
  * user; signing in with the widest role shows that the role adds neither
@@ -109,20 +53,17 @@ const MAINTENANCE_USER = (() => {
   return account;
 })();
 
-/** Rows per page: SFLPAG 12 of PMTCUSTD, the `size` the panel sends. */
+/** SFLPAG 12 of PMTCUSTD. */
 const PAGE_SIZE = 12;
 
-/** The first page of the active-only list, as the default search handler serves it. */
 const FIRST_PAGE_ROWS: readonly CustomerSummaryResponse[] = customers
   .filter((row) => row.active === 'Y')
   .slice(0, PAGE_SIZE);
 
-/** The second and last page of the active-only list (11 rows), reached with PageDown. */
 const SECOND_PAGE_ROWS: readonly CustomerSummaryResponse[] = customers
   .filter((row) => row.active === 'Y')
   .slice(PAGE_SIZE, 2 * PAGE_SIZE);
 
-/** The seed row of `name`; throws when the fixture holds none. */
 function seedRow(name: string): CustomerSummaryResponse {
   const row = customers.find((candidate) => candidate.name === name);
   if (row === undefined) {
@@ -131,11 +72,10 @@ function seedRow(name: string): CustomerSummaryResponse {
   return row;
 }
 
-/** The seed rows the e2e selection flow also uses: original ids 6 (backslashes) and 3 (apostrophe). */
+/** Seed rows the e2e flows also use: original ids 6 (backslashes) and 3 (apostrophe). */
 const URNA = seedRow('URNA \\NUNC\\ COMPANY');
 const NIBH = seedRow("NIBH L'LOR COMPANY");
 
-/** A row on the first page of the active-only list. */
 const FIRST_ROW = ((): CustomerSummaryResponse => {
   const row = FIRST_PAGE_ROWS[0];
   if (row === undefined) {
@@ -144,48 +84,33 @@ const FIRST_ROW = ((): CustomerSummaryResponse => {
   return row;
 })();
 
-/** Accessible name of the picker window: its ScreenHeader title and function line. */
 const PICKER_NAME = 'Customer Master Selection';
 
-/** Accessible name of the display window option 5 opens over the picker. */
 const DISPLAY_NAME = 'Customer Master Displaying Customer';
 
-/** Label of the Name criterion (PMTCUSTD SC_NAME), where the cursor starts. */
 const NAME_FILTER = 'Name starts with:';
 
-/** The search endpoint, relative as the SPA calls it. */
 const SEARCH_PATH = '/api/customers';
 
-/** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
 
-/** The route of the Order entry host form, as `src/routes.tsx` serves it. */
 const HOST_PATH = '/demo/selection';
 
-/** The function line of the Order entry host form's header. */
 const HOST_FUNCTION = 'Order entry';
 
-/** Label of the host form's promptable field (the calling program's return slot). */
 const CUSTOMER_ID_LABEL = 'Customer id +';
 
-/** Name of the host form's button that opens the picker. */
 const LOOKUP_BUTTON = 'Look up customer';
 
-/** Text of the element the host tests route `/` to, standing in for the main menu. */
 const HOME_MARKER = 'Main menu stand-in';
 
-// ---------------------------------------------------------------------------
-// Request log
-// ---------------------------------------------------------------------------
-
-/** One request that reached MSW: its method, path and query parameters. */
 interface RecordedRequest {
   method: string;
   path: string;
   params: URLSearchParams;
 }
 
-/** Every `/api` request since the test began, the public catalog excepted, in order. */
+/** The current test's `/api` requests, `/api/messages` excepted, in order. */
 const traffic: RecordedRequest[] = [];
 
 /** MSW `request:start` listener: runs before any handler, so every default handler keeps answering. */
@@ -196,7 +121,6 @@ function recordRequest({ request }: { request: Request }): void {
   }
 }
 
-/** The recorded searches (`GET /api/customers`) as their query parameters. */
 function searches(): Record<string, string | null>[] {
   return traffic
     .filter((entry) => entry.method === 'GET' && entry.path === SEARCH_PATH)
@@ -210,7 +134,6 @@ function searches(): Record<string, string | null>[] {
     }));
 }
 
-/** The query of a first page with the given Name and inactive rows excluded, as the panel sends it. */
 function firstPageQuery(name = ''): Record<string, string | null> {
   return { name, city: '', state: '', includeInactive: 'false', size: String(PAGE_SIZE), cursor: null };
 }
@@ -227,11 +150,7 @@ afterEach(() => {
   setCredentials(null);
 });
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/** Wires the toast clear to the key scope's `onBeforeCommand`, as `src/App.tsx` does. */
+/** The `KeyScopeWithToastReset` of `src/App.tsx`. */
 function KeyedScreens({ children }: { children: ReactNode }) {
   const { clear } = useToasts();
   return <KeyScopeProvider onBeforeCommand={clear}>{children}</KeyScopeProvider>;
@@ -258,11 +177,9 @@ interface RenderOptions {
 }
 
 /**
- * Renders `ui` inside the application's providers, signed in as the
- * MAINTENANCE user: a fresh query client (no retries), the message catalog,
- * the toast host, the key scope stack, a router at `initialEntries` and the
- * session. `ui` may be a `<Routes>` table, which then matches against that
- * history. Resolves once the catalog has loaded.
+ * Renders `ui` inside the providers, signed in as {@link MAINTENANCE_USER}; a
+ * `<Routes>` table matches against `initialEntries`. Resolves once the catalog
+ * has loaded.
  */
 async function renderWithProviders(ui: ReactElement, { initialEntries }: RenderOptions = {}): Promise<UserEvent> {
   const user = userEvent.setup();
@@ -287,23 +204,20 @@ async function renderWithProviders(ui: ReactElement, { initialEntries }: RenderO
   return user;
 }
 
-/** The two picker callbacks of one render, as fresh mocks. */
 interface PickerCallbacks {
   onSelect: Mock<CustomerPickerProps['onSelect']>;
   onCancel: Mock<CustomerPickerProps['onCancel']>;
 }
 
-/** What {@link openPicker} returns. */
 interface OpenPicker extends PickerCallbacks {
   user: UserEvent;
   dialog: HTMLElement;
 }
 
 /**
- * Renders the open picker with fresh callbacks that leave it open (so a
- * second selection in the same opening can be attempted), and waits until it
- * is ready to be keyed: the catalog has loaded and the Name filter holds
- * focus.
+ * Renders the open picker with callbacks that leave it open, so a second
+ * selection in one opening can be attempted; resolves once the catalog has
+ * loaded and the Name filter has focus.
  */
 async function openPicker(initialName?: string): Promise<OpenPicker> {
   const onSelect = vi.fn<CustomerPickerProps['onSelect']>();
@@ -316,12 +230,9 @@ async function openPicker(initialName?: string): Promise<OpenPicker> {
   return { user, dialog, onSelect, onCancel };
 }
 
-/** What {@link renderHostForm} returns: the user-event instance and the host's two promptable controls. */
 interface HostFormHandle {
   user: UserEvent;
-  /** The "Customer id +" input. */
   field: HTMLInputElement;
-  /** The "Look up customer" button. */
   lookup: HTMLElement;
 }
 
@@ -389,10 +300,6 @@ function TwoSelectionPanels() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
-
 /** The Name criterion of the picker (PMTCUSTD SC_NAME), by its exact label inside the criteria group. */
 function nameFilter(dialog: HTMLElement): HTMLInputElement {
   const group = within(dialog).getByRole('group', { name: 'Search criteria' });
@@ -418,7 +325,6 @@ function shownNames(dialog: HTMLElement): string[] {
     });
 }
 
-/** The Opt input of the row showing `name`. */
 function optionInput(dialog: HTMLElement, name: string): HTMLInputElement {
   const element = within(resultsTable(dialog)).getByRole('textbox', { name: `Option for ${name}` });
   if (!(element instanceof HTMLInputElement)) {
@@ -449,29 +355,24 @@ function pickerKeys(dialog: HTMLElement): HTMLElement {
   return bar;
 }
 
-/** One region of {@link TwoSelectionPanels}, by its accessible name. */
 function panelRegion(name: (typeof PANEL_REGIONS)[number]): HTMLElement {
   return screen.getByRole('region', { name });
 }
 
-/** Presses the legend button `label` of the one search panel inside `region`. */
 async function pressLegendKey(user: UserEvent, region: HTMLElement, label: string): Promise<void> {
   const bar = within(region).getByRole('toolbar', { name: 'Function keys' });
   await user.click(within(bar).getByRole('button', { name: label }));
 }
 
-/** The shared alert region of the toast host, where DEM0003 and DEM0004 are published. */
 function alertRegion(): HTMLElement {
   return screen.getByRole('alert');
 }
 
-/** Runs the first search of an opening (Enter) and waits until the page it returns is shown. */
 async function searchWithEnter(user: UserEvent, dialog: HTMLElement, expected: readonly string[]): Promise<void> {
   await user.keyboard('{Enter}');
   await waitFor(() => expect(shownNames(dialog)).toEqual(expected));
 }
 
-/** Types `text` into the Name filter, then searches with Enter and waits for `expected`. */
 async function searchByName(
   user: UserEvent,
   dialog: HTMLElement,
@@ -481,11 +382,6 @@ async function searchByName(
   await user.type(nameFilter(dialog), text);
   await searchWithEnter(user, dialog, expected);
 }
-
-
-// ---------------------------------------------------------------------------
-// Specs
-// ---------------------------------------------------------------------------
 
 describe('CustomerPicker', () => {
   it('starts from the fixtures: a MAINTENANCE user, a full first page, and the two seed rows used below', () => {
@@ -497,10 +393,6 @@ describe('CustomerPicker', () => {
     expect(messageText('DEM0004', ['2'])).toBe('2 is not a valid option at this time.');
     expect(messageText('DEM0005')).toBe('Use F4 only if + is on field');
   });
-
-  // -------------------------------------------------------------------------
-  // Opening (Init :750-767, first page :243, :252-256)
-  // -------------------------------------------------------------------------
 
   describe('opening', () => {
     it('is a modal window named "Customer Master" / "Selection", offers "1=Select 5=Display" and opens in "Name starts with:"', async () => {
@@ -568,10 +460,6 @@ describe('CustomerPicker', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Option 1 (ProcessOption :439-445)
-  // -------------------------------------------------------------------------
-
   describe('option 1 (Select)', () => {
     it("typed 1 and Enter call onSelect once with the row's id; a second Enter or Select in the same opening calls nothing", async () => {
       const { user, dialog, onSelect, onCancel } = await openPicker();
@@ -617,10 +505,6 @@ describe('CustomerPicker', () => {
       expect(screen.getAllByRole('dialog')).toEqual([dialog]);
     });
   });
-
-  // -------------------------------------------------------------------------
-  // Options 2 and 5 (ProcessOption :446-499)
-  // -------------------------------------------------------------------------
 
   describe('options 2 and 5', () => {
     it('option 2 shows DEM0004 "2 is not a valid option at this time.", marks that row and opens no window', async () => {
@@ -673,10 +557,6 @@ describe('CustomerPicker', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Keys (ProcessFunctionKey :355-420)
-  // -------------------------------------------------------------------------
-
   describe('keys', () => {
     it.each([
       ['F12', '{F12}'],
@@ -708,10 +588,6 @@ describe('CustomerPicker', () => {
       expect(onCancel).not.toHaveBeenCalled();
     });
   });
-
-  // -------------------------------------------------------------------------
-  // In its host: the production Order entry form (HostFormDemoPage)
-  // -------------------------------------------------------------------------
 
   describe('in the Order entry host form', () => {
     it('shows "Customer id +" as a four-character field that uppercases as typed, beside "Look up customer" and the F3, F4 and F12 legend', async () => {
@@ -889,10 +765,6 @@ describe('CustomerPicker', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // List isolation: every panel and every opening owns its list
-  // -------------------------------------------------------------------------
-
   describe('list isolation', () => {
     it('two panels open at once with the same criteria each request, page and keep their own list', async () => {
       const user = await renderWithProviders(<TwoSelectionPanels />);
@@ -906,14 +778,12 @@ describe('CustomerPicker', () => {
       await pressLegendKey(user, second, 'Enter');
       await waitFor(() => expect(shownNames(second)).toEqual(pageOne));
 
-      // Identical criteria, yet each panel's first page is its own request.
       expect(searches()).toEqual([firstPageQuery(), firstPageQuery()]);
 
       await pressLegendKey(user, first, 'Page Down');
       await waitFor(() => expect(shownNames(first)).toEqual(pageTwo));
 
       expect(within(first).getByText('Bottom')).toBeInTheDocument();
-      // The second panel keeps its page 1 and its "More..." indicator.
       expect(shownNames(second)).toEqual(pageOne);
       expect(within(second).getByText('More...')).toBeInTheDocument();
       expect(within(second).queryByText('Bottom')).not.toBeInTheDocument();
@@ -973,4 +843,3 @@ describe('CustomerPicker', () => {
     });
   });
 });
-

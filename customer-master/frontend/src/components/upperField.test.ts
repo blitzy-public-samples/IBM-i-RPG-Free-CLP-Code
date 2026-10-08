@@ -1,34 +1,21 @@
 /**
- * Specifies `upperField`, the client half of the shared text-normalization
- * rule (AAP 0.4.7): the browser twin of the 5250 terminal's uppercase
- * translation, applied as the user types.
- *
- * No input field of PMTCUSTD (`SC_NAME 13A`, `SC_CITY 13A`, `SC_STATE 2A`) or
- * MTNCUSTD (the nine customer fields, `SD_NAME 40` among them) declares
- * `CHECK(LC)`, so the workstation uppercased every keyed character. The rule:
- * each code point takes its full uppercase mapping only when that mapping is
- * exactly one code point, and is otherwise kept. Nothing is trimmed, so the
- * UTF-16 length (what `maxLength` and the caret offset count) and the
- * code-point count never change.
+ * Specifies `upperField`, the client half of the shared uppercase rule
+ * (AAP 0.4.7).
  *
  * Cross-folder parity. The backend `domain/TextNormalizerTest` checks
- * `TextNormalizer` against the same parity table, case for case; the server
- * additionally trims, which `upperField` never does. Change a row here only
- * together with that suite.
+ * `TextNormalizer` (the same algorithm, run on the JDK's Unicode case data)
+ * against the same parity table, case for case; the server additionally trims,
+ * which `upperField` never does. Change a row here only together with that
+ * suite.
  *
- * Encoding. Every non-ASCII literal is written as a `\uXXXX` escape with its
- * Unicode name in a comment, so no editor or formatter can normalise it into a
- * different code-point sequence.
- *
- * Pure function tests: no DOM, no rendering and no request reach the MSW server
- * that src/test/setup.ts starts.
+ * Encoding. Non-ASCII literals are written as `\uXXXX` escapes, most with their
+ * Unicode name in a comment, so no editor or formatter can normalise them into
+ * a different code-point sequence.
  */
 import { describe, expect, it } from 'vitest';
 import { upperField } from './upperField';
 
-/** One row of the parity table shared with the backend `TextNormalizerTest`. */
 interface ParityCase {
-  /** Readable label used in the test name. */
   readonly name: string;
   readonly input: string;
   readonly expected: string;
@@ -40,7 +27,6 @@ interface ParityCase {
  * the two suites diverge on these rows.
  */
 const PARITY_TABLE: readonly ParityCase[] = [
-  // Plain ASCII lowercase.
   { name: 'abc becomes ABC', input: 'abc', expected: 'ABC' },
   // U+00DF LATIN SMALL LETTER SHARP S: its full mapping "SS" is two code
   // points, so it is kept.
@@ -56,7 +42,6 @@ const PARITY_TABLE: readonly ParityCase[] = [
   { name: 'U+1F80 alpha with psili and ypogegrammeni is kept', input: '\u1f80', expected: '\u1f80' },
 ];
 
-/** Counts Unicode code points; string iteration yields one code point per step. */
 function codePointCount(value: string): number {
   return Array.from(value).length;
 }
@@ -78,8 +63,6 @@ describe('upperField', () => {
     });
 
     it.each(PARITY_TABLE)('$name, and the expected value is already normalized', ({ expected }) => {
-      // Idempotence: applying the rule to its own output changes nothing, so
-      // re-rendering an uppercased input never alters it again.
       expect(upperField(expected)).toBe(expected);
     });
 
@@ -170,7 +153,6 @@ describe('upperField', () => {
     });
 
     it('passes an unpaired surrogate through unchanged', () => {
-      // A lone high surrogate (U+D800) has no case mapping.
       expect(upperField('ab\ud800')).toBe('AB\ud800');
       expect(upperField('\ud800cd')).toBe('\ud800CD');
     });
@@ -193,7 +175,6 @@ describe('upperField', () => {
       // The backslashes of the seed name URNA \NUNC\ COMPANY and the
       // apostrophe of NIBH L'LOR COMPANY, among digits and an ampersand.
       { name: 'backslashes, digits, ampersand and apostrophe', input: "\\NUNC\\ 123 & '" },
-      // The TextNormalizerTest pass-through value.
       { name: 'the TextNormalizerTest punctuation value', input: "O'BRIEN & SONS, \\NUNC\\ 123" },
     ])('leaves $name unchanged', ({ input }) => {
       expectLengthPreserving(upperField(input), input, input);

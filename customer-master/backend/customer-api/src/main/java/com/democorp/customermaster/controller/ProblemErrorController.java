@@ -1,5 +1,6 @@
 package com.democorp.customermaster.controller;
 
+import com.democorp.customermaster.config.RedactedThrowable;
 import io.swagger.v3.oas.annotations.Hidden;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.http.HttpServletRequest;
@@ -20,32 +21,23 @@ import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * Answers the servlet container's ERROR dispatch to {@code /error} with {@code application/problem+json},
- * so no error ever reaches a client in Spring Boot's whitelabel page or its JSON error format
- * ({@code timestamp}, {@code error}, {@code path}).
+ * Answers the servlet container's ERROR dispatch to {@code /error} with {@code application/problem+json}
+ * built by {@link ProblemFactory}, so no error reaches a client in Spring Boot's whitelabel page or its
+ * JSON error format ({@code timestamp}, {@code error}, {@code path}). For failures outside the normal
+ * flow it replaces {@code SQLProblem} ({@code Service_Pgms/SRV_SQL.SQLRPGLE:20-57}).
  *
- * <p><b>Why it exists.</b> {@code ApiExceptionHandler} sees only exceptions raised inside Spring MVC's
- * handler invocation. Three kinds of failure never get there: an exception thrown by a servlet filter
- * (the security chain included), a {@code response.sendError(...)} call made by any component, and a
- * failure before a handler is mapped. The container forwards each of them to {@code /error} with the
- * {@code jakarta.servlet.error.*} request attributes set, and this controller turns them into the same
- * problem bodies the rest of the API sends, built by {@link ProblemFactory}. An exception escaping the
- * filter chain reaches the container through {@link ErrorDispatchFilter}, which sets the exception
- * attribute and calls {@code sendError(500)} instead of rethrowing, so the container logs nothing and
- * this controller writes the only ERROR line of the failure. A request Tomcat's connector rejects before
- * any filter runs (an oversized request line or header, a malformed request target, an encoded
- * {@code /}, {@code \} or NUL in the path, {@code TRACE}) is never forwarded here at all;
- * {@link ProblemErrorReportValve} answers it in the container with the body {@link #problemFor} builds,
- * so this status map stays the only one.
+ * <p><b>Scope.</b> It answers what {@code ApiExceptionHandler} never sees: an exception thrown by a servlet
+ * filter, a {@code sendError} call, and a failure before handler mapping. A filter-chain exception arrives
+ * through {@link ErrorDispatchFilter}, which sets the exception attribute and calls {@code sendError(500)}
+ * instead of rethrowing, so the container logs nothing and this class writes the only ERROR line. A
+ * request Tomcat's connector rejects before any filter runs is never forwarded here;
+ * {@link ProblemErrorReportValve} answers it with the body {@link #problemFor} builds, so this status map
+ * stays the only one.
  *
- * <p><b>What it replaces.</b> On the IBM i, a "never should happen" failure went through
- * {@code SQLProblem} ({@code SRV_SQL}): {@code GET DIAGNOSTICS} read the SQLSTATE and message text,
- * {@code DUMP(A)} dumped the program, and a CPF9898 escape message carrying the SQLSTATE and SQL text
- * ended it. Here such a failure becomes a 500 {@code DEM9999} ("Program Error! Please contact IT now.",
- * from {@code CUSTMSGF}) with a random {@code errorId}; the exception and its SQLSTATE go only to the
- * ERROR log line that carries the same {@code errorId}, never into the body. That line logs the
- * exception as its {@link RedactedThrowable} copy, types and stack frames with every message withheld,
- * so no customer value, SQL text or control character of a message reaches the log.
+ * <p><b>Redaction.</b> A 500 {@code DEM9999} body carries a random {@code errorId} and nothing of the
+ * failure. The SQLSTATE and the {@link RedactedThrowable} copy of the exception, types and stack frames
+ * with every message withheld, go only to the ERROR log line carrying the same {@code errorId}, so no
+ * customer value, SQL text or control character reaches the log.
  *
  * <p><b>Status map</b> (the same map {@code ApiExceptionHandler} and the security handlers apply):
  * <table>
@@ -67,24 +59,23 @@ import org.springframework.web.bind.annotation.RequestMapping;
  * permits only the ERROR dispatch type, so the forward is never rejected itself and the original 401 or
  * 403 decision stands.
  *
- * <p><b>Response.</b> The body is written by {@link ProblemFactory#write(HttpServletResponse,
- * ProblemDetail)}, which sets the status, {@code application/problem+json} and UTF-8 whatever the
- * request's {@code Accept} header says, so a browser asking for {@code text/html} still receives the
- * problem body. The handler therefore returns no view and no {@code ResponseEntity}, and declares no
- * {@code produces} condition that could turn the error into a 406. Headers already on the response are
- * kept, so a {@code WWW-Authenticate} challenge set before a {@code sendError(401)} survives; this
- * class never adds that header itself, since only the security entry point decides when to challenge.
- * The {@code instance} member is the URI of the request that failed, not {@code /error}.
+ * <p><b>Response.</b> {@link ProblemFactory#write(HttpServletResponse, ProblemDetail)} sets the status,
+ * {@code application/problem+json} and UTF-8 whatever the {@code Accept} header says, so the handler
+ * returns no view and no {@code ResponseEntity}, and declares no {@code produces} condition that could
+ * turn the error into a 406. Headers already on the response are kept, so a {@code WWW-Authenticate}
+ * challenge set before a {@code sendError(401)} survives; this class never adds that header, since only
+ * the security entry point decides when to challenge. {@code instance} is the URI of the request that
+ * failed, not {@code /error}.
  *
  * <p><b>Spring Boot wiring.</b> Being an {@link ErrorController} bean, this class makes
  * {@code ErrorMvcAutoConfiguration} skip its {@code BasicErrorController}, while Boot's error-page
- * registration that forwards to {@code /error} stays in place. Boot's {@code ErrorAttributes} is
- * deliberately not used: the three servlet attributes hold everything the status map needs, and
- * {@code ErrorAttributes} would add exactly the members this class keeps out. The mapping follows
- * {@code server.error.path} (default {@code /error}) and accepts every HTTP method, because the
- * container forwards a failed request with its original method; Spring MVC also matches
- * {@code OPTIONS} for ERROR dispatches to a mapping without methods. The controller is hidden from the
- * OpenAPI document, and the web-application condition keeps it out of the generator's non-web context.
+ * registration that forwards to {@code /error} stays. Boot's {@code ErrorAttributes} is deliberately
+ * unused: the three servlet attributes hold everything the status map needs, and it would add exactly
+ * the members this class keeps out. The mapping follows {@code server.error.path} (default
+ * {@code /error}) and accepts every HTTP method, because the container forwards a failed request with its
+ * original method; Spring MVC also matches {@code OPTIONS} for ERROR dispatches to a mapping without
+ * methods. The controller is hidden from the OpenAPI document, and the web-application condition keeps
+ * it out of the generator's non-web context.
  *
  * <p><b>Thread safety.</b> The only state is the final, thread-safe {@link ProblemFactory}; every
  * request is handled with request-local values, so one instance serves all request threads.
@@ -113,13 +104,9 @@ public class ProblemErrorController implements ErrorController {
     /** The {@code APP0400} reason of a 4xx status that has no standard reason phrase, such as 499. */
     static final String REASON_CLIENT_ERROR = "client error";
 
-    /** Lowest 4xx status code. */
     private static final int MIN_CLIENT_ERROR = 400;
-
-    /** Highest 4xx status code. */
     private static final int MAX_CLIENT_ERROR = 499;
 
-    /** Placeholder for an absent value in the ERROR log line. */
     private static final String ABSENT = "-";
 
     private static final Logger log = LoggerFactory.getLogger(ProblemErrorController.class);

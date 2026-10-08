@@ -3,103 +3,51 @@
  * paging. The hook behind `CustomerSearchPanel` (search page and Customer
  * picker alike).
  *
- * What it replaces. PMTCUSTR kept a 9,999-record expanding subfile fed by the
- * `ItemCur` cursor (5250_Subfile/PMTCUSTR.SQLRPGLE:208-223):
- *
- *   PMTCUSTR                                   Here
- *   SflClear + SflFirstPage on new criteria    `search(criteria)`: a new
- *     (:261-285, :532-545)                       generation, first page only
- *   SflFillPage on PageDown, 12 records plus   `next()`: one keyset page of
- *     one look-ahead fetch (:287-299, :556-600)  12 through `nextCursor`
- *   Subfile pages already written              the loaded pages, kept as the
- *                                                client-side cursor stack, so
- *                                                PageUp needs no request
- *   SFLEND(*MORE), PMTCUSTD :88                `more` ("More..." / "Bottom")
- *   MAXSFLRECDS 9999 and DEM0006 (:180, :290)  `limitReached`; the server
- *                                                cuts the list and sends the
- *                                                notice, re-sent by `next()`
- *   DEM0002 sets NewSearchCriteria (:539-541)  `pendingNewSearch`
- *   LastSearchCriteria (:150-154, :627)        `applied`
- *   Enter with nothing to process shows the    `toLastLoaded()`
- *     last loaded page,
- *     ((RcdsInSfl-1) div 12) * 12 + 1 (:506-513)
- *   SC_CSR_RCD on the first invalid or last    `showPageOf(custId)`
- *     processed option (:484-486, :667-674)
- *   ReadByKey + UpdSflRecd after an edit       `replaceRow(summary)`: the row
- *     (:454-457)                                 changes in place, unsorted
- *
- * The server holds no cursor between requests: each page is a stateless
- * `GET /api/customers` with `size=12` and the opaque `nextCursor` of the
- * page before it (keyset pagination). The infinite query's `pageParams` are
- * the cursor stack, so moving back is a local index change and no backward
- * keyset query exists.
+ * It replaces PMTCUSTR's 9,999-record expanding subfile fed by the `ItemCur`
+ * cursor (5250_Subfile/PMTCUSTR.SQLRPGLE:208-223). The server holds no cursor
+ * between requests: each page is a stateless `GET /api/customers` with
+ * `size=12` and the opaque `nextCursor` of the page before it. The infinite
+ * query's `pageParams` are the client-side cursor stack, so PageUp needs no
+ * request and no backward keyset query exists.
  *
  * Constraints:
- * - Criteria are sent exactly as shown on screen (the filter inputs already
- *   uppercase them as typed); the server trims, normalizes and validates
- *   them, so DEM0007 and the 9,999 cap are server rules, never decided here.
+ * - Criteria are sent exactly as shown on screen; the server trims,
+ *   normalizes and validates them, so DEM0007 and the 9,999 cap are server
+ *   rules, never decided here.
  * - Rows are never reordered or filtered client-side; the server's order
  *   (name, city, state, id) is the list's order.
- * - Messages. The hook holds no message text and renders nothing. A notice
- *   in a page (DEM0002 on an empty first page, DEM0006 on the page that
- *   reaches 9,999 rows) goes to `onNotice`, and a rejected request (an
- *   `ApiError`, such as 400 DEM0007) goes to `onError` uninspected. A
- *   response that arrives after its list was replaced by `search` or
- *   `reset`, or after the owner unmounted, reaches neither callback.
- * - Cancellation. The query function hands react-query's abort signal to
- *   `customersApi.search`, so react-query aborts the request of a list that
- *   `search` or `reset` replaced, or whose owner unmounted, as soon as the
- *   list loses its last observer; the abort's own rejection reaches no
- *   callback, and neither does the notice of a list that was aborted. An
- *   answer that did arrive is still reported while its list is current: a
- *   401 whose sign-out cancelled the query goes to `onError` as APP0401.
- *   The browser stops waiting, though the server may still finish the
- *   request. A page load of the current list is never aborted: PageUp,
- *   PageDown, `toLastLoaded` and `showPageOf` keep its query observed, and a
- *   `next` joining a load in flight requests nothing, so no second fetch
- *   cancels the first.
- * - No effect sets state. Requests start from event handlers (`search`,
- *   `next`) or, for Inquiry's load on open (PMTCUSTR :252-256), from the
- *   lazily initialised request that `initial` seeds; the query fetches it on
- *   mount.
+ * - Messages. The hook holds no message text, renders nothing and passes
+ *   rejections on uninspected. A response that arrives after its list was
+ *   replaced by `search` or `reset`, or after the owner unmounted, reaches
+ *   neither callback.
+ * - Cancellation. react-query's abort signal goes to `customersApi.search`,
+ *   so a replaced or unmounted list has its request aborted once it loses its
+ *   last observer; neither the abort's rejection nor that list's notice
+ *   reaches a callback. An answer that did arrive is still reported while its
+ *   list is current: a 401 whose sign-out cancelled the query reaches
+ *   `onError` as APP0401. A page load of the current list is never aborted:
+ *   navigation keeps its query observed.
+ * - No effect sets state. Requests start from `search` and `next` or, for
+ *   Inquiry's load on open, from the lazily initialised request `initial`
+ *   seeds, which the query fetches on mount.
  * - Paging while a page loads. No action is refused while a request is
- *   pending, and the latest explicit navigation decides the page shown:
- *   `search`, `reset`, `previous`, `toLastLoaded`, `showPageOf` and a
- *   `next` that moves each take a new navigation token. A `next` load that
- *   completes after any of them keeps its page with the loaded pages (the
- *   cursor stack, so a later `next` reaches it with no request) but leaves
- *   the page shown alone. A `next` at the deepest loaded page while that page
- *   loads joins the load, with no second request, and asks for its page
- *   again.
- * - One list per instance. Every mounted instance (the search page, each
- *   opening of a picker) keys its queries with an identity of its own, so
- *   two panels showing the same criteria under one `QueryClient` never share
- *   loaded pages, page loads or notices, and a reopened picker starts its
- *   first search from page 1.
+ *   pending; the latest explicit navigation decides the page shown. `search`,
+ *   `reset`, `previous`, `toLastLoaded`, `showPageOf` and a `next` that moves
+ *   each take a new navigation token, and a `next` load completing after one
+ *   of them keeps its page in the cursor stack without showing it. A `next`
+ *   at the deepest loaded page while that page loads joins the load, so no
+ *   second fetch cancels the first.
+ * - One list per instance ({@link nextInstanceId}): two panels showing the
+ *   same criteria under one `QueryClient` never share a list or its notices,
+ *   and a reopened picker starts its first search from page 1.
  * - Must run under a `QueryClientProvider`.
  * - Layer rule: imports only `api/customers`, React and TanStack Query.
- *
- * @example
- * ```tsx
- * const list = useCustomerSearch({
- *   initial: mode === 'inquiry' ? { name: '', city: '', state: '', includeInactive: false } : null,
- *   onNotice: (notice) => publish({ kind: 'status', text: notice.message }),
- *   onError: (error) => present(error, { setFieldErrors, focusField }),
- * });
- * // Enter: list.search({ ...typed, includeInactive }); PageDown:
- * if ((await list.next()) === 'none') publish({ kind: 'alert', text: format('DEM0003') });
- * <ResultsTable rows={list.page} ... />
- * ```
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import type { DefaultError, InfiniteData } from '@tanstack/react-query';
 import { customersApi } from '../../api/customers';
 import type { CustomerSummaryResponse, Notice, SearchResponse } from '../../api/customers';
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /** Rows per page: SFLPAG(0012) of PMTCUSTD, `SFLPAGESIZE` of PMTCUSTR (:134). */
 export const SEARCH_PAGE_SIZE = 12;
@@ -152,59 +100,74 @@ export interface UseCustomerSearchOptions {
  */
 export type NextOutcome = 'moved' | 'loaded' | 'bottom' | 'limit' | 'none';
 
-/** The list state and actions {@link useCustomerSearch} returns. */
 export interface UseCustomerSearchResult {
-  /** Criteria of the current list (LastSearchCriteria); `null` when no search is pending or loaded. */
+  /**
+   * Criteria of the current list (LastSearchCriteria, PMTCUSTR :150-154,
+   * :627); `null` when no search is pending or loaded.
+   */
   applied: SearchCriteria | null;
   /** The loaded pages in order, with {@link replaceRow} replacements applied. */
   pages: CustomerSummaryResponse[][];
   /** Rows of the page at {@link position}; empty when there is no list. */
   page: CustomerSummaryResponse[];
-  /** 0-based index of the page shown. */
+  /** Page shown, 0-based. */
   position: number;
   /** Rows loaded so far over every page (RcdsInSfl). */
   loadedCount: number;
-  /** At least one row is loaded. */
   hasList: boolean;
-  /** Rows follow the page shown: "More..." when true, "Bottom" when false (SFLEND(*MORE)). */
+  /** Rows follow the page shown: "More..." when true, "Bottom" when false (SFLEND(*MORE), PMTCUSTD :88). */
   more: boolean;
-  /** The deepest loaded page ended the list at 9,999 rows. */
+  /**
+   * The deepest loaded page ended the list at 9,999 rows (MAXSFLRECDS 9999,
+   * PMTCUSTR :180, :290): the server cut the list there and sent DEM0006.
+   */
   limitReached: boolean;
   /**
    * PMTCUSTR `NewSearchCriteria`: the next Enter must search. True with no
    * request, after a failed request (such as DEM0007), and after a first page
-   * that matched nothing (DEM0002).
+   * that matched nothing (DEM0002, :539-541).
    */
   pendingNewSearch: boolean;
-  /** A request (first or next page) is in flight. */
   loading: boolean;
   /**
    * The request in flight is PageDown's next page ({@link next}); while
    * {@link loading} is true and this is false, a first page is loading.
    */
   loadingNext: boolean;
-  /** Starts a new list from its first page, even for criteria identical to {@link applied}. */
+  /**
+   * Starts a new list from its first page, even for criteria identical to
+   * {@link applied} (SflClear + SflFirstPage, PMTCUSTR :261-285, :532-545).
+   */
   search: (criteria: SearchCriteria) => void;
   /**
-   * PageDown: shows the next page, loading it when needed. With `'moved'` or
+   * PageDown (SflFillPage: 12 records plus one look-ahead, PMTCUSTR :287-299,
+   * :556-600): shows the next page, loading it when needed. With `'moved'` or
    * `'loaded'` the page shown is the one after the page shown at the call.
    */
   next: () => Promise<NextOutcome>;
   /** PageUp: shows the previous loaded page; false at the first page or with no list. */
   previous: () => boolean;
-  /** Shows the last page loaded so far. */
+  /**
+   * Shows the last page loaded so far: the preserved source defect of Enter
+   * with nothing to process, ((RcdsInSfl-1) div 12) * 12 + 1 (PMTCUSTR
+   * :506-513).
+   */
   toLastLoaded: () => void;
-  /** Shows the loaded page that holds `custId`; no change when no loaded page holds it. */
+  /**
+   * Shows the loaded page that holds `custId` (SC_CSR_RCD on the first invalid
+   * or last processed option, PMTCUSTR :484-486, :667-674); no change when no
+   * loaded page holds it.
+   */
   showPageOf: (custId: string) => void;
   /** Empties the list; the next Enter searches (F5, or a State changed through F4). */
   reset: () => void;
-  /** Replaces the row with `summary.custId` wherever it is loaded, in place, until the next `search` or `reset`. */
+  /**
+   * Replaces the row with `summary.custId` wherever it is loaded, until the
+   * next `search` or `reset`. As with ReadByKey + UpdSflRecd after an edit
+   * (PMTCUSTR :454-457), the row changes in place and is not re-sorted.
+   */
   replaceRow: (summary: CustomerSummaryResponse) => void;
 }
-
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
 
 /**
  * One list: its criteria and a generation number. Every `search` and `reset`
@@ -216,7 +179,6 @@ interface SearchRequest {
   readonly generation: number;
 }
 
-/** The pages of one list and the cursor each was requested with (`null` for the first page). */
 type SearchData = InfiniteData<SearchResponse, string | null>;
 
 /**
@@ -226,7 +188,7 @@ type SearchData = InfiniteData<SearchResponse, string | null>;
  */
 type SearchQueryKey = readonly ['customers', 'search', number, SearchCriteria | undefined, number | undefined];
 
-/** Shared empty values, so an empty list keeps a stable identity across renders. */
+/** Stable identities across renders. */
 const EMPTY_PAGE: CustomerSummaryResponse[] = [];
 const EMPTY_OVERRIDES: ReadonlyMap<string, CustomerSummaryResponse> = new Map();
 
@@ -272,31 +234,24 @@ function browsablePages(data: SearchData | undefined): SearchResponse[] {
   return data.pages.filter((response, index) => index === 0 || response.items.length > 0);
 }
 
-// ---------------------------------------------------------------------------
-// The hook
-// ---------------------------------------------------------------------------
-
 /**
  * The customer search list: criteria, loaded pages, the page shown and
- * PageDown/PageUp, as PMTCUSTR's subfile kept them. See the module comment
- * for the source mapping and the constraints.
+ * PageDown/PageUp, as PMTCUSTR's subfile kept them. The module comment states
+ * the constraints; a member of {@link UseCustomerSearchResult} that replaces a
+ * PMTCUSTR or PMTCUSTD element cites it.
  */
 export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustomerSearchResult {
   const { initial = null, onNotice, onError } = options;
 
-  // This instance's identity, fixed for its lifetime and part of every query
-  // key it uses, so two panels, or two openings of a picker, never share a list.
   const [instanceId] = useState(nextInstanceId);
-  // The list requested; seeded from `initial` so Inquiry loads on open without an effect.
   const [request, setRequest] = useState<SearchRequest | null>(() =>
     initial === null ? null : { criteria: { ...initial }, generation: 0 },
   );
   // Requested page index; clamped to the loaded pages when read (see `position`).
   const [positionIndex, setPositionIndex] = useState(0);
-  // Rows replaced after an edit, keyed by customer id.
   const [overrides, setOverrides] = useState<ReadonlyMap<string, CustomerSummaryResponse>>(EMPTY_OVERRIDES);
 
-  // Read only in handlers and in the query function, never during render.
+  // Never read during render.
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
   const callbacksRef = useRef({ onNotice, onError });
@@ -307,13 +262,12 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
   // loaded page is shown only while no other navigation has taken a newer one.
   const nextNavigationRef = useRef(0);
 
-  // Keep the latest callbacks for responses that arrive later; this effect only assigns the ref.
+  // The latest callbacks, for responses that arrive later.
   useEffect(() => {
     callbacksRef.current = { onNotice, onError };
   }, [onNotice, onError]);
 
-  // Responses arriving after unmount reach no callback. Setting true again on
-  // mount keeps StrictMode's simulated unmount and remount working.
+  // Set true again on mount for StrictMode's simulated unmount and remount.
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -326,10 +280,9 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     queryFn: async ({ queryKey, pageParam, signal }): Promise<SearchResponse> => {
       const [, , , criteria, generation] = queryKey;
       if (criteria === undefined || generation === undefined) {
-        // The query is disabled without a request, so this cannot be reached.
+        // Unreachable: the query is disabled without a request.
         throw new Error('useCustomerSearch: no search is requested');
       }
-      // Whether this list is still the one a mounted owner shows.
       const isCurrent = (): boolean => mountedRef.current && generationRef.current === generation;
       let response: SearchResponse;
       try {
@@ -345,18 +298,17 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
           signal,
         );
       } catch (error) {
-        // The abort's own rejection is never reported: react-query aborts a
-        // request once its list lost its last observer, which StrictMode's
-        // simulated unmount also does after `mountedRef` is true again. An
-        // answer that did arrive (a 401 whose sign-out cancelled this very
-        // query among them) is still reported while the list is current.
+        // `abandoned` marks the abort's own rejection, which StrictMode's
+        // simulated unmount also causes after `mountedRef` is true again, so
+        // `isCurrent` alone cannot drop it. An answer that did arrive is never
+        // `signal.reason`: a 401 whose sign-out cancelled this very query is
+        // still reported.
         const abandoned = signal.aborted && error === signal.reason;
         if (isCurrent() && !abandoned) {
           callbacksRef.current.onError(error);
         }
         throw error;
       }
-      // An aborted list is obsolete, and so is its notice.
       if (response.notice !== null && isCurrent() && !signal.aborted) {
         callbacksRef.current.onNotice(response.notice);
       }
@@ -365,7 +317,7 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     enabled: request !== null,
     initialPageParam: null,
     getNextPageParam: (last: SearchResponse) => last.nextCursor ?? undefined,
-    // A failed search is reported once and shown as such (DEM0007 is not transient).
+    // No retry: a rejection such as DEM0007 is not transient.
     retry: false,
     // A list changes only through `search`, `next` and `reset`: never refetched
     // behind the user's back, and dropped as soon as a new generation replaces it.
@@ -449,12 +401,11 @@ export function useCustomerSearch(options: UseCustomerSearchOptions): UseCustome
     const loading = (async (): Promise<NextOutcome> => {
       const result = await fetchNextPage();
       if (!mountedRef.current || generationRef.current !== generation) {
-        // The list was replaced or reset meanwhile; its new state stands.
         return 'bottom';
       }
       const loaded = browsablePages(result.data).length;
       if (result.isFetchNextPageError || loaded <= pageCount) {
-        // Failed (already sent to onError) or no further rows: stay.
+        // Failed, or no page with rows was added.
         return 'bottom';
       }
       if (navigationRef.current !== nextNavigationRef.current) {

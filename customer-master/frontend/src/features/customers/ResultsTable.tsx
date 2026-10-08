@@ -1,75 +1,34 @@
 /**
- * ResultsTable: one page of the customer search results (PMTCUSTD subfile).
- *
- * It replaces the PMTCUSTD `SFL` record and the column headings of its
- * `SFLCTL` record (5250_Subfile/PMTCUSTD.DSPF:57-72, :105-118):
- *
- *   PMTCUSTD                                  Here
- *   'Opt' DSPATR(HI) + SF_OPT 1A B            "Opt" column: a one-character text
- *     DSPATR(RI) on indicator 81                input, `aria-invalid="true"` (the
- *                                               reverse image of global.css) when
- *                                               the panel marks it invalid. Its id
- *                                               is a `useId()` prefix plus the
- *                                               row's `custId`, and a visually
- *                                               hidden `<label for>` in the same
- *                                               cell names it "Option for <name>".
- *                                               While invalid, `aria-describedby`
- *                                               names a visually hidden element in
- *                                               the cell, id `<input id>-error`,
- *                                               holding the panel's DEM0004 text
- *   'Customer Name' + SF_NAME 40A             "Customer Name" column
- *   'City'          + SF_CITY 20A             "City" column
- *   'St'            + SF_STATE 2A             "St" column
- *   'ZIP'           + SF_ZIP 5A               "ZIP" column: `zip5`, the first five
- *                                               characters of the stored ZIP
- *   COLOR(RED) on indicator 83, set from      `row--inactive` on the row, plus a
- *     SF_ACT_H = 'N' in UpdSflRecd              visually hidden "Inactive" after
- *     (PMTCUSTR.SQLRPGLE:604-612)               the name, so colour is not the
- *                                               only signal
- *   SF_CUST_H 4D hidden                       `custId`, the row key and the id
- *                                               every callback receives
+ * ResultsTable: one page of the customer search results. It replaces the
+ * PMTCUSTD `SFL` record and the column headings of its `SFLCTL` record
+ * (5250_Subfile/PMTCUSTD.DSPF:57-72, :105-118).
  *
  * The list arrives ordered `NAME, CITY, STATE` (PMTCUSTR.SQLRPGLE:220, with
  * the id as the server's final tiebreak), so those three headings carry
  * `aria-sort="ascending"` and the `is-sorted` highlight. The order is fixed:
- * the headings are not sort controls.
+ * the headings are not sort controls. ZIP shows `zip5`, the first five
+ * characters of the stored ZIP (`SF_ZIP 5A`). An inactive row (indicator 83,
+ * set from `SF_ACT_H = 'N'`, PMTCUSTR.SQLRPGLE:604-612) gets `row--inactive`
+ * plus a visually hidden "Inactive" after the name, so colour is not the only
+ * signal.
  *
- * Row actions. On the 5250 the user keys 1, 2 or 5 into a row's Opt field
- * and presses Enter. That path stays: the Opt input is a text input marked
- * `data-option-input`, which the keyboard scope's Enter rule treats as a
- * command target. A trailing "Actions" column adds one button per option the
- * current mode allows, so each action is also reachable without knowing the
- * option codes. A button only reports `onAction(custId, option)`; the owning
- * panel handles it exactly as that option typed into the row followed by
- * Enter.
+ * Opt is a one-character text input whose id is a `useId()` prefix plus the
+ * row's `custId`, named "Option for <name>" by a visually hidden
+ * `<label for>`. While the panel marks it invalid, it carries
+ * `aria-invalid="true"` (indicator 81's reverse image) and `aria-describedby`
+ * naming a visually hidden `<input id>-error` that holds the panel's DEM0004
+ * text, which outlasts the alert. It is marked `data-option-input`, so the
+ * keyboard scope's Enter rule treats it as a command target. The action
+ * buttons make each option reachable without knowing its code: a button only
+ * reports `onAction`, and the panel handles it exactly as that option typed
+ * into the row followed by Enter.
  *
- * Responsibilities stop at rendering and collecting input. The component
- * holds no state, fetches nothing, has no message text of its own and
- * validates no option: which options are valid in which mode, DEM0004 for an
- * invalid one (its catalog text, which the panel also alerts, arrives in
- * `invalid` and is only rendered here, so the rejection is still explained
- * after the alert clears), focusing the first invalid option (the source's
- * indicator 82, `DSPATR(PC)`), and uppercasing what is typed all belong to
- * the panel that owns `options` and `invalid`. Each typed value is reported
- * unchanged through `onOptionChange`. Names, cities, codes and the DEM0004
- * texts are rendered as plain React text, so `NIBH L'LOR COMPANY` and
+ * The component is stateless and validates nothing. The panel owns which
+ * options each mode allows, DEM0004, focusing the first invalid option
+ * through `optionRef` (indicator 82, `DSPATR(PC)`) and uppercasing; each
+ * typed value is reported unchanged through `onOptionChange`. Names, cities
+ * and codes render as plain React text, so `NIBH L'LOR COMPANY` and
  * `URNA \NUNC\ COMPANY` show exactly as stored.
- *
- * An empty `rows` renders the caption and the headings over an empty body;
- * whether to show the table at all is the panel's decision. While the panel
- * loads rows, `busy` marks the table `aria-busy="true"`; the pending and page
- * status text is the panel's own.
- *
- * @example
- * <ResultsTable
- *   rows={page.items}
- *   options={options}
- *   invalid={invalidOptions}
- *   allowedOptions={['2', '5']}
- *   onOptionChange={(custId, value) => setOptions((o) => ({ ...o, [custId]: value }))}
- *   onAction={(custId, option) => runOption(custId, option)}
- *   optionRef={(custId) => (el) => { optionInputs.current[custId] = el; }}
- * />
  */
 import { useId } from 'react';
 import type { CustomerSummaryResponse } from '../../api/customers';
@@ -82,31 +41,25 @@ export type RowOption = '1' | '2' | '5';
 
 /** Props of {@link ResultsTable}. `options` and `invalid` are keyed by `custId`. */
 export interface ResultsTableProps {
-  /** The customers of the current page, in the order the server returned them. */
-  rows: CustomerSummaryResponse[];
-  /** The text typed into each row's Opt input, keyed by `custId`; a missing key shows an empty field. */
-  options: Record<string, string>;
   /**
-   * Rows whose option the panel rejected, keyed by `custId`, each with the
-   * DEM0004 text the panel alerted for it. A non-empty entry marks that row's
-   * Opt input `aria-invalid="true"` and renders the text as the input's
-   * visually hidden description (`aria-describedby`), which stays while the
-   * entry does.
+   * The customers of the current page, rendered in the order given; an empty
+   * array renders the headings over an empty body.
    */
+  rows: CustomerSummaryResponse[];
+  /** The text typed into each row's Opt input; a missing key shows an empty field. */
+  options: Record<string, string>;
+  /** The DEM0004 text of each rejected row; a non-empty entry marks that row's Opt input invalid. */
   invalid: Record<string, string>;
   /**
    * The options the current mode offers, one action button each. Buttons are
    * always rendered in the order 1, 2, 5, whatever the order here.
    */
   allowedOptions: RowOption[];
-  /** Receives every change of one row's Opt input with the value as typed. */
+  /** Receives every change of one row's Opt input. */
   onOptionChange: (custId: string, value: string) => void;
-  /** Receives an action button press: the panel runs `option` for `custId` as if typed and entered. */
+  /** Receives each action button press. */
   onAction: (custId: string, option: RowOption) => void;
-  /**
-   * Optional ref factory for the Opt inputs, so the panel can focus the
-   * first invalid option. Called once per row and render with its `custId`.
-   */
+  /** Optional ref factory for the Opt inputs, called once per row and render with its `custId`. */
   optionRef?: (custId: string) => (el: HTMLInputElement | null) => void;
   /** Accessible table caption; visually hidden, as the 5250 screen shows none. Defaults to "Customers". */
   caption?: string;
@@ -117,27 +70,20 @@ export interface ResultsTableProps {
   busy?: boolean;
 }
 
-/** The order the action buttons appear in, which is the option-code order of the source legends. */
+/** The option-code order of the source legends. */
 const OPTION_ORDER: readonly RowOption[] = ['1', '2', '5'];
 
-/** The visible verb of each option's action button, from the PMTCUSTR option legends. */
+/** From the PMTCUSTR option legends. */
 const OPTION_VERBS: Readonly<Record<RowOption, string>> = {
   '1': 'Select',
   '2': 'Edit',
   '5': 'Display',
 };
 
-/** The default accessible caption of the table. */
 const DEFAULT_CAPTION = 'Customers';
 
-/** The stored value of an inactive customer (`ACTIVE = 'N'`, indicator 83). */
 const INACTIVE = 'N';
 
-/**
- * The search results table: a caption, the Opt, Customer Name, City, St and
- * ZIP headings plus a visually hidden "Actions" heading, and one row per
- * entry of `rows`.
- */
 export function ResultsTable({
   rows,
   options,
@@ -152,7 +98,6 @@ export function ResultsTable({
   // Opt input ids are `${idPrefix}-opt-${custId}`: unique per row, and per
   // table, so a Customer picker's table over the search page shares no id.
   const idPrefix = useId();
-  // Fixed order and no duplicates, however the panel lists its options.
   const actions = OPTION_ORDER.filter((option) => allowedOptions.includes(option));
 
   return (
@@ -184,13 +129,11 @@ export function ResultsTable({
           const name = row.name ?? '';
           const inactive = row.active === INACTIVE;
           const optionId = `${idPrefix}-opt-${custId}`;
-          // The rejection text while the panel keeps the row marked; empty or absent is valid.
           const error = invalid[custId] ?? '';
           const errorId = `${optionId}-error`;
           return (
             <tr key={custId} className={inactive ? 'row--inactive' : undefined}>
               <td>
-                {/* Every input has a <label for>; this hidden one names the Opt input "Option for <name>". */}
                 <label htmlFor={optionId} className="visually-hidden">
                   {`Option for ${name}`}
                 </label>

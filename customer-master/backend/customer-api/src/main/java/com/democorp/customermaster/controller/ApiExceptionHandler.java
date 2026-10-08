@@ -2,6 +2,7 @@ package com.democorp.customermaster.controller;
 
 import com.democorp.customermaster.address.AddressServiceUnavailableException;
 import com.democorp.customermaster.config.ConnectionPoolSaturation;
+import com.democorp.customermaster.config.RedactedThrowable;
 import com.democorp.customermaster.controller.ProblemFactory.FieldProblem;
 import com.democorp.customermaster.controller.dto.CustomerResponse;
 import com.democorp.customermaster.service.exception.CustomerIdExhaustedException;
@@ -75,14 +76,11 @@ import org.springframework.web.util.UrlPathHelper;
  * The status map for every exception that reaches Spring MVC: each one becomes an RFC 9457
  * {@code application/problem+json} response built by {@link ProblemFactory}.
  *
- * <p><b>What it replaces.</b> On the IBM i, a program reported a condition by sending a {@code CUSTMSGF}
- * message id and its substitution data to the message subfile through {@code SndMsgPgmQ}
- * ({@code Service_Pgms/SRV_MSG.RPGLE:69-177}); MTNCUSTR's {@code UpdateRecd} turned "no row updated" into
- * DEM1002 and "row locked" (SQLSTATE 57033) into DEM1001 ({@code 5250_Subfile/MTNCUSTR.SQLRPGLE:593-606});
- * and every other SQL failure went to {@code SQLProblem} ({@code Service_Pgms/SRV_SQL.SQLRPGLE:20-57}), which
- * read {@code GET DIAGNOSTICS}, dumped the program and ended it with a CPF9898 escape message carrying the
- * SQLSTATE and the SQL message text. Here the services throw typed exceptions, and this class maps them,
- * exactly once, to the status and catalog code below.
+ * <p>It replaces the message-subfile reporting of {@code SndMsgPgmQ}
+ * ({@code Service_Pgms/SRV_MSG.RPGLE:69-177}), the DEM1002 and DEM1001 branches of MTNCUSTR's
+ * {@code UpdateRecd} ({@code 5250_Subfile/MTNCUSTR.SQLRPGLE:593-606}) and {@code SQLProblem}
+ * ({@code Service_Pgms/SRV_SQL.SQLRPGLE:20-57}): the services throw typed exceptions, and this class maps
+ * each, exactly once, to the status and catalog code below.
  *
  * <p><b>Status map.</b>
  * <table>
@@ -116,22 +114,19 @@ import org.springframework.web.util.UrlPathHelper;
  * </table>
  *
  * <p><b>What never travels.</b> No body carries SQL text, an SQLSTATE, a stack trace, an exception message
- * or a class name. The SQLSTATE of a 500 goes only to its ERROR log line, found through
- * {@link ProblemFactory#findSqlState(Throwable)}, beside the same {@code errorId} the body carries. That
- * line logs the exception as its {@link RedactedThrowable} copy, types and stack frames without any
- * message, so neither the customer values a persistence failure quotes nor control characters reach the
- * log. The reasons of {@code APP0400} are fixed English phrases that name at most a property or parameter,
- * never a value the client sent.
+ * or a class name. The SQLSTATE of a 500 ({@link ProblemFactory#findSqlState(Throwable)}) and the
+ * {@link RedactedThrowable} copy of its exception, types and stack frames without any message, go only to
+ * its ERROR log line, beside the {@code errorId} the body carries, so no customer value or control
+ * character reaches the log. The reasons of {@code APP0400} are fixed English phrases that name at most a
+ * property or parameter, never a value the client sent.
  *
- * <p><b>Scope.</b> Failures that never reach a controller (servlet filter exceptions, {@code sendError},
- * failures before handler mapping) are forwarded by the container to {@code /error} and answered by
- * {@link ProblemErrorController} with the same map; 401 and 403 decided by the security filter chain are
- * written by the security configuration's entry point and access-denied handler. The advice is
- * {@link Hidden} so springdoc derives no generic responses from it: each controller operation declares the
- * error responses of its own outcomes, and {@link ProblemResponsesCustomizer} adds the 405, 406 and 500
- * responses every operation shares and the 415 of every operation with a request body, all described by
- * the {@code Problem} schema. The web-application condition keeps it out of the generator's non-web
- * context.
+ * <p><b>Scope and wiring.</b> Failures that never reach a controller are answered on the container's ERROR
+ * dispatch by {@link ProblemErrorController} with the same map; 401 and 403 decided by the security filter
+ * chain are written by the entry point and access-denied handler of {@code SecurityConfig}. The advice is
+ * {@link Hidden}, so springdoc derives no generic responses from it; each operation declares its own error
+ * responses, and {@link ProblemResponsesCustomizer} adds the 405, 406 and 500 every operation shares and
+ * the 415 of every operation with a request body. The web-application condition keeps it out of the
+ * generator's non-web context.
  *
  * <p><b>Thread safety.</b> The only instance state is the final, thread-safe {@link ProblemFactory} and
  * {@link ConnectionPoolSaturation}; every method works on request-local values, so one instance serves
@@ -172,31 +167,15 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     /** Longest property or parameter name quoted in an {@code APP0400} reason, in code points. */
     static final int MAX_NAME_LENGTH = 64;
 
-    /** Reason of an unreadable body that names no property. */
     static final String REASON_MALFORMED_BODY = "malformed request body";
-
-    /** Reason of a request that matched no route and no static resource. */
     static final String REASON_NO_SUCH_RESOURCE = "no such resource";
-
-    /** Reason of a 405. */
     static final String REASON_METHOD_NOT_ALLOWED = "method not allowed";
-
-    /** Reason of a 406. */
     static final String REASON_NOT_ACCEPTABLE = "not acceptable";
-
-    /** Reason of a 415. */
     static final String REASON_UNSUPPORTED_MEDIA_TYPE = "unsupported media type";
-
-    /** Reason of a 4xx status that has no standard reason phrase. */
     static final String REASON_CLIENT_ERROR = "client error";
-
-    /** Subject of a constraint violation on the request body as a whole rather than one property. */
     static final String SUBJECT_REQUEST_BODY = "request body";
-
-    /** Subject used when a parameter or property has no usable name. */
     static final String SUBJECT_UNNAMED = "parameter";
 
-    /** Placeholder for an absent value in a log line. */
     private static final String ABSENT = "-";
 
     /** Upper bound on the cause chain walked when looking for the Jackson failure of a body. */

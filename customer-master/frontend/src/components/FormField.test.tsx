@@ -1,29 +1,8 @@
 /**
- * Component tests for {@link FormField}, the labelled input every form uses.
- *
- * What is under test, and the 5250 behaviour each part replaces:
- *
- * - **Uppercase as typed** (`uppercase`). No MTNCUSTD or PMTCUSTD input field
- *   declares `CHECK(LC)`, so the workstation uppercased every keyed character
- *   (`SD_NAME 40`, `SC_NAME 13A`). The prop applies the shared
- *   length-preserving rule of `./upperField` on every change: `ß` stays `ß`
- *   (its full mapping `SS` is two code points), the caret stays at the typed
- *   offset, `maxLength` keeps counting typed characters, and the submitted
- *   value is exactly the value shown.
- * - **Error attributes** (`error`). The RI indicator of each MTNCUSTD field
- *   (`DSPATR(RI)`) becomes `aria-invalid="true"` plus a visible message the
- *   input references through `aria-describedby`.
- * - **Cursor position** (`inputRef`). `DSPATR(PC)` becomes focus that the
- *   caller moves through the ref.
- * - **Protection** (`readOnly`). `DSPATR(PR)` under indicator 10 becomes the
- *   `readonly` attribute and the `read-only` class.
- *
- * Behaviour and attributes are asserted; markup is never snapshotted, so a
- * layout change that keeps the contract does not break these tests.
- *
- * The shared test base (`src/test/setup.ts`) supplies the jest-dom matchers
- * and the cleanup between tests. `FormField` makes no request and needs no
- * provider, so nothing is rendered around the harness.
+ * Component tests for {@link FormField}. Behaviour and attributes are
+ * asserted; markup is never snapshotted, so a layout change that keeps the
+ * contract does not break these tests. `FormField` makes no request and needs
+ * no provider, so nothing is rendered around the harness.
  */
 import { createRef, useState } from 'react';
 import type { Ref } from 'react';
@@ -32,17 +11,12 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { FormField } from './FormField';
 
-/** Props of {@link Harness}. */
 type HarnessProps = {
-  /** Forwarded to `FormField`. */
   uppercase?: boolean;
-  /** Forwarded to `FormField`; defaults to 40, the MTNCUSTD `SD_NAME` length. */
+  /** Defaults to 40, the MTNCUSTD `SD_NAME` length. */
   maxLength?: number;
-  /** Forwarded to `FormField`. */
   error?: string;
-  /** Forwarded to `FormField`. */
   readOnly?: boolean;
-  /** Forwarded to `FormField`. */
   inputRef?: Ref<HTMLInputElement>;
   /** The value the controlled state starts with; empty by default. */
   initialValue?: string;
@@ -85,7 +59,6 @@ function Harness(props: HarnessProps) {
   );
 }
 
-/** The harness's input, found the way a user finds it: by its label. */
 function nameInput(): HTMLInputElement {
   return screen.getByLabelText<HTMLInputElement>('Name');
 }
@@ -188,7 +161,6 @@ describe('FormField', () => {
       expect(input.value).toHaveLength(40);
       expect(input.value).toBe('ß' + 'A'.repeat(39));
 
-      // A forty-first character is refused by the browser's length limit.
       await user.type(input, 'b');
 
       expect(input.value).toHaveLength(40);
@@ -340,7 +312,6 @@ describe('FormField', () => {
       const input = nameInput();
 
       expect(inputRef.current).toBe(input);
-      // FormField never focuses itself; the caller does it through the ref.
       expect(input).not.toHaveFocus();
 
       inputRef.current?.focus();

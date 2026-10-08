@@ -1,71 +1,22 @@
 /**
- * CustomerForm: the customer detail fields (MTNCUSTD record DETAILS).
+ * CustomerForm: the DETAILS record of the MTNCUSTD window
+ * (5250_Subfile/MTNCUSTD.DSPF:54-133), as FillScreenFields fills it
+ * (5250_Subfile/MTNCUSTR.SQLRPGLE:340-363). Its display indicators become
+ * FormField props: DSPATR(RI) and (PC) become `errors` and focus, DSPATR(PR)
+ * becomes `readOnly`, and the Customer Id is protected in every mode.
  *
- * It replaces the DETAILS record of the MTNCUSTD window
- * (5250_Subfile/MTNCUSTD.DSPF:54-133), which MTNCUSTR fills in
- * FillScreenFields (5250_Subfile/MTNCUSTR.SQLRPGLE:340-363):
+ * Two traits of the USPS variant (USPS_Address/MTNCUSTD.DSPF) are not
+ * carried: its CHECK(LC), so every field uppercases as typed, and its
+ * zoned-numeric `SD_CUSTID 4 0`, so the id is the 4-character base-36 string.
+ * "Active (Y/N)" is a one-character text input rather than a checkbox, so any
+ * keyed value reaches the server and its DEM0501 rule stays reachable from
+ * the keyboard.
  *
- *   MTNCUSTD field (length)            Here (label, maxLength)
- *   'Customer Id'      SD_CUSTID  4    "Customer Id", 4, always protected
- *   'Active Status'    SD_ACTIVE  1    "Active (Y/N)", 1
- *   'Name'             SD_NAME   40    "Name", 40
- *   'Address'          SD_ADDR   40    "Address", 40
- *   'City'             SD_CITY   20    "City", 20
- *   'ST+'              SD_STATE   2    "State +", 2
- *   'ZIP'              SD_ZIP    10    "ZIP", 10
- *   'Account Manager'
- *      'Phone'         SD_ACCTPH 20    "Account Manager Phone", 20
- *      'Name'          SD_ACCTMGR 40   "Account Manager Name", 40
- *   'Corporate Phone'  SD_CORPPH 20    "Corporate Phone", 20
- *   'Last Change' SD_CHGTIME 'by' SD_CHGUSER, non-display unless
- *     indicator 61                     "Last Change … by …", or nothing
- *
- * The stamp line is {@link ChangeStampLine}, exported for the confirmation
- * panel too: FillScreenFields also runs for the edit confirmation
- * (5250_Subfile/MTNCUSTR.SQLRPGLE:221-225), so the stored record's stamp
- * stays on the window in both phases.
- *
- * Each input field's indicator-driven display attributes become props of
- * the shared FormField rather than indicators:
- *   - DSPATR(RI), reverse image on error, and DSPATR(PC), cursor on error:
- *     `errors[field]` marks the input `aria-invalid="true"` with its message
- *     linked through `aria-describedby`; the owning dialog moves focus to the
- *     first field in error through `inputRef` or `initialFocusField`.
- *   - DSPATR(PR) under indicator 10 (protect all, display mode): `readOnly`.
- *     The Customer Id is protected in every mode, as SD_CUSTID is an output
- *     field; it is blank in add mode until the server assigns an id.
- *
- * The USPS variant of the display file (USPS_Address/MTNCUSTD.DSPF) has the
- * same fields. Its CHECK(LC) on Name, Address, City and Account Manager Name
- * is not carried, so every field uppercases as typed like the 5250 variant,
- * and its zoned-numeric `SD_CUSTID 4 0` is not carried either: the id is the
- * 4-character base-36 string.
- *
- * Responsibilities stop at rendering and collecting input. The component
- * holds no field values, sends no request and applies no business rule: the
- * nine field rules, trimming and address standardization belong to the
- * server (`POST /api/customers/review`), and the shared length-preserving
- * uppercase rule is applied by FormField's `uppercase` prop alone. The
- * "Active (Y/N)" field is a one-character text input rather than a checkbox,
- * so any keyed value reaches the server and its DEM0501 rule stays reachable
- * from the keyboard.
- *
- * Layer rule: imports come from `api/` (types and the field-name list),
- * `components/` and this folder only.
- *
- * @example
- * <CustomerForm
- *   key={formKey}
- *   idPrefix="customer-detail"
- *   custId={record?.custId ?? ''}
- *   values={draft}
- *   onChange={(field, value) => setDraft((d) => ({ ...d, [field]: value }))}
- *   readOnly={mode === 'display'}
- *   errors={errorsByField}
- *   inputRef={(field) => (el) => { inputs.current[field] = el; }}
- *   initialFocusField="name"
- *   stamp={record ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
- * />
+ * The component holds no field values, sends no request and applies no
+ * business rule: the field rules, trimming and address standardization belong
+ * to the server (`POST /api/customers/review`), and uppercasing to FormField's
+ * `uppercase` prop alone. Layer rule: imports only types from `api/`, plus
+ * `components/` and this folder.
  */
 import { useEffect, useRef, useState } from 'react';
 // CUSTOMER_FIELD_NAMES is read only through `typeof`, by the compile-time
@@ -74,20 +25,11 @@ import type { CUSTOMER_FIELD_NAMES, CustomerFields } from '../../api/customers';
 import { FormField } from '../../components/FormField';
 import { formatChangeStamp } from './formatChangeStamp';
 
-// ---------------------------------------------------------------------------
-// Field table
-// ---------------------------------------------------------------------------
-
-/** One of the nine customer data fields, by its JSON property name. */
 export type CustomerFieldName = keyof CustomerFields;
 
-/** One row of {@link CUSTOMER_FORM_FIELDS}: a data field, its label and its 5250 length. */
 export interface CustomerFormFieldSpec {
-  /** The JSON property name, also the suffix of the input id. */
   field: CustomerFieldName;
-  /** Visible label; tests and the e2e specs locate the inputs by it. */
   label: string;
-  /** The MTNCUSTD field length, which is also the column size on the server. */
   maxLength: number;
 }
 
@@ -130,10 +72,10 @@ type ScreenOrderTable =
     : never;
 
 /**
- * The nine customer data fields in screen order, MTNCUSTD row by row: Active,
- * Name, Address, City, State, ZIP, Account Manager Phone, Account Manager
- * Name, Corporate Phone (5250_Subfile/MTNCUSTD.DSPF:61-125). It is the order
- * of `CUSTOMER_FIELD_NAMES`, in which the server runs and reports the field
+ * The nine data fields in MTNCUSTD screen order, each with its MTNCUSTD
+ * length, which is also the server column size
+ * (5250_Subfile/MTNCUSTD.DSPF:61-125). The order is that of
+ * `CUSTOMER_FIELD_NAMES`, in which the server runs and reports the field
  * rules, so the first field in error is also the first one on screen.
  *
  * The labels are the one definition shared by this form, the confirmation
@@ -155,7 +97,7 @@ export const CUSTOMER_FORM_FIELDS: ReadonlyArray<CustomerFormFieldSpec> = [
   { field: 'corpPhone', label: 'Corporate Phone', maxLength: 20 },
 ] satisfies ScreenOrderTable;
 
-/** The SD_CUSTID length: a customer id is four base-36 characters. */
+/** The SD_CUSTID length. */
 const CUSTOMER_ID_LENGTH = 4;
 
 /**
@@ -166,11 +108,6 @@ const CUSTOMER_ID_LENGTH = 4;
 function keepCustomerId(_value: string): void {
   return undefined;
 }
-
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
 
 /**
  * The last-change stamp of a stored customer: the `chgTime` and `chgUser`
@@ -184,7 +121,6 @@ export interface CustomerChangeStamp {
   chgUser: string;
 }
 
-/** Props of {@link ChangeStampLine}. */
 export interface ChangeStampLineProps {
   /**
    * The stored customer's change stamp, or `null`/absent when there is no
@@ -207,7 +143,6 @@ export function ChangeStampLine({ stamp }: ChangeStampLineProps) {
   return stampText !== null ? <p className="change-stamp">Last Change {stampText}</p> : null;
 }
 
-/** Props of {@link CustomerForm}. */
 export interface CustomerFormProps {
   /**
    * Prefix of every input id: the Customer Id is `${idPrefix}-custId` and
@@ -256,11 +191,7 @@ export interface CustomerFormProps {
   stamp?: CustomerChangeStamp | null;
 }
 
-/**
- * The detail fields. Renders the protected Customer Id, then the nine data
- * fields in screen order, then the "Last Change … by …" line
- * ({@link ChangeStampLine}) when the stamp is visible.
- */
+/** The detail form: the protected Customer Id, the nine data fields, then the stamp line. */
 export function CustomerForm({
   idPrefix,
   custId,

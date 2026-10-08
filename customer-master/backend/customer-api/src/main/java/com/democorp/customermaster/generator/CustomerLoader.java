@@ -24,20 +24,16 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p><b>What it replaces.</b>
  * <ul>
- *   <li>LOADCUSTR's {@code truncate} of CUSTMAST followed by one
- *       {@code insert ... values(:Fld)} into CUSTMAST per generated row, all under commitment control
- *       {@code *NONE} [5250_Subfile/LOADCUSTR.SQLRPGLE:90-98,131-207]. A failure part-way left the table
- *       truncated and partly loaded. Here the truncate, the rows and the sequence restart commit or roll
- *       back together.</li>
+ *   <li>LOADCUSTR's {@code truncate} of CUSTMAST and one {@code insert} per generated row under
+ *       commitment control {@code *NONE} [5250_Subfile/LOADCUSTR.SQLRPGLE:90-98,131-207], where a
+ *       failure part-way left the table truncated and partly loaded.</li>
  *   <li>The {@code ALCOBJ OBJ((CUSTMAST *FILE *EXCLRD)) WAIT(5)} guard with its {@code CPF1002} handler
- *       "Cannot allocate CUSTMAST" in LOADCUST and LOADCUST2 [5250_Subfile/LOADCUST.CLLE:6-14],
- *       [5250_Subfile/LOADCUST2.CLLE:10-18]. It becomes {@code SET LOCAL lock_timeout = '5s'} plus
- *       {@link CustomerIdAllocator#lockForLoad()} ({@code LOCK TABLE custmast IN ACCESS EXCLUSIVE MODE}).
- *       The source checked the lock and then released it before submitting the job; here the lock is
- *       held for the whole load.</li>
- *   <li>LOADCUSTR's private BASE36ADD counter, which never updated CUSTNEXT, so later interactive adds
- *       could collide with loaded ids [5250_Subfile/LOADCUSTR.SQLRPGLE:133-137]. Here the load restarts
- *       the one sequence every writer shares, inside its own transaction.</li>
+ *       "Cannot allocate CUSTMAST" [5250_Subfile/LOADCUST.CLLE:6-14],
+ *       [5250_Subfile/LOADCUST2.CLLE:10-18], which checked the lock and released it before submitting
+ *       the job; here the lock is held for the whole load.</li>
+ *   <li>LOADCUSTR's private BASE36ADD counter, which never updated CUSTNEXT
+ *       [5250_Subfile/LOADCUSTR.SQLRPGLE:133-137]; here the load restarts the one sequence every writer
+ *       shares.</li>
  * </ul>
  *
  * <p><b>Steps of {@link #load(Plan)}</b>, in this order and all on the one connection bound to the load
@@ -45,8 +41,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * <ol>
  *   <li>{@code SET LOCAL lock_timeout = '5s'} ({@link #LOCK_TIMEOUT}), the {@code WAIT(5)} of the
  *       source;</li>
- *   <li>{@link CustomerIdAllocator#lockForLoad()}: the load guard, taken before any sequence access
- *       (table lock first, sequence second, in every writer);</li>
+ *   <li>{@link CustomerIdAllocator#lockForLoad()}: the load guard, taken before any sequence
+ *       access;</li>
  *   <li>{@code TRUNCATE custmast}, then {@link LoadCheckpoints#afterTruncate()};</li>
  *   <li>{@code COPY custmast (...) FROM STDIN} through {@link CustomerCopyWriter}, streaming the rows of
  *       {@link Plan#generator()} lazily, then a check that the server copied exactly
@@ -64,39 +60,25 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * collide with a restored row. A {@code COMMIT} whose result never reaches the caller, for example
  * because the connection is lost before the server acknowledges it, leaves the outcome unknown to the
  * caller: the new rows and the restarted sequence are committed together or not at all, and only the
- * database can tell which. The method itself never calls {@code nextval}, {@code setval} or
- * {@code ALTER SEQUENCE}: every sequence access goes through
- * {@link CustomerIdAllocator}. A load whose last id is {@code 9999} ({@code nextOrdinal()} =
- * {@value CustomerIdAllocator#EXHAUSTED_NEXT_ORDINAL}) leaves the sequence exhausted through the
- * allocator's exhausted branch, so the next add fails with 503 APP0503.
+ * database can tell which.
  *
- * <p><b>Concurrency.</b> The {@code ACCESS EXCLUSIVE} lock waits for every add that holds the allocation
- * guard ({@code ROW EXCLUSIVE}), so no allocated but uninserted id can be outstanding while the table is
- * replaced. Once granted, it blocks every search, read, add and update of {@code custmast} until the
- * load commits or rolls back. That wait is expected and documented in the README. When the lock is not
- * granted within 5 seconds, PostgreSQL raises SQLSTATE {@code 55P03}; the allocator reports it as
- * {@link org.springframework.dao.CannotAcquireLockException}, which propagates unchanged, and the
- * generator runner prints "Cannot allocate CUSTMAST" and exits with status 1.
+ * <p><b>Sequence.</b> Every sequence access goes through {@link CustomerIdAllocator}, which documents the
+ * lock mode ({@link CustomerIdAllocator#lockForLoad()}) and the reset with its exhausted branch
+ * ({@link CustomerIdAllocator#restartAfterLoad(int)}). A load that ends at {@code 9999}
+ * ({@code nextOrdinal()} = {@link CustomerId#CAPACITY}) makes the next add fail with 503 APP0503.
  *
- * <p><b>Not done here.</b> No {@code SELECT ... FOR UPDATE}, and no {@code ANALYZE}: the runner analyzes
- * the table after the commit, outside any transaction. The capacity check and option handling also
- * belong to the runner; {@link Plan} repeats the capacity check defensively.
+ * <p><b>Concurrency.</b> Searches, reads, adds and updates of {@code custmast} wait while the load holds
+ * the lock. A lock not granted within 5 seconds raises
+ * {@link org.springframework.dao.CannotAcquireLockException}, which propagates unchanged; the generator
+ * runner reports it as "Cannot allocate CUSTMAST".
  *
- * <p><b>Profiles.</b> The bean carries no {@code @Profile} and does not depend on
- * {@code GeneratorProperties}, so integration tests use it under profile {@code test} as the generator
- * does under profile {@code generator}.
+ * <p><b>Not done here.</b> {@code ANALYZE custmast}, which the runner runs after the commit.
  *
- * <p>Example, as the generator runner uses it after its capacity check:
- * <pre>{@code
- * CustomerDataGenerator generator = new CustomerDataGenerator(
- *         NameGenerator.seeded(7), cszSource.load("classpath:generator/csz-sample.csv"),
- *         OffsetDateTime.now(clock).truncatedTo(ChronoUnit.MICROS));
- * CustomerLoader.Plan plan = new CustomerLoader.Plan(CustomerId.parse("1001"), 300, generator);
- * long rows = customerLoader.load(plan); // 300; the next add receives plan.nextOrdinal()
- * }</pre>
+ * <p><b>Profiles.</b> The bean has no {@code @Profile} and no {@code GeneratorProperties} dependency, so
+ * integration tests use it under profile {@code test}.
  *
  * <p>The bean holds no state beyond its collaborators, so concurrent calls are safe; the table lock
- * serializes them, and a second load waits at most 5 seconds for the first.
+ * serializes them.
  */
 @Component
 public class CustomerLoader {

@@ -1,81 +1,36 @@
 /**
- * Tests of the customer search screen: `CustomerSearchPage` (the `/customers`
- * route) and `CustomerSearchPanel` (its body, shared with the Customer
- * picker), both from `./CustomerSearchPage`, rendered with their real
- * collaborators: `useCustomerSearch`, `SearchFilters`, `ResultsTable`, the
- * `CustomerDetailDialog` and `StatePicker` windows they open, the message
- * catalog, the toast host and the key scope stack.
+ * Tests of `CustomerSearchPage` (the `/customers` route) and its body
+ * `CustomerSearchPanel` (shared with the Customer picker), with their real
+ * collaborators: `useCustomerSearch`, `SearchFilters`, `ResultsTable`,
+ * `CustomerDetailDialog`, `StatePicker`, the message catalog, the toast host
+ * and the key scope stack.
  *
- * What it replaces. PMTCUSTR and its display file PMTCUSTD
- * (5250_Subfile/PMTCUSTR.SQLRPGLE, 5250_Subfile/PMTCUSTD.DSPF), the
- * expanding subfile that searched CUSTMAST:
- * - **Init** (:712-767): the function line Inquiry / Maintenance / Selection
- *   and the options line `5=Display`, `2=Edit 5=Display` or
- *   `1=Select 5=Display`; F6=Add only in Maintenance (BldFkeyText :676-702).
- * - **First page** (:237-256): loaded on entry in Inquiry only; the other
- *   modes wait for Enter (`NewSearchCriteria = *on`, :243).
- * - **Main loop** (:261-307): Enter runs a new search when the criteria
- *   changed or one is pending, otherwise ProcessOption; PageDown loads the
- *   next page, DEM0003 with no list, DEM0006 at the 9,999-row cap.
- * - **Function keys** (:355-420): F3 and F12 leave; F4 prompts from the
- *   State field only (DEM0005 elsewhere) and a changed State clears the
- *   list; F5 clears the criteria, turns inactive rows off and empties the
- *   list; F6 adds (Maintenance) or is DEM0003; F9 toggles inactive rows,
- *   switches its legend and reloads the first page.
- * - **ProcessOption** (:427-515): 1 returns the id (Selection), 2 edits
- *   (Maintenance), 5 displays (every mode), anything else is DEM0004 with the
- *   option in reverse image; with nothing to process the last page loaded
- *   so far is shown (the preserved defect, :506-513).
- * - **Paging** (:532-600) and **filters** (:625-665): 12 rows per page,
- *   DEM0002 for an empty first page, DEM0007 for a State of the wrong length.
- * - **Messages** are the CUSTMSGF texts (5250_Subfile/CRTMSGF.CLLE:12-47),
- *   DEM0007's typo corrected; the PMTCUSTD label "Including Inctives" is
- *   corrected to "Including Inactives".
- * - **Stacked screens.** CustDsp (MTNCUSTR) opened from the list, and its
- *   PmtState prompt over it (5250_Subfile/MTNCUSTR.SQLRPGLE:364-382): only
- *   the window on top is keyed, and returning from the prompt leaves the
- *   detail window and the list as they were.
- * - **Saved edit.** An update CustDsp committed is re-read into its subfile
- *   record where it stood (ReadByKey + UpdSflRecd, :454-457): no new search,
- *   no re-sort, ZIP cut to five characters, red once inactive.
- * - **Obsolete requests** (no 5250 counterpart: the subfile cursor was
- *   closed with its program). A search that a new Enter, F5 or leaving the
- *   screen replaced is aborted and publishes nothing, as does the first page
- *   StrictMode's simulated unmount aborts; a next page still loading after
- *   PageUp is kept, not aborted. A 401 to the stored credentials signs the
- *   session out, and the sign-out aborts that search, yet the answer did
- *   arrive, so its APP0401 alert is still shown.
- *
- * What is pinned down here (AAP 0.3.8 "Modes" and the keyboard table, 0.7.2
- * PMTCUSTD filters, 0.8.3 `CustomerSearchPage.test.tsx`).
- *
- * Fixtures. A `GET /api/customers` override serves the 30 seed rows of the
- * `customers` fixture of `src/test/handlers.ts` in its order: active rows
- * only unless `includeInactive=true` (23 rows: two pages of 12 + 11; all 30:
- * three pages of 12 + 12 + 6), name and city as trimmed prefixes and an
- * exact two-letter State, with the opaque cursors `c1`, `c2`, … and DEM0002
- * on an empty first page. It records every query it answers in
- * {@link searches}. A test that needs another answer (DEM0006, DEM0007)
- * sets {@link answerSearch}. Every other route (the catalog, one customer,
- * the states, review, add and update) is answered by the default handlers,
- * and every request is logged from MSW's `request:start` event in
- * {@link traffic}.
+ * Source. PMTCUSTR (5250_Subfile/PMTCUSTR.SQLRPGLE): Init :712-767, first
+ * page :237-256, main loop :261-307, function keys :355-420, ProcessOption
+ * :427-515, paging :532-600, filters :625-665, BldFkeyText :676-702; PMTCUSTD;
+ * the windows stacked over the list (5250_Subfile/MTNCUSTR.SQLRPGLE:364-382);
+ * CUSTMSGF (5250_Subfile/CRTMSGF.CLLE:12-47), DEM0007's typo corrected. The
+ * label "Including Inctives" is corrected to "Including Inactives"; Enter with
+ * nothing to process still shows the last page loaded so far, a preserved
+ * source defect (:506-513).
  *
  * Evidence. These tests are derived from reading the IBM i source and the
  * plan; they are not executed against the IBM i program and do not establish
  * behavioural equivalence with it.
  *
- * Harness. The providers are mounted in the order `src/App.tsx` uses, with a
- * fresh `QueryClient` per test and the toast `clear` wired to the key
- * scope's `onBeforeCommand`, under a `MemoryRouter` at `/customers` whose `/`
- * route renders "Home". A probe reads `useMessages().ready`, so message
- * assertions start only once the catalog has loaded (until then `format`
- * returns the bare code). A search answer a test holds back
- * ({@link heldAnswer}) is released by waiting for evidence, never for a
- * time: MSW's request events, the settled `customersApi.search` call, an idle
- * query cache that has notified its observers, and a second probe, on
- * `useIsFetching()`, that shows it ({@link settleSearches}). `afterEach`
- * releases every hold a failed test left closed.
+ * Fixtures. The search override serves the `customers` rows of
+ * `src/test/handlers.ts` itself, in their order: active rows only unless
+ * `includeInactive=true`, trimmed name and city prefixes, an exact State,
+ * cursors `c1`, `c2`, … and DEM0002 on an empty first page. Expectations are
+ * computed from that fixture ({@link pageNames}), never from the code under
+ * test: the 23 active rows page as 12 + 11, all 30 as 12 + 12 + 6.
+ *
+ * Harness. Providers are mounted in `src/App.tsx` order; message assertions
+ * wait for a probe of the catalog, before which `format` returns the bare code.
+ * A held answer ({@link heldAnswer}) is released by waiting for evidence,
+ * never for a time: MSW request events, settled `customersApi.search` calls,
+ * an idle query cache that has notified its observers, and a `useIsFetching()`
+ * probe. `afterEach` releases every hold a failed test left closed.
  */
 import { StrictMode } from 'react';
 import type { ReactElement, ReactNode } from 'react';
@@ -83,8 +38,6 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider, notifyManager, useIsFetching } from '@tanstack/react-query';
-// MSW 3 serves `http` and `HttpResponse` from its `msw/http` entry point, the
-// one src/test/handlers.ts and the other suites import them from.
 import { http, HttpResponse } from 'msw/http';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -101,14 +54,9 @@ import { server } from '../../test/server';
 import { CustomerSearchPage, CustomerSearchPanel } from './CustomerSearchPage';
 import type { CustomerSearchPanelProps } from './CustomerSearchPage';
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-/** A demo user of the `users` fixture: the Compose defaults of `CM_INQUIRY_*` and `CM_MAINTENANCE_*`. */
+/** A `users` fixture account: one of the Compose-default demo users. */
 type Account = (typeof users)[number];
 
-/** The demo user holding `role`: `inquiry` (INQUIRY) or `sales` (MAINTENANCE). */
 function accountWith(role: 'INQUIRY' | 'MAINTENANCE'): Account {
   const account = users.find((candidate) => candidate.roles.includes(role));
   if (account === undefined) {
@@ -120,21 +68,17 @@ function accountWith(role: 'INQUIRY' | 'MAINTENANCE'): Account {
 const INQUIRY_USER = accountWith('INQUIRY');
 const MAINTENANCE_USER = accountWith('MAINTENANCE');
 
-/** Rows per page: SFLPAG 12 of PMTCUSTD, the `size` the screen sends. */
+/** PMTCUSTD's SFLPAG, the `size` the screen sends. */
 const PAGE_SIZE = 12;
 
-/** The seed rows the active-only list shows (ACTIVE = 'Y'), in search order. */
 const ACTIVE_ROWS: readonly CustomerSummaryResponse[] = customers.filter((row) => row.active === 'Y');
 
-/** Every seed row, inactive ones included (F9), in search order. */
 const ALL_ROWS: readonly CustomerSummaryResponse[] = customers;
 
-/** The names on the 0-based page `page` of `rows`, as the list shows them. */
 function pageNames(rows: readonly CustomerSummaryResponse[], page: number): string[] {
   return rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((row) => row.name);
 }
 
-/** The seed row of `name`; throws when the fixture holds none. */
 function seedRow(name: string): CustomerSummaryResponse {
   const row = customers.find((candidate) => candidate.name === name);
   if (row === undefined) {
@@ -143,7 +87,7 @@ function seedRow(name: string): CustomerSummaryResponse {
   return row;
 }
 
-/** The first active row: ALIQUET INC. (AAAK), on the first page of either list. */
+/** ALIQUET INC. (AAAK), on the first page of either list. */
 const FIRST_ACTIVE = ((): CustomerSummaryResponse => {
   const row = ACTIVE_ROWS[0];
   if (row === undefined) {
@@ -152,18 +96,13 @@ const FIRST_ACTIVE = ((): CustomerSummaryResponse => {
   return row;
 })();
 
-/** An inactive row on the first page of the full list. */
 const INACTIVE_ROW = seedRow('ALIQUAM ORNARE LIBERO ASSOCIATES');
 
-/** The seed rows with the apostrophe and the backslashes (original ids 3 and 6). */
+/** The special-character seed names of original ids 3 and 6. */
 const APOSTROPHE_NAME = "NIBH L'LOR COMPANY";
 const BACKSLASH_NAME = 'URNA \\NUNC\\ COMPANY';
 
-/**
- * A new customer that passes the nine field rules and that the default stub
- * address service echoes unchanged, as the window's labels name its fields
- * (MTNCUSTD screen order; Active is preset to Y on add).
- */
+/** Passes the nine field rules, and the stub address service echoes it unchanged. */
 const NEW_CUSTOMER_ENTRIES: ReadonlyArray<readonly [label: string, value: string]> = [
   ['Name', 'ACME WIDGETS'],
   ['Address', '100 MAIN STREET'],
@@ -175,40 +114,28 @@ const NEW_CUSTOMER_ENTRIES: ReadonlyArray<readonly [label: string, value: string
   ['Corporate Phone', '(217) 555-0199'],
 ];
 
-/** Labels of the three search criteria (PMTCUSTD SC_NAME, SC_CITY, SC_STATE). */
 const NAME_FILTER = 'Name starts with:';
 const CITY_FILTER = 'City starts with:';
 const STATE_FILTER = 'State +';
 
-/** Accessible names of the windows the screen opens: their ScreenHeader title and function line. */
 const CHANGE_DIALOG = 'Customer Master Change Customer';
 const ADD_DIALOG = 'Customer Master Add Customer';
 const DISPLAY_DIALOG = 'Customer Master Displaying Customer';
 const STATE_PICKER = 'USA States';
 
-/** The paths the screen and its windows call, relative as the SPA calls them. */
 const SEARCH_PATH = '/api/customers';
 const ADD_PATH = '/api/customers';
 const REVIEW_PATH = '/api/customers/review';
 const STATES_PATH = '/api/states';
 
-/** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
 
-/** The test id of {@link SessionProbe}. */
 const SESSION_PROBE_ID = 'session-probe';
 
-/** The test id of {@link QueryProbe}. */
 const QUERY_PROBE_ID = 'query-probe';
 
-/** The text a test's `/sign-in` route renders, standing in for the sign-in page. */
 const SIGN_IN_ROUTE = 'Sign-in route';
 
-// ---------------------------------------------------------------------------
-// Search requests and the request log
-// ---------------------------------------------------------------------------
-
-/** One `GET /api/customers` query as received: each parameter's value, `null` when absent. */
 interface SearchQuery {
   name: string | null;
   city: string | null;
@@ -218,7 +145,6 @@ interface SearchQuery {
   cursor: string | null;
 }
 
-/** The query of a first page with blank criteria and inactive rows excluded, as the screen sends it. */
 const FIRST_PAGE: SearchQuery = {
   name: '',
   city: '',
@@ -228,21 +154,19 @@ const FIRST_PAGE: SearchQuery = {
   cursor: null,
 };
 
-/** Every search query the override answered since the screen was rendered, in order. */
+/**
+ * Every search query received in the current test, in order; a test's own
+ * search handler, registered over the suite's override, records here too.
+ */
 const searches: SearchQuery[] = [];
 
-/**
- * The answer of a test that needs one other than the fixture pages; returning
- * `undefined` falls back to {@link fixturePage}. Reset before each test.
- */
+/** A test's own search answer; `undefined` falls back to {@link fixturePage}. */
 let searchAnswer: ((query: SearchQuery) => Response | undefined) | null = null;
 
-/** Sets the search answer of the current test. */
 function answerSearch(respond: (query: SearchQuery) => Response | undefined): void {
   searchAnswer = respond;
 }
 
-/** The search parameters of a request URL. */
 function readQuery(request: Request): SearchQuery {
   const params = new URL(request.url).searchParams;
   return {
@@ -255,18 +179,12 @@ function readQuery(request: Request): SearchQuery {
   };
 }
 
-/** The 0-based page index an opaque cursor `c<n>` stands for, or `null` for any other text. */
 function cursorPage(cursor: string): number | null {
   const match = /^c([1-9]\d*)$/.exec(cursor);
   return match?.[1] === undefined ? null : Number(match[1]);
 }
 
-/**
- * One page of the seed rows that match `query`, as the API pages them:
- * `size` rows from the page the cursor names, `nextCursor` while rows
- * follow, and notice DEM0002 on an empty first page. A cursor this override
- * never issued is 400 APP0400.
- */
+/** One page of the matching seed rows; a cursor this override never issued is 400 APP0400. */
 function fixturePage(query: SearchQuery): Response {
   const page = query.cursor === null ? 0 : cursorPage(query.cursor);
   if (page === null) {
@@ -293,13 +211,12 @@ function fixturePage(query: SearchQuery): Response {
   return HttpResponse.json(body);
 }
 
-/** One request that reached MSW: its method and path. */
 interface RecordedRequest {
   method: string;
   path: string;
 }
 
-/** Every `/api` request since the screen was rendered, the catalog excepted, in order. */
+/** Every `/api` request of the current test except the catalog's, in order. */
 const traffic: RecordedRequest[] = [];
 
 /** MSW `request:start` listener: runs before any handler, so every handler keeps answering. */
@@ -310,26 +227,16 @@ function recordRequest({ request }: { request: Request }): void {
   }
 }
 
-/** The recorded requests of one method and path. */
 function sent(method: string, path: string): RecordedRequest[] {
   return traffic.filter((entry) => entry.method === method && entry.path === path);
 }
 
-// ---------------------------------------------------------------------------
-// Settlement and held answers: a released search is followed through MSW,
-// the API client and the query cache to the screen; nothing is timed
-// ---------------------------------------------------------------------------
-
-/** A promise and the function that resolves it. */
 interface Deferred {
   readonly promise: Promise<void>;
   readonly resolve: () => void;
 }
 
-/**
- * A pending {@link Deferred}. The promise executor runs synchronously, so
- * `resolve` works as soon as this returns; resolving it again changes nothing.
- */
+/** The promise executor runs synchronously, so `resolve` works as soon as this returns. */
 function deferred(): Deferred {
   let settle: () => void = () => undefined;
   const promise = new Promise<void>((resolve) => {
@@ -339,28 +246,25 @@ function deferred(): Deferred {
 }
 
 /**
- * Every `GET /api/customers` request MSW received in the current test, by
- * request id. Each one's promise resolves once MSW has run the handlers for
- * it. MSW 3.0.2 emits `request:match` once a handler has returned its answer,
- * and `request:end` only once the interceptor has accepted that answer; for a
- * request the client aborted meanwhile the interceptor can refuse it, and that
- * request then gets no `request:end`. Either event closes the record.
+ * Every search request MSW received in the current test, by request id, each
+ * settled once MSW has run its handlers. MSW 3.0.2 emits `request:match` once
+ * a handler has answered and `request:end` only once the interceptor has
+ * accepted that answer, which it can refuse for a request the client aborted
+ * meanwhile; such a request gets no `request:end`, so either event closes the
+ * record.
  */
 const searchRequests = new Map<string, Deferred>();
 
-/** MSW `request:start` listener: opens the record of a search request, which {@link endSearchRequest} closes. */
 function startSearchRequest({ requestId, request }: { requestId: string; request: Request }): void {
   if (request.method === 'GET' && new URL(request.url).pathname === SEARCH_PATH) {
     searchRequests.set(requestId, deferred());
   }
 }
 
-/** MSW `request:match` and `request:end` listener: closes the record {@link startSearchRequest} opened for the same request. */
 function endSearchRequest({ requestId }: { requestId: string }): void {
   searchRequests.get(requestId)?.resolve();
 }
 
-/** The promise of every `customersApi.search` call in the current test, in call order. */
 const searchCalls: Array<Promise<SearchResponse>> = [];
 
 /**
@@ -377,23 +281,21 @@ function trackSearchCalls(): void {
   });
 }
 
-/** What {@link trackQueries} returns. */
 interface TrackedQueries {
   /**
-   * Resolves once no query of the client is fetching and the query cache has
-   * delivered every change to its subscribers, the screen's query observers
-   * among them; at once when that already holds.
+   * Resolves once no query is fetching and the cache has delivered every
+   * change to its subscribers, the screen's observers among them; at once
+   * when that already holds.
    */
   idle(): Promise<void>;
 }
 
 /**
- * Tracks the query cache of `client`. TanStack Query calls a plain cache
- * subscriber during each change, but hands the screen's observers (which
- * subscribe through `notifyManager.batchCalls`) their notifications later, in
- * the batch the change scheduled. One plain and one batched subscriber count
- * the changes made and the changes delivered; while both counts agree, no
- * notification is still on its way to an observer.
+ * TanStack Query calls a plain cache subscriber during each change, but hands
+ * the screen's observers (subscribed through `notifyManager.batchCalls`) their
+ * notifications later, in the batch the change scheduled. One plain and one
+ * batched subscriber count the changes made and delivered; while the counts
+ * agree, no notification is still on its way to an observer.
  */
 function trackQueries(client: QueryClient): TrackedQueries {
   const cache = client.getQueryCache();
@@ -424,19 +326,17 @@ function trackQueries(client: QueryClient): TrackedQueries {
   };
 }
 
-/** The query cache tracker of the tree the current test rendered; `null` until {@link renderWithProviders} runs. */
 let trackedQueries: TrackedQueries | null = null;
 
 /**
- * Waits until the searches of the current test have settled, so that an
- * assertion that a late answer changed nothing can follow at once. Inside
- * `act`, it waits until MSW has run the handlers of every search request it
- * received ({@link searchRequests}), every `customersApi.search` call has
- * settled either way (an aborted call's query function has then run its
- * `catch`), and the query client is idle with every change delivered; `act`
- * then renders what they caused, effects and focus moves included. Last, it
- * waits until {@link QueryProbe} shows no fetch in flight. Each step waits
- * for an event the step before makes certain.
+ * Waits until the current test's searches have settled, so an assertion that
+ * a late answer changed nothing can follow at once. Inside `act`: MSW has run
+ * the handlers of every search request ({@link searchRequests}), every
+ * `customersApi.search` call has settled either way (an aborted call's query
+ * function has then run its `catch`), and the query client is idle with every
+ * change delivered; `act` then renders what they caused, effects and focus
+ * moves included. Last, {@link QueryProbe} shows no fetch in flight. Each step
+ * waits for an event the step before makes certain.
  */
 async function settleSearches(): Promise<void> {
   await act(async () => {
@@ -449,28 +349,19 @@ async function settleSearches(): Promise<void> {
   }
 }
 
-/**
- * A search answer held back until the test releases it, so the screen can be
- * observed while the request is pending. Every hold is registered in
- * {@link heldAnswers} when made, and `afterEach` releases whatever a test
- * left held, so no handler stays suspended once its test has ended.
- */
+/** A search answer held back until the test releases it, so the screen can be observed while the request is pending. */
 interface HeldAnswer {
   /** Settles once the hold is opened, by {@link HeldAnswer.open} or {@link HeldAnswer.release}. */
   readonly released: Promise<void>;
   /** Lets every held request be answered; calling it again changes nothing. */
   readonly open: () => void;
-  /**
-   * Lets every held request be answered, then waits until the searches have
-   * settled ({@link settleSearches}); calling it again only waits again.
-   */
+  /** Opens the hold, then waits until the searches have settled ({@link settleSearches}); calling it again only waits again. */
   readonly release: () => Promise<void>;
 }
 
-/** Every hold the current test made, in order; `afterEach` empties it. */
 const heldAnswers: HeldAnswer[] = [];
 
-/** A held answer, closed until its `open` or `release` is called, registered in {@link heldAnswers}. */
+/** A closed hold, registered in {@link heldAnswers} so that no handler stays suspended once its test has ended. */
 function heldAnswer(): HeldAnswer {
   const gate = deferred();
   const held: HeldAnswer = {
@@ -484,10 +375,6 @@ function heldAnswer(): HeldAnswer {
   heldAnswers.push(held);
   return held;
 }
-
-// ---------------------------------------------------------------------------
-// Per-test setup and teardown
-// ---------------------------------------------------------------------------
 
 beforeEach(() => {
   searches.length = 0;
@@ -511,10 +398,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // A hold a failed test left closed is released here, first: every gate
-  // opens, then the searches settle while the tree is still mounted
-  // (src/test/setup.ts unmounts it after this hook), so no handler stays
-  // suspended and nothing a late answer causes reaches the next test.
+  // First every gate opens, then the searches settle while the tree is still
+  // mounted (src/test/setup.ts unmounts it after this hook), so nothing a late
+  // answer causes reaches the next test.
   const pending = heldAnswers.splice(0);
   for (const held of pending) {
     held.open();
@@ -529,56 +415,35 @@ afterEach(async () => {
   setCredentials(null);
 });
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/** Wires the toast clear to the key scope's `onBeforeCommand`, as `src/App.tsx` does. */
+/** As in `src/App.tsx`. */
 function KeyedScreens({ children }: { children: ReactNode }) {
   const { clear } = useToasts();
   return <KeyScopeProvider onBeforeCommand={clear}>{children}</KeyScopeProvider>;
 }
 
-/**
- * Exposes whether the message catalog has loaded, as `data-ready`, so a test
- * can wait for it. Hidden and without a role, so no query by role matches it.
- */
+/** Hidden and without a role, like the other probes, so no query by role matches it. */
 function CatalogProbe() {
   const { ready } = useMessages();
   return <span hidden data-testid={CATALOG_PROBE_ID} data-ready={ready ? 'true' : 'false'} />;
 }
 
-/**
- * Exposes the session status of `useAuth()` (`signed-in` or `signed-out`) as
- * `data-status`, so a test can see a sign-out. Hidden and without a role.
- */
 function SessionProbe() {
   const { status } = useAuth();
   return <span hidden data-testid={SESSION_PROBE_ID} data-status={status} />;
 }
 
-/**
- * Exposes how many queries are fetching, from `useIsFetching()`, as
- * `data-fetching`, so a test can see the query client's state reach the
- * screen ({@link settleSearches}). Hidden and without a role.
- */
 function QueryProbe() {
   const fetching = useIsFetching();
   return <span hidden data-testid={QUERY_PROBE_ID} data-fetching={String(fetching)} />;
 }
 
 /**
- * Renders `ui` inside the application's providers, signed in as `account`: a
- * fresh query client (no retries) whose cache {@link trackedQueries} follows,
- * the message catalog, the toast host, the key scope stack, a router at
- * `/customers` and the session, with {@link CatalogProbe} and
- * {@link QueryProbe} beside `ui`. The account's
- * credentials are stored as after a real sign-in, because every customer and
- * state route answers 401 without them. Resolves once the catalog has loaded
- * and the Name filter holds the initial focus. With `strict`, the tree is
- * rendered under `<StrictMode>`, as `src/main.tsx` renders the application,
- * so development's extra effect cycle (a simulated unmount and remount) runs
- * too.
+ * Renders `ui` signed in as `account`. The credentials are stored as after a
+ * real sign-in, because every customer and state route answers 401 without
+ * them. Resolves once the catalog has loaded and the Name filter holds the
+ * initial focus. `strict` renders under `<StrictMode>`, as `src/main.tsx`
+ * does, so development's extra effect cycle (a simulated unmount and remount)
+ * runs too.
  */
 async function renderWithProviders(account: Account, ui: ReactElement, { strict = false } = {}): Promise<UserEvent> {
   setCredentials({ username: account.username, password: account.password });
@@ -608,11 +473,7 @@ async function renderWithProviders(account: Account, ui: ReactElement, { strict 
   return user;
 }
 
-/**
- * Renders the `/customers` route for a user of `role` (INQUIRY: Inquiry mode,
- * MAINTENANCE: Maintenance mode); the `/` route, where F3 and F12 lead,
- * renders "Home".
- */
+/** F3 and F12 lead to the `/` route, "Home". */
 function renderSearchPage(role: 'INQUIRY' | 'MAINTENANCE'): Promise<UserEvent> {
   return renderWithProviders(
     role === 'MAINTENANCE' ? MAINTENANCE_USER : INQUIRY_USER,
@@ -623,16 +484,10 @@ function renderSearchPage(role: 'INQUIRY' | 'MAINTENANCE'): Promise<UserEvent> {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
-
-/** The search criteria group (PMTCUSTD rows 4 and 5). */
 function criteriaGroup(): HTMLElement {
   return screen.getByRole('group', { name: 'Search criteria' });
 }
 
-/** One filter input of the search criteria, by its exact label. */
 function filterInput(label: typeof NAME_FILTER | typeof CITY_FILTER | typeof STATE_FILTER): HTMLInputElement {
   const element = within(criteriaGroup()).getByLabelText(label);
   if (!(element instanceof HTMLInputElement)) {
@@ -641,12 +496,10 @@ function filterInput(label: typeof NAME_FILTER | typeof CITY_FILTER | typeof STA
   return element;
 }
 
-/** The results table (the PMTCUSTD subfile), named by its caption. */
 function resultsTable(): HTMLElement {
   return screen.getByRole('table', { name: 'Customers' });
 }
 
-/** The customer names on the page shown, in list order, read from each row's Opt label "Option for <name>". */
 function shownNames(): string[] {
   return within(resultsTable())
     .queryAllByRole('textbox')
@@ -656,12 +509,10 @@ function shownNames(): string[] {
     });
 }
 
-/** Waits until the list shows exactly page `page` of `rows`. */
 async function waitForPage(rows: readonly CustomerSummaryResponse[], page: number): Promise<void> {
   await waitFor(() => expect(shownNames()).toEqual(pageNames(rows, page)));
 }
 
-/** The Opt input of the row showing `name`. */
 function optionInput(name: string): HTMLInputElement {
   const element = within(resultsTable()).getByRole('textbox', { name: `Option for ${name}` });
   if (!(element instanceof HTMLInputElement)) {
@@ -670,7 +521,6 @@ function optionInput(name: string): HTMLInputElement {
   return element;
 }
 
-/** The table row showing `name`. */
 function rowOf(name: string): HTMLTableRowElement {
   const row = optionInput(name).closest('tr');
   if (row === null) {
@@ -679,14 +529,14 @@ function rowOf(name: string): HTMLTableRowElement {
   return row;
 }
 
-/** The text of a row's action buttons, in order: the verb and the visually hidden customer name. */
+/** Each action button's text: its verb and the visually hidden customer name. */
 function rowActions(name: string): string[] {
   return within(rowOf(name))
     .getAllByRole('button')
     .map((button) => button.textContent ?? '');
 }
 
-/** The search screen's own function-key legend, not the legend of a window opened over it. */
+/** The search screen's legend, not that of a window opened over it. */
 function searchKeys(): HTMLElement {
   const bar = screen
     .getAllByRole('toolbar', { name: 'Function keys' })
@@ -697,24 +547,18 @@ function searchKeys(): HTMLElement {
   return bar;
 }
 
-/** The SFLEND indicator, "More..." or "Bottom"; `null` while the list holds no rows. */
+/** The SFLEND indicator; `null` while the list holds no rows. */
 function pagingIndicator(): HTMLElement | null {
   return screen.queryByText(/^(More\.\.\.|Bottom)$/);
 }
 
-/** The shared alert region of the toast host: problem details and client-raised errors. */
 function alertRegion(): HTMLElement {
   return screen.getByRole('alert');
 }
 
-/** The shared status region of the toast host: notices such as DEM0002 and DEM0006. */
 function statusRegion(): HTMLElement {
   return screen.getByRole('status');
 }
-
-// ---------------------------------------------------------------------------
-// Specs
-// ---------------------------------------------------------------------------
 
 describe('CustomerSearchPage', () => {
   it('starts from the fixtures: two active pages, three pages with inactive rows, distinct users per role', () => {
@@ -727,10 +571,7 @@ describe('CustomerSearchPage', () => {
     expect(MAINTENANCE_USER.roles).toEqual(['MAINTENANCE']);
   });
 
-  // -------------------------------------------------------------------------
-  // Modes (Init :712-767, first page :237-256, BldFkeyText :676-702)
-  // -------------------------------------------------------------------------
-
+  // Init :712-767, first page :237-256, BldFkeyText :676-702
   describe('modes', () => {
     it('Inquiry: header "Inquiry", options "5=Display", the first page loads on open without Enter, no F6=Add', async () => {
       await renderSearchPage('INQUIRY');
@@ -742,7 +583,6 @@ describe('CustomerSearchPage', () => {
       expect(searches).toEqual([FIRST_PAGE]);
       expect(within(searchKeys()).queryByRole('button', { name: 'F6=Add' })).not.toBeInTheDocument();
       expect(within(searchKeys()).getByRole('button', { name: 'F9=Include Inactive' })).toBeInTheDocument();
-      // Rows offer Display only: 5 is the one option Inquiry accepts.
       for (const name of pageNames(ACTIVE_ROWS, 0)) {
         expect(rowActions(name)).toEqual([`Display ${name}`]);
       }
@@ -762,7 +602,6 @@ describe('CustomerSearchPage', () => {
 
       await waitForPage(ACTIVE_ROWS, 0);
       expect(searches).toEqual([FIRST_PAGE]);
-      // Rows offer Edit and Display, in option-code order.
       for (const name of pageNames(ACTIVE_ROWS, 0)) {
         expect(rowActions(name)).toEqual([`Edit ${name}`, `Display ${name}`]);
       }
@@ -831,10 +670,7 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Keys and filters (ProcessFunctionKey :355-420, filters :625-665)
-  // -------------------------------------------------------------------------
-
+  // ProcessFunctionKey :355-420, filters :625-665
   describe('keys and filters', () => {
     it('F9 switches its legend, shows "Including Inactives" and reloads the first page with includeInactive=true', async () => {
       const user = await renderSearchPage('INQUIRY');
@@ -863,7 +699,6 @@ describe('CustomerSearchPage', () => {
       await user.type(filterInput(NAME_FILTER), 'ali');
       await user.type(filterInput(CITY_FILTER), 'ced');
       await user.type(filterInput(STATE_FILTER), 'ia');
-      // F9 searches with the criteria on screen, inactive rows included.
       await user.keyboard('{F9}');
       await waitFor(() => expect(shownNames()).toEqual(['ALIQUET INC.']));
       expect(searches[1]).toEqual({ ...FIRST_PAGE, name: 'ALI', city: 'CED', state: 'IA', includeInactive: 'true' });
@@ -1044,10 +879,7 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Paging and Enter (main loop :261-307, SflFillPage :556-600, ProcessOption :506-513)
-  // -------------------------------------------------------------------------
-
+  // Main loop :261-307, SflFillPage :556-600, ProcessOption :506-513
   describe('paging and Enter', () => {
     it('PageDown loads the next page through its cursor, PageUp and a second PageDown need no request, the end reads "Bottom"', async () => {
       const user = await renderSearchPage('INQUIRY');
@@ -1083,7 +915,6 @@ describe('CustomerSearchPage', () => {
       expect(searches[3]).toEqual({ ...inactiveFirstPage, cursor: 'c2' });
       expect(pagingIndicator()).toHaveTextContent('Bottom');
 
-      // At the bottom PageDown keeps the last page, with no request and no message.
       await user.keyboard('{PageDown}');
 
       expect(shownNames()).toEqual(pageNames(ALL_ROWS, 2));
@@ -1132,16 +963,10 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Paging while a next page loads: every key stays live, the latest
-  // navigation decides the page shown, and focus follows to the page asked for
-  // -------------------------------------------------------------------------
-
+  // Every key stays live, the latest navigation decides the page shown, and focus follows to the page asked for.
   describe('paging while a next page loads', () => {
-    /** The first page of the full list (F9 on), as the screen requests it. */
     const INCLUDING_INACTIVE: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
 
-    /** The name on the first row of the 0-based page `page` of `rows`; throws when that page is empty. */
     function firstNameOn(rows: readonly CustomerSummaryResponse[], page: number): string {
       const name = pageNames(rows, page)[0];
       if (name === undefined) {
@@ -1150,14 +975,7 @@ describe('CustomerSearchPage', () => {
       return name;
     }
 
-    /**
-     * Holds the continuation page requested with `cursor` until the returned
-     * function is called; every other query is answered at once from the
-     * fixture. Registered over the suite's override, it records every query in
-     * {@link searches} as that override does. The returned function is the
-     * hold's {@link HeldAnswer.release}: it resolves once the held page has
-     * been answered and the list has settled on screen ({@link settleSearches}).
-     */
+    /** Holds the page requested with `cursor` until the returned {@link HeldAnswer.release} is called. */
     function holdContinuation(cursor: string): () => Promise<void> {
       const held = heldAnswer();
       server.use(
@@ -1173,10 +991,6 @@ describe('CustomerSearchPage', () => {
       return held.release;
     }
 
-    /**
-     * Inquiry with inactive rows included (F9: pages of 12, 12 and 6 rows),
-     * its second page shown and focus on that page's first option field.
-     */
     async function showSecondOfThreePages(): Promise<UserEvent> {
       const user = await renderSearchPage('INQUIRY');
       await waitForPage(ACTIVE_ROWS, 0);
@@ -1198,7 +1012,6 @@ describe('CustomerSearchPage', () => {
 
       await user.keyboard('{PageDown}');
       await waitFor(() => expect(searches.at(-1)).toEqual({ ...FIRST_PAGE, cursor: 'c1' }));
-      // The page shown stays while its successor loads.
       expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
       await release();
 
@@ -1282,7 +1095,6 @@ describe('CustomerSearchPage', () => {
       await waitFor(() => expect(optionInput(firstNameOn(ALL_ROWS, 1))).toHaveFocus());
       expect(searches).toHaveLength(4);
 
-      // At the deepest loaded page PageDown asks again for the page still loading.
       await user.keyboard('{PageDown}');
       expect(shownNames()).toEqual(pageNames(ALL_ROWS, 1));
 
@@ -1295,24 +1107,17 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Obsolete requests: the list a new search, F5 or leaving the screen
-  // replaced is aborted, and a page load of the current list never is
-  // -------------------------------------------------------------------------
-
+  // No 5250 counterpart: the subfile cursor closed with its program.
   describe('aborting obsolete requests', () => {
-    /** One search as the client handed it to `fetch`: its URL and its abort signal. */
     interface FetchedSearch {
       url: URL;
       signal: AbortSignal | undefined;
     }
 
     /**
-     * The `GET /api/customers` searches the client handed `fetch`, in call
-     * order, read from a spy on the global `fetch` that calls through
-     * (restored after the test by `restoreMocks`). The list's query aborts a
-     * search's signal once that search is obsolete, and the browser then
-     * stops waiting for its answer.
+     * The searches handed to `fetch`, read from a pass-through spy. The list's
+     * query aborts a search's signal once that search is obsolete, and the
+     * browser then stops waiting for its answer.
      */
     function searchFetches(): () => FetchedSearch[] {
       const spy = vi.spyOn(globalThis, 'fetch');
@@ -1323,25 +1128,12 @@ describe('CustomerSearchPage', () => {
         });
     }
 
-    /** What {@link holdSearches} returns. */
     interface HeldSearches {
-      /** How many searches are held so far. */
       held(): number;
-      /**
-       * Lets every held search answer, then waits until the searches have
-       * settled ({@link settleSearches}), so anything an answer caused is on
-       * screen.
-       */
       release(): Promise<void>;
     }
 
-    /**
-     * Holds every search whose query `matches` until `release` is called,
-     * then answers it with `answer(query)`; every other search is answered at
-     * once from the fixture. Registered over the suite's override, it records
-     * every query in {@link searches} as that override does. Its gate is a
-     * {@link heldAnswer}, so `afterEach` releases it should the test fail first.
-     */
+    /** Holds each search `matches` selects until `release`, then answers it with `answer`; its gate is a {@link heldAnswer}. */
     function holdSearches(
       matches: (query: SearchQuery) => boolean,
       answer: (query: SearchQuery) => Response,
@@ -1363,7 +1155,7 @@ describe('CustomerSearchPage', () => {
       return { held: () => held, release: gate.release };
     }
 
-    /** A 500 DEM9999 problem: presenting it would publish an alert. */
+    /** Presenting this answer would publish an alert. */
     function serverFailure(): Response {
       return problem(500, 'DEM9999', { instance: SEARCH_PATH });
     }
@@ -1527,7 +1319,6 @@ describe('CustomerSearchPage', () => {
 
       await user.keyboard('{Enter}');
 
-      // AuthProvider's 401 handler signed the session out and routed to /sign-in.
       expect(await screen.findByText(SIGN_IN_ROUTE)).toBeInTheDocument();
       expect(screen.getByTestId(SESSION_PROBE_ID)).toHaveAttribute('data-status', 'signed-out');
       // Its sign-out cancelled the user's queries, which aborted the refused search's own signal.
@@ -1539,11 +1330,7 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-
-  // -------------------------------------------------------------------------
-  // Rendering (PMTCUSTD SFLCTL and SFL records)
-  // -------------------------------------------------------------------------
-
+  // PMTCUSTD SFLCTL and SFL records
   describe('rendering', () => {
     it('labels the criteria "Name starts with:", "City starts with:" and "State +" with the PMTCUSTD lengths', async () => {
       await renderSearchPage('INQUIRY');
@@ -1616,17 +1403,13 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Stacked screens (CustDsp over the list, PmtState over CustDsp)
-  // -------------------------------------------------------------------------
-
+  // CustDsp over the list, PmtState over CustDsp
   describe('stacked screens (Maintenance)', () => {
     it('the State picker over the change window returns its code to the window only; F12 in a reopened picker closes only the picker', async () => {
       const user = await renderSearchPage('MAINTENANCE');
       await user.keyboard('{Enter}');
       await waitForPage(ACTIVE_ROWS, 0);
 
-      // Option 2 + Enter on a row opens the change window over the list.
       await user.type(optionInput(FIRST_ACTIVE.name), '2');
       await user.keyboard('{Enter}');
       const detail = await screen.findByRole('dialog', { name: CHANGE_DIALOG });
@@ -1634,13 +1417,11 @@ describe('CustomerSearchPage', () => {
       expect(within(detail).getByLabelText('State +')).toHaveValue(FIRST_ACTIVE.state);
       expect(sent('GET', `${SEARCH_PATH}/${FIRST_ACTIVE.custId}`)).toHaveLength(1);
 
-      // F4 on the window's State field opens the picker over it.
       await user.click(within(detail).getByLabelText('State +'));
       await user.keyboard('{F4}');
       const picker = await screen.findByRole('dialog', { name: STATE_PICKER });
       const alabama = await within(picker).findByRole('textbox', { name: 'Option for Alabama' });
 
-      // Option 1 + Enter in the picker: only the picker closes.
       await user.type(alabama, '1');
       await user.keyboard('{Enter}');
 
@@ -1654,7 +1435,6 @@ describe('CustomerSearchPage', () => {
       expect(searches).toHaveLength(1);
       expect(screen.queryByText('Home')).not.toBeInTheDocument();
 
-      // F4 again opens a fresh picker; F12 closes it and nothing beneath.
       await user.keyboard('{F4}');
       const again = await screen.findByRole('dialog', { name: STATE_PICKER });
       await user.keyboard('{F12}');
@@ -1670,15 +1450,12 @@ describe('CustomerSearchPage', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Saved edit (CustDsp's update, then ReadByKey + UpdSflRecd :454-457)
-  // -------------------------------------------------------------------------
-
+  // CustDsp's update, then ReadByKey + UpdSflRecd :454-457
   describe('saved edit (Maintenance)', () => {
-    /** The 0-based place of the edited row on page 2 of the active list: neither its first nor its last row. */
+    /** Neither the first nor the last row of page 2 of the active list. */
     const EDITED_INDEX = 3;
 
-    /** The row option 2 edits: ORNARE PLACERAT INSTITUTE (AAA1), MADISON WI 56718, active. */
+    /** ORNARE PLACERAT INSTITUTE (AAA1), MADISON WI 56718. */
     const EDITED = ((): CustomerSummaryResponse => {
       const row = ACTIVE_ROWS[PAGE_SIZE + EDITED_INDEX];
       if (row === undefined) {
@@ -1687,14 +1464,13 @@ describe('CustomerSearchPage', () => {
       return row;
     })();
 
-    /** The new name. It sorts ahead of every seed name, so a re-sorted list would move the row to page 1. */
+    /** Sorts ahead of every seed name, so a re-sorted list would move the row to page 1. */
     const NEW_NAME = 'AAA RENAMED HOLDINGS';
 
     /**
-     * The change as typed, in MTNCUSTD screen order: Active N, the new name,
-     * and an address the stub address service standardizes to
-     * "15 ORCHARD PL", MAPLE CROSSING NJ 08999-3101, so the stored ZIP carries
-     * a ZIP+4 that the list must cut to its first five characters.
+     * The stub address service standardizes this address to "15 ORCHARD PL",
+     * MAPLE CROSSING NJ 08999-3101, so the stored ZIP carries a ZIP+4 that the
+     * list must cut to its first five characters.
      */
     const CHANGES: ReadonlyArray<readonly [label: string, value: string]> = [
       ['Active (Y/N)', 'N'],
@@ -1705,7 +1481,6 @@ describe('CustomerSearchPage', () => {
       ['ZIP', '08999'],
     ];
 
-    /** Asserts the list row of the saved customer: its Customer Name, City, St and ZIP cells, red and labelled inactive. */
     function expectSavedRow(): void {
       const row = rowOf(NEW_NAME);
       expect(
@@ -1740,7 +1515,6 @@ describe('CustomerSearchPage', () => {
       expect(EDITED.active).toBe('Y');
       expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
 
-      // Option 2 + Enter opens the change window on the stored record.
       await user.type(optionInput(EDITED.name), '2');
       await user.keyboard('{Enter}');
       const dialog = await screen.findByRole('dialog', { name: CHANGE_DIALOG });
@@ -1753,7 +1527,6 @@ describe('CustomerSearchPage', () => {
         await user.type(input, value);
       }
 
-      // Enter reviews: DEM0000 over the reviewed values, the address standardized.
       await user.keyboard('{Enter}');
       await within(statusRegion()).findByText(messageText('DEM0000'));
       const panel = await within(dialog).findByRole('group', { name: 'Confirm customer' });
@@ -1762,13 +1535,11 @@ describe('CustomerSearchPage', () => {
       expect(within(panel).getByLabelText('ZIP')).toHaveValue('08999-3101');
       expect(sent('PUT', customerPath)).toHaveLength(0);
 
-      // Enter at the confirmation commits the change.
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
       expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
       expect(sent('PUT', customerPath)).toHaveLength(1);
-      // The nine reviewed fields and the version read; never the id, stamp or user.
       expect(updates).toEqual([
         {
           name: NEW_NAME,
@@ -1783,9 +1554,9 @@ describe('CustomerSearchPage', () => {
           version: 0,
         },
       ]);
-      // ReadByKey + UpdSflRecd (:454-457): the saved row replaces the edited
-      // one where it stood, red now that it is inactive, although it no longer
-      // matches the active-only criteria or the list's name order.
+      // The saved row replaces the edited one where it stood, red now that it
+      // is inactive, although it no longer matches the active-only criteria or
+      // the list's name order.
       const replaced = pageTwo.map((name, index) => (index === EDITED_INDEX ? NEW_NAME : name));
       await waitFor(() => expect(shownNames()).toEqual(replaced));
       expectSavedRow();
@@ -1819,10 +1590,6 @@ describe('CustomerSearchPage', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// The panel on its own: Selection mode, as the Customer picker hosts it
-// ---------------------------------------------------------------------------
-
 describe('CustomerSearchPanel in Selection mode', () => {
   it('offers 1=Select 5=Display, waits for Enter, returns the id of option 1 once and leaves through onExit', async () => {
     const onSelect = vi.fn<NonNullable<CustomerSearchPanelProps['onSelect']>>();
@@ -1838,7 +1605,6 @@ describe('CustomerSearchPanel in Selection mode', () => {
     expect(filterInput(NAME_FILTER)).toHaveValue('NIBH');
     expect(searches).toHaveLength(0);
 
-    // F6 is not enabled outside Maintenance.
     await user.keyboard('{F6}');
     expect(within(alertRegion()).getByText('Key is not active now')).toBeInTheDocument();
 
@@ -1862,17 +1628,7 @@ describe('CustomerSearchPanel in Selection mode', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// List status and option errors: what assistive technology learns while a
-// page loads, once it has loaded, and after a rejected option's alert clears
-// ---------------------------------------------------------------------------
-
-/**
- * Answers the search queries `holds` selects with the fixture pages only once
- * `held` ({@link heldAnswer}) is released; the others are answered at once.
- * Registered over the suite's override, and records every query in
- * {@link searches} as it does.
- */
+/** Answers the queries `holds` selects only once `held` is released. */
 function holdSearches(holds: (query: SearchQuery) => boolean, held: HeldAnswer): void {
   server.use(
     http.get(SEARCH_PATH, async ({ request }) => {
@@ -1886,11 +1642,7 @@ function holdSearches(holds: (query: SearchQuery) => boolean, held: HeldAnswer):
   );
 }
 
-/**
- * The list's polite live region: the one `aria-live="polite"` element without
- * a role, so never the toast host's `status` region. Throws unless exactly
- * one is rendered.
- */
+/** The list's live region: the one `aria-live="polite"` element without a role, so never the toast host's `status` region. */
 function listStatus(): HTMLElement {
   const regions = Array.from(document.querySelectorAll<HTMLElement>('[aria-live="polite"]')).filter(
     (element) => !element.hasAttribute('role'),
@@ -1902,12 +1654,13 @@ function listStatus(): HTMLElement {
   return region;
 }
 
+// What assistive technology learns while a page loads, once it has loaded, and after a rejected option's alert clears.
 describe('CustomerSearchPanel list status and option errors', () => {
   it('Maintenance Enter: "Searching..." and aria-busy while the first page loads, then the page summary with "More..."', async () => {
     const held = heldAnswer();
     holdSearches((query) => query.cursor === null, held);
     const user = await renderSearchPage('MAINTENANCE');
-    // No list and no request: the region is present and empty (ERASE(SFL)).
+    // The empty region stands for ERASE(SFL): no list has been loaded.
     expect(listStatus()).toHaveAttribute('aria-atomic', 'true');
     expect(listStatus()).toBeEmptyDOMElement();
     expect(resultsTable()).not.toHaveAttribute('aria-busy');
@@ -1951,7 +1704,6 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(pending).not.toHaveClass('visually-hidden');
     expect(within(listStatus()).queryByText('Searching...')).not.toBeInTheDocument();
     expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
-    // The page shown and its indicator stay until the next page arrives.
     expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
     expect(pagingIndicator()).toHaveTextContent('More...');
     expect(statusRegion()).toBeEmptyDOMElement();
@@ -1965,7 +1717,6 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(pagingIndicator()).toHaveTextContent('Bottom');
     expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
 
-    // PageUp needs no request; the summary follows the page shown.
     await user.keyboard('{PageUp}');
 
     await waitForPage(ACTIVE_ROWS, 0);
@@ -1979,7 +1730,6 @@ describe('CustomerSearchPanel list status and option errors', () => {
     const includingInactive: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
     const user = await renderSearchPage('INQUIRY');
     await waitForPage(ACTIVE_ROWS, 0);
-    // F9: pages of 12, 12 and 6 rows; the second page is the deepest loaded one.
     await user.keyboard('{F9}');
     await waitForPage(ALL_ROWS, 0);
     await user.keyboard('{PageDown}');
@@ -2054,7 +1804,7 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(optionInput(other)).not.toHaveAttribute('aria-invalid');
     expect(optionInput(other)).not.toHaveAttribute('aria-describedby');
 
-    // A click is the next user action: the alert clears, the description stays.
+    // A click is the next user action, which clears the alert.
     await user.click(filterInput(NAME_FILTER));
 
     expect(alertRegion()).toBeEmptyDOMElement();
@@ -2062,7 +1812,6 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(optionInput(FIRST_ACTIVE.name)).toHaveAttribute('aria-describedby', descriptionId);
     expect(document.getElementById(descriptionId)?.textContent).toBe(text);
 
-    // A blank option clears the error at the next Enter.
     await user.clear(optionInput(FIRST_ACTIVE.name));
     await user.keyboard('{Enter}');
 

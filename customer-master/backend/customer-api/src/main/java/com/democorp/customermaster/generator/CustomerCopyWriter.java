@@ -31,81 +31,36 @@ import org.springframework.stereotype.Component;
  * columns are those of [5250_Subfile/Custmast2.sql:8-24] as migration V3 creates them, listed
  * explicitly rather than positionally, plus the new {@code row_version}.
  *
- * <h2>Where it runs</h2>
- * <ul>
- *   <li>{@code CustomerLoader.load} calls {@link #copy(PGConnection, Iterator)} after
- *       {@code TRUNCATE custmast}, on the connection bound to its transaction
- *       ({@code DataSourceUtils.getConnection(dataSource).unwrap(PGConnection.class)}). The rows
- *       therefore commit or roll back together with the truncate and the sequence restart.</li>
- *   <li>This class only streams rows. It never closes, commits or rolls back the connection, never
- *       issues {@code TRUNCATE} or {@code LOCK TABLE}, and never touches {@code custmast_id_seq}:
- *       those steps belong to {@code CustomerLoader} and {@code CustomerIdAllocator}, which own the
- *       lock ordering (table lock first, sequence second).</li>
- *   <li>The table name is unqualified. The schema comes from the connection's
- *       {@code currentSchema} ({@code DB_SCHEMA}), so no library or schema name appears here.</li>
- * </ul>
+ * <p>The caller, {@code CustomerLoader}, owns the connection and its transaction, the truncate, the
+ * table lock and the sequence restart; this class only streams rows.
  *
- * <h2>Wire format</h2>
- * <p>Each row is one CSV line terminated by {@code \n}, with the fields in the order of
- * {@link #COPY_SQL}:
- * <table>
- *   <caption>Column, source value and encoding</caption>
- *   <tr><th>Column</th><th>Value</th><th>Encoding</th></tr>
- *   <tr><td>{@code custid}</td><td>{@link Customer#custId()}, its 4 characters</td>
- *       <td>quoted text</td></tr>
- *   <tr><td>{@code name}</td><td>{@link Customer#name()}</td><td>quoted text</td></tr>
- *   <tr><td>{@code addr}, {@code city}, {@code state}, {@code zip}</td>
- *       <td>the components of {@link Customer#address()}</td><td>quoted text</td></tr>
- *   <tr><td>{@code corpphone}, {@code acctmgr}, {@code acctphone}, {@code active}</td>
- *       <td>the accessors of the same names</td><td>quoted text</td></tr>
- *   <tr><td>{@code chgtime}</td><td>{@link Customer#chgTime()}, truncated to microseconds</td>
- *       <td>unquoted ISO-8601 with offset, for example {@code 2026-10-05T14:03:09.123456Z}</td></tr>
- *   <tr><td>{@code chguser}</td><td>{@link Customer#chgUser()}</td><td>quoted text</td></tr>
- *   <tr><td>{@code row_version}</td><td>{@link Customer#rowVersion()}, or {@code 0} when
- *       {@code null}</td><td>unquoted integer</td></tr>
- * </table>
- *
- * <p>Encoding rules of PostgreSQL's CSV format that this writer relies on:
+ * <h2>CSV encoding</h2>
+ * <p>Each row is one CSV line terminated by {@code \n}, in {@link #COPY_SQL} column order. The rules of
+ * PostgreSQL's CSV format that this writer relies on:
  * <ul>
  *   <li><b>Every text field is quoted.</b> In CSV format an unquoted empty field reads as
- *       {@code NULL}, and every {@code custmast} column is {@code NOT NULL}. A quoted empty field
- *       {@code ""} reads as the empty string, so a {@code null} text value is written as
- *       {@code ""} and loads as {@code ''}, the value V3's defaults give {@code corpphone},
- *       {@code acctmgr} and {@code acctphone}.</li>
+ *       {@code NULL}, and every {@code custmast} column is {@code NOT NULL}, so a {@code null} text
+ *       value is written as {@code ""} and loads as {@code ''}.</li>
  *   <li><b>Only the double quote is escaped</b>, by doubling it. Commas, line breaks, apostrophes
- *       and backslashes are literal inside quotes, so the seed-style name
- *       {@code URNA \NUNC\ COMPANY} and {@code NIBH L'LOR COMPANY} load unchanged. A quoted
- *       {@code \.} is data, never the end-of-data marker.</li>
- *   <li><b>UTF-8.</b> pgjdbc always runs with {@code client_encoding} UTF8. Text that cannot be
- *       encoded, such as an unpaired surrogate, fails the copy instead of being replaced.</li>
- *   <li><b>Microseconds.</b> {@code chgtime} is {@code timestamptz(6)}. PostgreSQL rounds input
- *       with more digits, so the writer truncates to microseconds first, and the stored value is
- *       the load time truncated to microseconds, never rounded up.</li>
+ *       and backslashes are literal inside quotes, and a quoted {@code \.} is data, never the
+ *       end-of-data marker.</li>
+ *   <li><b>Strict UTF-8</b>, pgjdbc's fixed {@code client_encoding}. Text that cannot be encoded,
+ *       such as an unpaired surrogate, fails the copy instead of being replaced.</li>
+ *   <li><b>Microseconds.</b> {@code chgtime} is {@code timestamptz(6)}, and PostgreSQL rounds input
+ *       with more digits, so the writer truncates it to microseconds before formatting: the stored
+ *       value is the load time truncated, never rounded up.</li>
  * </ul>
+ * {@code chgtime}, ISO-8601 with offset, and {@code row_version}, {@code 0} for a {@code null}
+ * {@code rowVersion}, are written unquoted.
  *
- * <h2>Streaming and memory</h2>
- * <p>The iterator is consumed lazily, one row at a time. Lines accumulate in one buffer, which is
- * encoded and sent with {@link CopyIn#writeToCopy(byte[], int, int)} as soon as it holds
- * {@link #BATCH_BYTES} characters or more, and only at a line boundary, so a character is never
- * split across writes. Memory therefore stays constant, about one batch plus one line, whether the
- * load is 300 rows or 1,679,616.
- *
- * <h2>Failure</h2>
- * <p>If generating a row, encoding it or writing it fails, the open {@code COPY} is cancelled
- * ({@link CopyIn#cancelCopy()}), so the connection leaves copy mode and the caller's transaction can
- * roll back on it. A failure of the cancel itself is attached to the original exception with
- * {@link Throwable#addSuppressed(Throwable)}, and the original exception is rethrown unchanged.
- *
- * <h2>Logging</h2>
- * <p>Progress is logged at DEBUG every {@value #PROGRESS_INTERVAL} rows, and the total at the end.
- * No customer data is ever logged.
- *
- * <p>Example, inside the load transaction:
- * <pre>{@code
- * Connection con = DataSourceUtils.getConnection(dataSource); // bound to the transaction
- * PGConnection pg = con.unwrap(PGConnection.class);
- * long rows = copyWriter.copy(pg, generator.generate(CustomerId.parse("1001"), 300)); // 300
- * }</pre>
+ * <h2>Streaming, failure and logging</h2>
+ * <p>The iterator is consumed lazily. Lines are buffered and sent once the buffer holds
+ * {@link #BATCH_BYTES} characters or more, only at a line boundary, so memory stays constant, about
+ * one batch plus one line, whatever the row count. If generating, encoding or writing a row fails, the
+ * open {@code COPY} is cancelled so the caller's transaction can roll back, a failure of the cancel is
+ * added to the original exception as suppressed, and the original is rethrown unchanged. Progress is
+ * logged at DEBUG every {@value #PROGRESS_INTERVAL} rows, and the total at the end; no customer data
+ * is ever logged.
  *
  * <p>The bean holds no state: each call uses its own buffer and encoder, so concurrent calls on
  * different connections are safe. A single {@link PGConnection} must not be shared by concurrent
@@ -152,7 +107,6 @@ public class CustomerCopyWriter {
 
     /** Creates the writer. It has no dependencies and no state. */
     public CustomerCopyWriter() {
-        // Stateless: every call to copy(...) builds its own buffer and encoder.
     }
 
     /**

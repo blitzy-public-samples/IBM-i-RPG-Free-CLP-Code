@@ -1,90 +1,28 @@
 /**
  * CustomerDetailDialog: the customer display / change / add window.
  *
- * What it replaces. MTNCUSTR and its display file MTNCUSTD, in both variants
- * (5250_Subfile/MTNCUSTR.SQLRPGLE, 5250_Subfile/MTNCUSTD.DSPF,
- * USPS_Address/MTNCUSTR.SQLRPGLE, USPS_Address/MTNCUSTD.DSPF): the 17×54
- * window PMTCUSTR called with a customer id and a function code (`D`, `E` or
- * `A`) over the search list. Here the caller passes `mode` and `custId`, and
- * each program step is a stateless request:
+ * Replaces MTNCUSTR and MTNCUSTD (both variants), the 17×54 window over the
+ * search list, with stateless requests to /api/customers: ReadRecd (:315-338)
+ * → GET /{custId}; EditUpdData / EditAddData and Edit_Address → POST /review;
+ * UpdateRecd (:567-607) → PUT /{custId} with `version`; AddRecd (:548-566) → POST.
  *
- *   MTNCUSTR step                              Here
- *   ReadRecd (:315-338)                        GET /api/customers/{custId}
- *   EditUpdData / EditAddData, Edit_Address    POST /api/customers/review
- *   UpdateRecd (:567-607)                      PUT /api/customers/{custId} with `version`
- *   AddRecd (:548-566)                         POST /api/customers
+ * It owns the window's state (the error model's owning feature) and applies no
+ * business rule: field rules, normalization and standardization are the
+ * server's, and message texts come from the server or the catalog.
  *
- * This component is the state owner of the error model's client ownership
- * rule: it holds the stored record and its `version`, the draft, the
- * reviewed values, the phase (form or confirmation), the working State, the
- * field errors and whether the State picker or the conflict comparison is
- * open. It applies no business rule: every field rule, the normalization and
- * the address standardization are the server's. It only routes keys,
- * requests and responses.
+ * MTNCUSTD enables CF04, CA05 and CA12 only (:33-35). Every key it does not
+ * enable, PageUp and PageDown included, shows DEM0003 and changes nothing,
+ * standing in for the workstation's own rejection.
  *
- * Flows (MTNCUSTD enables CF04, CA05 and CA12 only, :33-35):
- * - **Display** (:181-191). Every field protected; one screen I/O, so Enter,
- *   F4, F5 and F12 (Escape) all close the window. F4 opens no picker and F5
- *   reloads nothing. Every other function key, and PageUp or PageDown, shows
- *   DEM0003 and the window stays.
- * - **Edit** (:195-247). Enter reviews; a passed review shows the
- *   confirmation with DEM0000. F5 re-reads the record (a vanished row shows
- *   DEM0599 and clears the form). F4 on State opens the State picker, F4
- *   elsewhere shows DEM0005. At the confirmation Enter saves; F12 or F5
- *   re-read the record and discard the entries (preserved source defect); F4
- *   shows DEM0003 and returns to the form with the entries kept.
- * - **Add** (:251-297). Opens cleared with Active `Y`; F5 clears again.
- *   Review shows DEM0009. At the confirmation Enter adds; F12 clears the form
- *   (preserved source defect); F4 or F5 show DEM0003 and return to the form
- *   with the entries kept.
- * - **Keys MTNCUSTD does not enable** (F3, F6, …) show DEM0003 and change
- *   nothing, standing in for the workstation's own rejection.
- * - **PageUp and PageDown** are n/a in every phase (display, form and
- *   confirmation): they show DEM0003 and change nothing, with no close, no
- *   phase change, no draft change and no request, and the browser neither
- *   pages nor scrolls; a confirmation stays shown. Shift+PageUp and
- *   Shift+PageDown are chords and stay native.
+ * Working State (F04Prompt :364-382, Edit_SD_STATE :488-500): what a cancelled
+ * State prompt puts back. It starts as the stored State (blank in add), becomes
+ * a chosen code, a reviewed State or a failed review's `stateAccepted`, and
+ * resets on every reload or clear. It is never inferred from which field failed.
  *
- * Working State (F04Prompt :364-382, Edit_SD_STATE :488-500). The State
- * picker is called with the program's working STATE, which is then always
- * copied back into the State field, so cancelling a prompt puts the working
- * State back. The working State starts as the stored State (blank in add),
- * becomes the chosen code on a prompt selection, becomes the reviewed State
- * on a passed review, becomes the problem's `stateAccepted` on a review that
- * failed after the State rule passed, and resets on every reload or clear.
- * It is never inferred from which field failed.
- *
- * Concurrency (UpdateRecd :593-602). A stale `version` answers 409 DEM1002
- * with `current`, which opens `ConflictCompareDialog` (Refresh loads
- * `current`; Re-apply copies the user's edits onto it and reviews again with
- * its version). A row lock answers 409 DEM1001, shown as an alert, and the
- * form returns with the entries kept.
- *
- * Messages. Server notices (DEM0000, DEM0009) are published from the
- * review's `notice`; problems go through `useProblemPresenter`; the
- * client-raised DEM0003 and DEM0005 come from the message catalog. The
- * bundle holds no message text: the strings below are screen labels, key
- * legends and the 5250 header texts (MTNCUSTR :101-103).
- *
- * Layer rule: imports come only from `api/`, `errors/`, `components/`,
- * `keyboard/`, `messages/`, `auth/`, `features/states/` and this folder, plus
- * React, `react-dom` and react-query.
- *
- * Rendering requires, above it: `QueryClientProvider`, `AuthProvider`,
- * `MessageCatalogProvider`, `ToastProvider` and `KeyScopeProvider`.
- *
- * @example
- * ```tsx
- * <CustomerDetailDialog
- *   open={detail !== null}
- *   mode={detail.mode}
- *   custId={detail.custId}
- *   onClose={(result) => {
- *     if (result?.saved) replaceRow(result.saved);
- *     setDetail(null);
- *   }}
- * />
- * ```
+ * Requires `QueryClientProvider`, `AuthProvider`, `MessageCatalogProvider`,
+ * `ToastProvider` and `KeyScopeProvider` above it. Layer rule: imports only
+ * `api/`, `errors/`, `components/`, `keyboard/`, `messages/`, `auth/`,
+ * `features/states/`, this folder, React, `react-dom` and react-query.
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
@@ -108,13 +46,9 @@ import { ConflictCompareDialog } from './ConflictCompareDialog';
 import { CustomerForm } from './CustomerForm';
 import type { CustomerFieldName } from './CustomerForm';
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
  * Which MTNCUSTR function the window runs: `display` (function code `D`,
- * option 5), `edit` (`E`, option 2) or `add` (`A`, F6).
+ * option 5), `edit` (`E`, option 2) or `add` (`A`, F6, with no `custId`).
  */
 export type DetailMode = 'display' | 'edit' | 'add';
 
@@ -132,13 +66,9 @@ export interface DetailCloseResult {
   added?: boolean;
 }
 
-/** Props of {@link CustomerDetailDialog}. */
 export interface CustomerDetailDialogProps {
-  /** Whether the window is shown. Each opening starts afresh: nothing carries over from an earlier one. */
   open: boolean;
-  /** The function to run. */
   mode: DetailMode;
-  /** The customer to display or change; absent in add mode. */
   custId?: string;
   /**
    * Called once when the window should close:
@@ -167,20 +97,11 @@ export function CustomerDetailDialog({ open, mode, custId, onClose }: CustomerDe
   return <DetailSession key={`${mode}:${custId ?? ''}`} mode={mode} custId={custId} onClose={onClose} />;
 }
 
-// ---------------------------------------------------------------------------
-// Constants and pure helpers
-// ---------------------------------------------------------------------------
-
-/** Id prefix of the header: the window is named by `customer-detail-title` and `customer-detail-function`. */
 const HEADER_ID = 'customer-detail';
-
-/** The ids that name the window, through `aria-labelledby`. */
 const LABELLED_BY = `${HEADER_ID}-title ${HEADER_ID}-function`;
-
-/** Id prefix of the editable form's inputs (`customer-detail-name`, …). */
 const FORM_ID_PREFIX = 'customer-detail';
 
-/** Id prefix of the confirmation panel's inputs; it differs from the form's, so no id is shared. */
+/** Differs from {@link FORM_ID_PREFIX}, so the form and the confirmation share no id. */
 const CONFIRM_ID_PREFIX = 'customer-confirm';
 
 /** The SH_FUNCT header of each function: H2TextD, H2TextE, H2TextA (MTNCUSTR :101-103). */
@@ -212,24 +133,15 @@ const BLANK: Readonly<CustomerFields> = Object.freeze({
 /** The cleared add form: `clear CUSTMAST_ds; ACTIVE = 'Y'` (MTNCUSTR :251-254, :280-282). */
 const EMPTY_ADD: Readonly<CustomerFields> = Object.freeze({ ...BLANK, active: 'Y' });
 
-/** The status of a problem whose meaning depends on its code (DEM1001 or DEM1002). */
 const STATUS_CONFLICT = 409;
-
-/** A record that no longer exists: 404 DEM0599. */
 const STATUS_NOT_FOUND = 404;
-
-/** A field rule or the address check failed: 422. */
 const STATUS_UNPROCESSABLE = 422;
-
-/** The catalog key of a row lock that outlasted the lock timeout. */
 const CODE_LOCKED = 'DEM1001';
 
-/** Whether a problem field names one of the nine customer data fields of the form. */
 function isCustomerField(name: string): name is CustomerFieldName {
   return (CUSTOMER_FIELD_NAMES as readonly string[]).includes(name);
 }
 
-/** Whether a customer id is present (not absent and not empty). */
 function hasId(id: string | undefined): id is string {
   return id !== undefined && id !== '';
 }
@@ -266,16 +178,10 @@ function initialDraft(mode: DetailMode, record: CustomerResponse | null): Custom
   return record !== null ? fieldsOf(record) : { ...BLANK };
 }
 
-/** Change handler of the protected display form; a read-only input never changes. */
 function keepDisplayedValue(_field: CustomerFieldName, _value: string): void {
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Session: initial data
-// ---------------------------------------------------------------------------
-
-/** Props shared by the session, its loader and the window body. */
 interface SessionProps {
   mode: DetailMode;
   custId: string | undefined;
@@ -391,16 +297,10 @@ function PendingScope({ onClose }: Pick<SessionProps, 'onClose'>) {
   return null;
 }
 
-/** A key that is swallowed on purpose: the window is not displayed yet. */
 function ignoreKey(): void {
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Window body: state and flows
-// ---------------------------------------------------------------------------
-
-/** Where an edit or add stands: keying the fields, or confirming the reviewed values. */
 type Phase = 'form' | 'confirm';
 
 /** An open DEM1002 comparison: what the user started from, what they tried to save, what is stored now. */
@@ -416,6 +316,7 @@ interface ConflictState {
  * on which MTNCUSTR never acts. The paging keys are n/a in every phase
  * (display, form and confirmation): they are bound, so the browser neither
  * pages nor scrolls, to the DEM0003 answer, which changes nothing.
+ * Shift+PageUp and Shift+PageDown are chords and stay native.
  */
 interface DetailKeys {
   Enter: () => void;
@@ -426,25 +327,17 @@ interface DetailKeys {
   PageDown: () => void;
 }
 
-/** Props of the window body: the session props plus the record read on opening, if any. */
 interface DetailWindowProps extends SessionProps {
-  /** The stored customer read on opening; `null` in add mode or when the read failed. */
   initialRecord: CustomerResponse | null;
 }
 
-
-/**
- * The open window: header, the form or the confirmation, the key legend and
- * the nested State picker and conflict comparison. Holds every piece of the
- * window's state and its one key scope.
- */
+/** The open window, holding every piece of its state and its one key scope. */
 function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProps) {
   const { username } = useAuth();
   const { publish } = useToasts();
   const { format } = useMessages();
   const { present } = useProblemPresenter();
 
-  // --- State ---------------------------------------------------------------
   // The stored record the stamp and the conflict comparison refer to; null in
   // add mode, after a failed read and after a vanished-row clear.
   const [record, setRecord] = useState<CustomerResponse | null>(initialRecord);
@@ -471,7 +364,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // its initial focus (DSPATR(PC)).
   const [formKey, setFormKey] = useState(0);
 
-  // --- Refs (written by callback refs, effects and handlers; never read during render)
+  // Refs: written by callback refs, effects and handlers; never read during render.
   const inputs = useRef<Partial<Record<CustomerFieldName, HTMLInputElement | null>>>({});
   const nameRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -491,14 +384,11 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     };
   }, []);
 
-  // --- Small helpers -------------------------------------------------------
-
   /** DEM0003 "Key is not active now": the answer to every key the screen does not enable. */
   function keyNotActive(): void {
     publish({ kind: 'alert', text: format('DEM0003') });
   }
 
-  /** Closes the window without a commit. */
   function close(): void {
     onClose();
   }
@@ -538,7 +428,6 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
-  /** Marks a request as started; false when one is already in flight. */
   function begin(): boolean {
     if (inFlight.current) {
       return false;
@@ -560,7 +449,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     }
   }
 
-  /** Shows the form again (remounted, so its focus applies) with `values` and no review pending. */
+  /** Shows the form again, remounted so its initial focus applies. */
   function showForm(values: CustomerFields): void {
     setDraft(values);
     setReviewed(null);
@@ -587,9 +476,6 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     setWorkingState('');
     showForm({ ...EMPTY_ADD });
   }
-
-
-  // --- Requests ------------------------------------------------------------
 
   /**
    * Edit mode's re-read (F5, and F12 or F5 at the confirmation;
@@ -699,7 +585,6 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     await save(async () => ({ saved: await customersApi.update(id, { ...values, version: readVersion }) }), values);
   }
 
-  /** Runs one write; success closes the window with its result, a failure is routed by {@link commitFailed}. */
   async function save(write: () => Promise<DetailCloseResult>, values: CustomerFields): Promise<void> {
     if (!begin()) {
       return;
@@ -750,9 +635,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     });
   }
 
-  // --- State prompt (F04Prompt, MTNCUSTR :364-382) -------------------------
-
-  /** F4 on the form: the State picker when focus is on State, otherwise DEM0005. */
+  /** F4 on the form (F04Prompt, MTNCUSTR :364-382): the State picker when focus is on State, otherwise DEM0005. */
   function prompt(): void {
     setFieldErrors([]);
     const stateInput = inputs.current.state;
@@ -788,9 +671,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     focusField('state');
   }
 
-  // --- Conflict comparison (UpdateRecd :593-599) ---------------------------
-
-  /** Refresh: `current` replaces the entries, as the source re-read and redisplayed the record. */
+  /** Refresh: `current` replaces the entries, as the source re-read and redisplayed the record (UpdateRecd :593-599). */
   function refreshFromConflict(current: CustomerResponse): void {
     setConflict(null);
     loadRecord(current);
@@ -810,26 +691,22 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     void runReview(merged);
   }
 
-  // --- Key handlers ----------------------------------------------------------
   // Every handler that starts a request, or changes what a pending request
   // will land on, does nothing while one is in flight; F12 on the form always
   // closes. Requests are gated once more by `begin`. While one is in flight
   // the key bar shows exactly those keys disabled (Enter, F4 and F5 on the
   // form; all four at the confirmation), and the form is read-only.
 
-  /** Enter on the form: review the draft. */
   function enterOnForm(): void {
     void runReview(draft);
   }
 
-  /** F4 on the form: the State prompt, or DEM0005 away from State. */
   function promptOnForm(): void {
     if (!inFlight.current) {
       prompt();
     }
   }
 
-  /** F5 on the form: edit re-reads the stored record (CA05 "Refresh"); add clears to Active `Y`. */
   function refreshOnForm(): void {
     if (inFlight.current) {
       return;
@@ -841,7 +718,6 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     }
   }
 
-  /** Enter at the confirmation: commit exactly the reviewed values. */
   function enterAtConfirm(): void {
     if (reviewed !== null) {
       void commit(reviewed);
@@ -877,12 +753,10 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     }
   }
 
-  // --- Keys: one scope, handlers per mode and phase ------------------------
-
   const confirming = phase === 'confirm' && reviewed !== null;
   let keys: DetailKeys;
   if (mode === 'display') {
-    // One protected screen I/O: whichever enabled key returns closes the window.
+    // One protected screen I/O (MTNCUSTR :181-191): whichever enabled key returns closes the window.
     keys = { Enter: close, F4: close, F5: close, F12: close, PageUp: keyNotActive, PageDown: keyNotActive };
   } else if (!confirming) {
     keys = {
@@ -951,8 +825,6 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     }
   }, [busy, confirming]);
 
-  // --- Render --------------------------------------------------------------
-
   const editable = mode !== 'display';
   const errors = errorsByField(fieldErrors);
   const firstErrorField = fieldErrors.map((error) => error.field).find(isCustomerField);
@@ -1007,4 +879,3 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     </Dialog>
   );
 }
-

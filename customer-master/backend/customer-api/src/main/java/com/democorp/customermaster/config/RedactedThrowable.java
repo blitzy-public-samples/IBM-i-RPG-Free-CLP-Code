@@ -1,4 +1,4 @@
-package com.democorp.customermaster.controller;
+package com.democorp.customermaster.config;
 
 import java.sql.SQLException;
 import java.util.Arrays;
@@ -18,9 +18,11 @@ import java.util.function.Supplier;
  * written; a PostgreSQL error quotes the SQL text and its {@code DETAIL}, such as
  * {@code Key (custid)=(EEEF) already exists} or {@code Failing row contains (...)}; and any message may
  * hold CR, LF or NUL characters that split or corrupt a log record. Every log line of an unexpected
- * failure ({@code ApiExceptionHandler}, {@code ProblemErrorController}, {@code ErrorDispatchFilter})
- * therefore passes {@code RedactedThrowable.of(failure)} to SLF4J, never the failure itself, while the
- * SQLSTATE argument of the line is still read from the original failure.
+ * failure ({@code ApiExceptionHandler}, {@code ProblemErrorController}, {@code ErrorDispatchFilter}), the
+ * two ERROR lines of {@code CustomerGeneratorRunner} and the DEBUG lines of
+ * {@code GeneratorStartupFailureReporter} therefore pass {@code RedactedThrowable.of(failure)} to SLF4J,
+ * never the failure itself, while an SQLSTATE argument of a line is still read from the original
+ * failure.
  *
  * <p><b>Policy.</b>
  * <ul>
@@ -53,10 +55,10 @@ import java.util.function.Supplier;
  * </ul>
  * In a log the copies render as, for example,
  * <pre>
- * c.d.c.controller.RedactedThrowable: org.springframework.dao.DuplicateKeyException [message withheld]
+ * c.d.c.config.RedactedThrowable: org.springframework.dao.DuplicateKeyException [message withheld]
  *     at org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator.doTranslate(...)
  *     ...
- * Caused by: c.d.c.controller.RedactedThrowable: org.postgresql.util.PSQLException [SQLSTATE 23505,
+ * Caused by: c.d.c.config.RedactedThrowable: org.postgresql.util.PSQLException [SQLSTATE 23505,
  *     vendor code 0; message withheld]
  *     at org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(...)
  * </pre>
@@ -64,9 +66,9 @@ import java.util.function.Supplier;
  *
  * <p><b>Use.</b> Instances exist only to be logged and are never thrown; they capture no stack trace of
  * their own. Each call to {@link #of(Throwable)} builds a new graph that shares nothing mutable with the
- * original, and the class holds no other state, so it is safe on every request thread.
+ * original, and the class holds no other state, so it is safe on every thread.
  */
-final class RedactedThrowable extends Throwable {
+public final class RedactedThrowable extends Throwable {
 
     /** Most exceptions one call to {@link #of(Throwable)} copies. */
     static final int MAX_NODES = 64;
@@ -112,7 +114,7 @@ final class RedactedThrowable extends Throwable {
      * @return the copy, or {@code null} when {@code failure} is {@code null}, so a call site may pass the
      *     result to SLF4J as its throwable argument either way
      */
-    static RedactedThrowable of(Throwable failure) {
+    public static RedactedThrowable of(Throwable failure) {
         return failure == null ? null : new Copier().copy(failure);
     }
 

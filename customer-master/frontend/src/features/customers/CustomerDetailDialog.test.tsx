@@ -1,85 +1,23 @@
 /**
- * Tests of the customer display / change / add window:
- * `./CustomerDetailDialog.tsx`, rendered with its real children
- * (`CustomerForm`, `ConfirmationPanel`, `ConflictCompareDialog`) and the real
- * `StatePicker` it nests.
- *
- * What it replaces. MTNCUSTR and its window MTNCUSTD, called by PMTCUSTR with
- * a customer id and a function code:
- * - **Display** (`D`, 5250_Subfile/MTNCUSTR.SQLRPGLE:181-191): ReadRecd,
- *   every field protected, one screen I/O, then the program ends, so every
- *   key MTNCUSTD enables (Enter, CF04, CA05, CA12; MTNCUSTD.DSPF:33-35)
- *   closes the window.
- * - **Edit** (`E`, :195-247): F12 ends, F5 re-reads (a vanished row sends
- *   DEM0599 and clears the fields), F4 prompts, Enter edits and, when the
- *   data is valid, protects the fields and asks for confirmation with
- *   DEM0000. At the confirmation Enter updates, F12 or F5 loop back to a
- *   re-read record (the entries are lost), any other key sends DEM0003.
- * - **Add** (`A`, :251-297): opens cleared with ACTIVE = 'Y'; F5 clears again.
- *   Enter edits and confirms with DEM0009; at the confirmation Enter adds,
- *   F12 refills the cleared fields, any other key sends DEM0003.
- * - **State prompt** (F04Prompt :364-382): PmtState is called with the
- *   program field STATE, which is then copied into SD_STATE whether or not a
- *   code was chosen, so a cancelled prompt puts back the *working State*.
- *   Edit_SD_STATE (:488-500) moves a valid SD_STATE into STATE, and the USPS
- *   variant's Edit_Address (USPS_Address/MTNCUSTR.SQLRPGLE:471-499) runs
- *   after it, so a later failure leaves the working State changed.
- * - **Concurrency** (UpdateRecd :567-607): a stale update sends DEM1002 and
- *   re-reads the record; a row lock sends DEM1001.
- * - **Messages** are the CUSTMSGF texts (5250_Subfile/CRTMSGF.CLLE:12-47),
- *   with the DEM0009 and DEM1002 typos corrected.
- *
- * What is pinned down here (AAP 0.3.8 "Detail flows", 0.8.3
- * `CustomerDetailDialog.test.tsx`):
- * - The field contract: the display, edit and add forms and both
- *   confirmations show Customer Id (length 4), then the nine fields in screen
- *   order, each named by its `<label for>` and limited by `maxlength` to its
- *   DDS length, against {@link FIELD_CONTRACT}, which is written out here
- *   rather than read from the form's table; an editable field takes no
- *   character past its length.
- * - Display read-only; Enter, F4, F5, F12 and Escape close with no picker and
- *   no reload; F3 shows DEM0003 and the window stays; a missing row DEM0599.
- * - Closing the window while its opening read is pending aborts that read,
- *   and its answer shows no alert; under StrictMode the read the simulated
- *   unmount aborts shows none either, and the remount's read opens the
- *   record.
- * - Edit → review → DEM0000 → PUT with `version`; add opens with Active `Y`
- *   → DEM0009 → POST → closes; a 422 highlights and focuses the first field
- *   and shows its message as an alert.
- * - A held Enter repeating while the review is in flight sends no second
- *   request.
- * - The confirmation keys of edit and add, Tab and Shift+Tab at a
- *   confirmation, 409 DEM1001 and 409 DEM1002 (the comparison window).
- * - F5 reloads in edit (fields and version) and clears in add; DEM0599.
- * - While a review, reload or save is pending the form is read-only, typing
- *   changes nothing and the key bar disables the keys that do nothing then
- *   (F12 on the form still closes); the response then lands on the values
- *   it was sent for, and focus stays inside the window.
- * - The "Last Change … by …" stamp of a record a user changed stays on the
- *   window from the form to the edit confirmation; a `*SYSTEM*` record and
- *   add show none.
- * - The working State in edit (stored `CA`) and in add (blank), read from
- *   the review result (`stateAccepted`) and never from which field failed.
- *
- * Fixtures. The stored customer is seed row AAAD (`customerDetail`) with its
- * State set to `CA`; a `GET /api/customers/:custId` override serves it from
- * {@link served}, so a test can change or remove the stored row between two
- * reads. Review, add and update are answered by the default handlers of
- * `src/test/handlers.ts` (the nine field rules, then the stub address
- * service), except where a test overrides a route with {@link problem} or a
- * fixed body to pin an exact value. Every request is recorded from MSW's
- * `request:start` event, before any handler runs, so the handlers keep
- * answering and the request bodies can be asserted.
+ * Tests of `./CustomerDetailDialog.tsx`, the display / change / add window,
+ * rendered with its real children (`CustomerForm`, `ConfirmationPanel`,
+ * `ConflictCompareDialog`) and the real `StatePicker` it nests, against a
+ * {@link FIELD_CONTRACT} written out independently of the form's field table.
  *
  * Evidence. These tests are derived from reading the IBM i source and the
  * plan; they are not executed against the IBM i program and do not establish
  * behavioural equivalence with it.
  *
+ * Fixtures. The stored customer is seed row AAAD with its State set to `CA`,
+ * served from {@link served} so a test can change or remove it between two
+ * reads; other routes use the default handlers of `src/test/handlers.ts`
+ * unless a test overrides them. Every request is recorded from MSW's
+ * `request:start` event, before any handler runs, so its body can be asserted.
+ *
  * Harness. The providers are mounted in the order `src/App.tsx` uses, with a
- * fresh `QueryClient` per test, and the toast `clear` wired to the key
- * scope's `onBeforeCommand`. A probe reads `useMessages().ready`, so message
- * assertions start only once the catalog has loaded (until then `format`
- * returns the bare code).
+ * fresh `QueryClient` per test and the toast `clear` wired to the key scope's
+ * `onBeforeCommand`. A catalog probe gates message assertions, because until
+ * the catalog has loaded `format` returns the bare code.
  */
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import type { Socket } from 'node:net';
@@ -89,8 +27,6 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider, notifyManager } from '@tanstack/react-query';
-// MSW 3 serves `http` and `HttpResponse` from its `msw/http` entry point, the
-// one src/test/handlers.ts and the other suites import them from.
 import { http, HttpResponse } from 'msw/http';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -109,14 +45,8 @@ import type { CustomerDetailDialogProps, DetailMode } from './CustomerDetailDial
 import type { CustomerFieldName } from './CustomerForm';
 import { formatChangeStamp } from './formatChangeStamp';
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-/** The nine customer data fields, every one present as a string. */
 type FieldValues = Record<CustomerFieldName, string>;
 
-/** The demo user with the MAINTENANCE role: review, add and update require it. */
 const MAINTENANCE_USER = (() => {
   const user = users.find((candidate) => candidate.roles.includes('MAINTENANCE'));
   if (user === undefined) {
@@ -125,10 +55,9 @@ const MAINTENANCE_USER = (() => {
   return user;
 })();
 
-/** The stored customer: seed row AAAD with State `CA`, the working State an edit starts from. */
+/** The stored State `CA` is the working State an edit starts from. */
 const STORED: CustomerResponse = { ...customerDetail, state: 'CA' };
 
-/** The nine customer data fields of a stored record: the shape of a write body. */
 function fieldsOf(record: CustomerResponse): FieldValues {
   return {
     active: record.active,
@@ -143,7 +72,6 @@ function fieldsOf(record: CustomerResponse): FieldValues {
   };
 }
 
-/** Every field blank: the form after a vanished row. */
 const BLANK: FieldValues = {
   active: '',
   name: '',
@@ -176,13 +104,11 @@ const NEW_CUSTOMER: FieldValues = {
   corpPhone: '(217) 555-0199',
 };
 
-/** The paths the window calls, relative as the SPA calls them. */
 const CUSTOMER_PATH = `/api/customers/${STORED.custId}`;
 const REVIEW_PATH = '/api/customers/review';
 const ADD_PATH = '/api/customers';
 const STATES_PATH = '/api/states';
 
-/** Accessible names of the windows: their ScreenHeader title and function line. */
 const DIALOG_NAMES: Readonly<Record<DetailMode, string>> = {
   display: 'Customer Master Displaying Customer',
   edit: 'Customer Master Change Customer',
@@ -191,17 +117,13 @@ const DIALOG_NAMES: Readonly<Record<DetailMode, string>> = {
 const STATE_PICKER_NAME = 'USA States';
 const CONFLICT_NAME = 'Customer Master Record Changed';
 
-/** Accessible name of the confirmation panel's group. */
 const CONFIRM_GROUP_NAME = 'Confirm customer';
 
-/** The test id of {@link CatalogProbe}. */
 const CATALOG_PROBE_ID = 'catalog-probe';
 
-/** One customer data field as the window must show it: its JSON name, its visible label and its length. */
 interface FieldContract {
   readonly field: CustomerFieldName;
   readonly label: string;
-  /** The DDS field length, which the input enforces as its `maxlength`. */
   readonly width: number;
 }
 
@@ -230,7 +152,6 @@ const FIELD_CONTRACT: readonly FieldContract[] = [
 /** The protected Customer Id ahead of the nine fields: SD_CUSTID, four base-36 characters. */
 const CUSTOMER_ID_CONTRACT = { label: 'Customer Id', width: 4 } as const;
 
-/** The visible label of each customer field, from {@link FIELD_CONTRACT}. */
 function labelOf(field: CustomerFieldName): string {
   const spec = FIELD_CONTRACT.find((candidate) => candidate.field === field);
   if (spec === undefined) {
@@ -239,10 +160,6 @@ function labelOf(field: CustomerFieldName): string {
   return spec.label;
 }
 
-// ---------------------------------------------------------------------------
-// The stored customer and the request log
-// ---------------------------------------------------------------------------
-
 /**
  * The customer `GET /api/customers/:custId` serves, read at request time, so
  * a test can change it (another user's change) or set it to `null` (a
@@ -250,14 +167,12 @@ function labelOf(field: CustomerFieldName): string {
  */
 let served: CustomerResponse | null = null;
 
-/** One request that reached MSW: method, path and, for a write, its body text. */
 interface RecordedRequest {
   method: string;
   path: string;
   body: Promise<string> | null;
 }
 
-/** Every `/api` request since the window was rendered, the catalog excepted, in order. */
 const traffic: RecordedRequest[] = [];
 
 /**
@@ -276,20 +191,14 @@ function recordRequest({ request }: { request: Request }): void {
   });
 }
 
-/** The recorded requests of one method and path. */
 function sent(method: string, path: string): RecordedRequest[] {
   return traffic.filter((entry) => entry.method === method && entry.path === path);
 }
 
-/** The JSON bodies of the recorded requests of one method and path, in order. */
 async function bodiesOf<T>(method: string, path: string): Promise<T[]> {
   const texts = await Promise.all(sent(method, path).map((entry) => entry.body ?? Promise.resolve('null')));
   return texts.map((text) => JSON.parse(text) as T);
 }
-
-// ---------------------------------------------------------------------------
-// Held responses
-// ---------------------------------------------------------------------------
 
 /**
  * A response held back until released: an MSW resolver answers through
@@ -334,7 +243,6 @@ let draining = false;
  */
 let fetchCalls: MockInstance<typeof globalThis.fetch> | undefined;
 
-/** The promise of every `fetch` the current test made, in call order. */
 function fetchesMade(): Promise<Response>[] {
   return (fetchCalls?.mock.results ?? []).flatMap((result) => (result.type === 'return' ? [result.value] : []));
 }
@@ -401,10 +309,6 @@ async function releaseHolds(): Promise<void> {
   heldAnswers.length = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Connections
-// ---------------------------------------------------------------------------
-//
 // Closing the window aborts its pending read, and the undici that Node 24
 // bundles (7.x) then opens a new connection to the origin with nothing to
 // send on it. MSW's socket interception passes a connection that carries no
@@ -424,12 +328,10 @@ const connectedSockets = new Map<Socket, boolean>();
 /** Waits for {@link connecting} to reach zero. */
 const connectWaiters: Array<() => void> = [];
 
-/** `undici:client:beforeConnect`: an attempt begins. */
 function onBeforeConnect(): void {
   connecting += 1;
 }
 
-/** `undici:client:connectError`, and the end of `undici:client:connected`: an attempt has settled. */
 function onConnectSettled(): void {
   connecting = Math.max(0, connecting - 1);
   if (connecting === 0) {
@@ -446,13 +348,11 @@ function onConnected(message: unknown): void {
   onConnectSettled();
 }
 
-/** `undici:client:sendHeaders`: a request was written on the socket. */
 function onSendHeaders(message: unknown): void {
   const { socket } = message as { socket: Socket };
   connectedSockets.set(socket, true);
 }
 
-/** The undici diagnostics channels the connection tracking listens on, with their listeners. */
 const CONNECTION_CHANNELS: ReadonlyArray<readonly [string, (message: unknown) => void]> = [
   ['undici:client:beforeConnect', onBeforeConnect],
   ['undici:client:connected', onConnected],
@@ -490,7 +390,6 @@ async function closeIdleConnections(): Promise<void> {
 }
 
 beforeEach(() => {
-  // The previous test's drain is over: this test's holds start closed.
   draining = false;
   for (const [channel, listener] of CONNECTION_CHANNELS) {
     subscribe(channel, listener);
@@ -529,27 +428,19 @@ afterEach(async () => {
   setCredentials(null);
 });
 
-/** A passed review as the API answers it: the values to confirm and the confirmation notice. */
 function reviewPassed(purpose: ReviewRequest['purpose'], customer: FieldValues, standardized = false): Response {
   const code = purpose === 'ADD' ? 'DEM0009' : 'DEM0000';
   return HttpResponse.json({ customer, standardized, notice: { code, message: messageText(code) } });
 }
 
-/** Overrides the review route with one fixed answer. */
 function answerReview(respond: () => Response): void {
   server.use(http.post(REVIEW_PATH, () => respond()));
 }
 
-/** Overrides the update route with one fixed answer. */
 function answerUpdate(respond: () => Response): void {
   server.use(http.put('/api/customers/:custId', () => respond()));
 }
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/** Wires the toast clear to the key scope's `onBeforeCommand`, as `src/App.tsx` does. */
 function KeyedScreens({ children }: { children: ReactNode }) {
   const { clear } = useToasts();
   return <KeyScopeProvider onBeforeCommand={clear}>{children}</KeyScopeProvider>;
@@ -564,26 +455,19 @@ function CatalogProbe() {
   return <span hidden data-testid={CATALOG_PROBE_ID} data-ready={ready ? 'true' : 'false'} />;
 }
 
-/** The window's `onClose`, as a mock. */
 type CloseMock = Mock<CustomerDetailDialogProps['onClose']>;
 
-/**
- * What {@link renderDialog} needs: the function, the id (absent in add) and,
- * optionally, the close callback and `strict`, which renders the tree under
- * `<StrictMode>` as `src/main.tsx` renders the application.
- */
 interface RenderOptions {
   mode: DetailMode;
   custId?: string;
   onClose?: CloseMock;
+  /** Renders the tree under `<StrictMode>`, as `src/main.tsx` renders the application. */
   strict?: boolean;
 }
 
-/** What {@link renderDialog} returns. */
 interface RenderedDialog {
   user: UserEvent;
   onClose: CloseMock;
-  /** The test's query client, to wait until no read is in flight. */
   queryClient: QueryClient;
   /** Renders again with `open` set, as the caller does: false closes the window, true opens it afresh. */
   setOpen: (open: boolean) => void;
@@ -636,7 +520,6 @@ function renderDialog({
   };
 }
 
-/** What {@link openDialog} returns. */
 interface OpenedDialog extends RenderedDialog {
   dialog: HTMLElement;
 }
@@ -656,7 +539,6 @@ async function openDialog(mode: DetailMode): Promise<OpenedDialog> {
   return { ...rendered, dialog };
 }
 
-/** The input of one customer field, by its exact label, inside `scope` (the form or the confirmation panel). */
 function inputOf(scope: HTMLElement, field: CustomerFieldName): HTMLInputElement {
   const element = within(scope).getByLabelText(labelOf(field));
   if (!(element instanceof HTMLInputElement)) {
@@ -665,7 +547,6 @@ function inputOf(scope: HTMLElement, field: CustomerFieldName): HTMLInputElement
   return element;
 }
 
-/** The nine field values shown in `scope`. */
 function valuesOf(scope: HTMLElement): FieldValues {
   const read = (field: CustomerFieldName): string => inputOf(scope, field).value;
   return {
@@ -681,7 +562,6 @@ function valuesOf(scope: HTMLElement): FieldValues {
   };
 }
 
-/** Replaces the value of one field by typing, as a user does (the field uppercases as typed). */
 async function retype(user: UserEvent, scope: HTMLElement, field: CustomerFieldName, text: string): Promise<void> {
   const input = inputOf(scope, field);
   await user.clear(input);
@@ -699,7 +579,6 @@ async function fillForm(user: UserEvent, scope: HTMLElement, values: FieldValues
   }
 }
 
-/** The confirmation panel, or `null` while the editable form is shown. */
 function queryConfirmation(scope: HTMLElement): HTMLElement | null {
   return within(scope).queryByRole('group', { name: CONFIRM_GROUP_NAME });
 }
@@ -722,17 +601,14 @@ async function waitForForm(dialog: HTMLElement): Promise<void> {
   expect(inputOf(dialog, 'name')).not.toHaveAttribute('readonly');
 }
 
-/** The shared alert region of the toast host: problem details and client-raised errors. */
 function alertRegion(): HTMLElement {
   return screen.getByRole('alert');
 }
 
-/** The shared status region of the toast host: the DEM0000 and DEM0009 confirmations. */
 function statusRegion(): HTMLElement {
   return screen.getByRole('status');
 }
 
-/** Opens the State prompt with F4 from the State field and returns the picker window once it is shown. */
 async function openStatePrompt(user: UserEvent, dialog: HTMLElement): Promise<HTMLElement> {
   await user.click(inputOf(dialog, 'state'));
   await user.keyboard('{F4}');
@@ -767,26 +643,17 @@ async function chooseStateInPrompt(user: UserEvent, dialog: HTMLElement, filter:
   await waitFor(() => expect(picker).not.toBeInTheDocument());
 }
 
-// ---------------------------------------------------------------------------
-// Specs
-// ---------------------------------------------------------------------------
-
 describe('CustomerDetailDialog', () => {
   it('starts from the fixtures: the stored customer has State CA and the add customer passes every rule', () => {
     expect(STORED.custId).toBe('AAAD');
     expect(STORED.state).toBe('CA');
     expect(STORED.version).toBe(0);
     expect(NEW_CUSTOMER.state).not.toBe(STORED.state);
-    // The field oracle holds each of the nine fields once, in the order of the
-    // value fixtures, and nine distinct labels, so the exact label query for
-    // "Name" resolves only the customer name, never "Account Manager Name".
+    // Nine distinct labels, so the exact label query for "Name" resolves only
+    // the customer name, never "Account Manager Name".
     expect(FIELD_CONTRACT.map(({ field }) => field)).toEqual(Object.keys(BLANK));
     expect(new Set(FIELD_CONTRACT.map(({ label }) => label)).size).toBe(9);
   });
-
-  // -------------------------------------------------------------------------
-  // Held responses: the teardown's drain
-  // -------------------------------------------------------------------------
 
   describe('held responses', () => {
     it('a hold its resolver creates only after the drain began is born released, so the drain settles that request', async () => {
@@ -826,10 +693,7 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // Field contract (MTNCUSTD.DSPF:61-125): screen order, labels, lengths
-  // -------------------------------------------------------------------------
-
   describe('field contract', () => {
     /** One textbox as the window shows it: the text of its `<label for>` and its `maxlength`. */
     interface ShownField {
@@ -909,7 +773,6 @@ describe('CustomerDetailDialog', () => {
         const input = inputOf(dialog, field);
         await user.clear(input);
         await user.type(input, 'x'.repeat(width + 1));
-        // Uppercased as typed, which keeps the length, and stopped at the width.
         expect(input).toHaveValue('X'.repeat(width));
       }
       expect(traffic).toHaveLength(1);
@@ -917,10 +780,7 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // Display (function code D, MTNCUSTR :181-191)
-  // -------------------------------------------------------------------------
-
   describe('display', () => {
     it('shows the stored customer under "Displaying Customer" with every input read-only', async () => {
       const { dialog } = await openDialog('display');
@@ -929,7 +789,6 @@ describe('CustomerDetailDialog', () => {
       expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
       expect(within(dialog).getByLabelText('Customer Id')).toHaveValue(STORED.custId);
       const inputs = within(dialog).getAllByRole('textbox');
-      // The protected Customer Id plus the nine data fields (ProtectAll).
       expect(inputs).toHaveLength(1 + 9);
       for (const input of inputs) {
         expect(input).toHaveAttribute('readonly');
@@ -980,7 +839,6 @@ describe('CustomerDetailDialog', () => {
     });
 
     describe('the opening read, when the window closes before it answers', () => {
-      /** What {@link renderWhileReading} returns: the rendered window and its held reads. */
       interface ReadingDialog extends RenderedDialog {
         /** The reads held so far, in arrival order, each by its own registered {@link Hold}. */
         held: readonly Hold[];
@@ -1150,7 +1008,6 @@ describe('CustomerDetailDialog', () => {
 
         await waitFor(() => expect(valuesOf(dialog)).toEqual(fieldsOf(STORED)));
         expect(alertRegion()).toBeEmptyDOMElement();
-        // Development's extra effect cycle aborted the first read; the remount's read answered.
         expect(signals().map((signal) => signal?.aborted)).toEqual([true, false]);
       });
 
@@ -1189,10 +1046,7 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // Edit and add flows (MTNCUSTR :195-297)
-  // -------------------------------------------------------------------------
-
   describe('edit and add flows', () => {
     it('edit: reviews the draft, confirms the reviewed values with DEM0000 and sends them with the version read', async () => {
       // The reviewed values differ from the typed ones (normalized and
@@ -1220,12 +1074,10 @@ describe('CustomerDetailDialog', () => {
       expect(inputOf(dialog, 'name')).toHaveValue('NIBH LOR HOLDINGS');
       const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
 
-      // The review carried EDIT and the nine fields as shown on the form.
       expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
         { purpose: 'EDIT', ...fieldsOf(STORED), name: 'NIBH LOR HOLDINGS' },
       ]);
       expect(within(statusRegion()).getByText('Press Enter to update. F12 to Cancel.')).toBeInTheDocument();
-      // The confirmation shows the reviewed values, every one protected.
       expect(valuesOf(panel)).toEqual(reviewed);
       for (const input of within(panel).getAllByRole('textbox')) {
         expect(input).toHaveAttribute('readonly');
@@ -1269,7 +1121,6 @@ describe('CustomerDetailDialog', () => {
     });
 
     it('a held Enter repeating while the review is in flight sends no second review, PUT or POST', async () => {
-      // The review answer is held back until the test releases it.
       const review = hold();
       server.use(http.post(REVIEW_PATH, () => review.answer(() => reviewPassed('EDIT', fieldsOf(STORED)))));
       const { user, dialog, onClose } = await openDialog('edit');
@@ -1346,12 +1197,8 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // Keys at the confirmation (MTNCUSTR :221-247, :273-292)
-  // -------------------------------------------------------------------------
-
   describe('keys at the edit confirmation', () => {
-    /** Opens the edit window, changes Name and reaches the confirmation. */
     async function confirmEdit(): Promise<OpenedDialog & { panel: HTMLElement }> {
       const opened = await openDialog('edit');
       await retype(opened.user, opened.dialog, 'name', 'new name co');
@@ -1507,14 +1354,12 @@ describe('CustomerDetailDialog', () => {
       });
     }
 
-    /** The method and path of every recorded request, in the order they were sent. */
     function requestOrder(): string[] {
       return traffic.map(({ method, path }) => `${method} ${path}`);
     }
 
     it('a 409 DEM1002 opens the comparison with its text and no toast; Refresh loads the current record, whose version the next save carries', async () => {
       const current = CONCURRENT;
-      // The Refreshed record reviewed again: Account Manager normalized and Address standardized.
       const refreshedReviewed: FieldValues = {
         ...fieldsOf(current),
         addr: 'P.O. BOX 103 9218 VIVAMUS AVE',
@@ -1530,7 +1375,6 @@ describe('CustomerDetailDialog', () => {
       const compare = await screen.findByRole('dialog', { name: CONFLICT_NAME });
       expect(within(compare).getByText('Someone else changed record. Review data.')).toBeInTheDocument();
       expect(messageText('DEM1002')).toBe('Someone else changed record. Review data.');
-      // The comparison carries the DEM1002 text itself: nothing is published.
       expect(alertRegion()).toBeEmptyDOMElement();
 
       await user.click(within(compare).getByRole('button', { name: 'Refresh' }));
@@ -1544,8 +1388,6 @@ describe('CustomerDetailDialog', () => {
       expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
 
-      // Enter reviews the refreshed fields; Enter at the confirmation saves
-      // the reviewed values under the version Refresh took from `current`.
       await user.click(inputOf(dialog, 'name'));
       const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
       expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
@@ -1639,7 +1481,6 @@ describe('CustomerDetailDialog', () => {
   });
 
   describe('keys at the add confirmation', () => {
-    /** Opens the add window, keys a valid customer and reaches the confirmation. */
     async function confirmAdd(): Promise<OpenedDialog & { panel: HTMLElement }> {
       const opened = await openDialog('add');
       await fillForm(opened.user, opened.dialog, NEW_CUSTOMER);
@@ -1705,10 +1546,7 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // PageUp and PageDown: n/a in the detail window (AAP 0.3.8 keyboard table)
-  // -------------------------------------------------------------------------
-
   describe('PageUp and PageDown (n/a in every phase)', () => {
     const PAGING_KEYS = ['PageUp', 'PageDown'] as const;
     type PagingKey = (typeof PAGING_KEYS)[number];
@@ -1736,7 +1574,6 @@ describe('CustomerDetailDialog', () => {
       return pressed.every((event) => event.defaultPrevented);
     }
 
-    /** Asserts that the alert region holds exactly one message: DEM0003 "Key is not active now". */
     function expectKeyNotActiveOnce(): void {
       const region = alertRegion();
       expect(region.children).toHaveLength(1);
@@ -1754,7 +1591,6 @@ describe('CustomerDetailDialog', () => {
       expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
       expect(inputOf(dialog, 'name')).toHaveAttribute('readonly');
 
-      // The window still answers its own keys, and the paging key sent nothing.
       await user.keyboard('{F12}');
       expect(onClose).toHaveBeenCalledTimes(1);
       expect(onClose).toHaveBeenCalledWith();
@@ -1776,7 +1612,6 @@ describe('CustomerDetailDialog', () => {
       expect(inputOf(dialog, 'name')).toHaveFocus();
       expect(onClose).not.toHaveBeenCalled();
 
-      // Enter then reviews exactly the typed entries; the paging key sent nothing before it.
       await reviewToConfirmation(user, dialog, 'DEM0000');
       expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([
         `GET ${CUSTOMER_PATH}`,
@@ -1799,7 +1634,6 @@ describe('CustomerDetailDialog', () => {
       expect(traffic).toHaveLength(0);
       expect(onClose).not.toHaveBeenCalled();
 
-      // Enter then reviews exactly the typed entries; the paging key sent nothing before it.
       await reviewToConfirmation(user, dialog, 'DEM0009');
       expect(traffic.map(({ method, path }) => `${method} ${path}`)).toEqual([`POST ${REVIEW_PATH}`]);
       expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([{ purpose: 'ADD', ...NEW_CUSTOMER }]);
@@ -1820,8 +1654,6 @@ describe('CustomerDetailDialog', () => {
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
       expect(onClose).not.toHaveBeenCalled();
 
-      // Enter then commits exactly the confirmed values with the version read;
-      // the paging key sent nothing before it.
       const saved: CustomerResponse = { ...STORED, ...confirmed, version: STORED.version + 1 };
       answerUpdate(() => HttpResponse.json(saved));
       await user.keyboard('{Enter}');
@@ -1851,7 +1683,6 @@ describe('CustomerDetailDialog', () => {
       expect(sent('POST', ADD_PATH)).toHaveLength(0);
       expect(onClose).not.toHaveBeenCalled();
 
-      // Enter then adds exactly the confirmed values; the paging key sent nothing before it.
       await user.keyboard('{Enter}');
       await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
       expect(onClose).toHaveBeenCalledWith({ added: true });
@@ -1877,7 +1708,6 @@ describe('CustomerDetailDialog', () => {
         read.release();
       }
 
-      // The window then opens on the stored record, read once.
       const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES.edit });
       expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
       expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
@@ -1885,14 +1715,10 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // F5 on the form (MTNCUSTR :209-216, :284-287)
-  // -------------------------------------------------------------------------
-
   describe('F5 on the form', () => {
     it('edit: re-reads the record, replacing the entries and the version the next update is conditional on', async () => {
       const { user, dialog, onClose } = await openDialog('edit');
-      // Another user's change raised the stored version to 4 meanwhile.
       const reloaded: CustomerResponse = { ...STORED, name: 'NIBH RELOADED CO', chgUser: 'other-user', version: 4 };
       served = reloaded;
       const saved: CustomerResponse = { ...reloaded, chgUser: MAINTENANCE_USER.username, version: 5 };
@@ -1947,13 +1773,8 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // Change stamp (FillScreenFields :340-363, run again at the edit
-  // confirmation :221-225)
-  // -------------------------------------------------------------------------
-
+  // Change stamp (FillScreenFields :340-363, run again at the edit confirmation :221-225)
   describe('change stamp', () => {
-    /** The stamp line of `record` as the window shows it, built by the one formatter. */
     function stampLineOf(record: CustomerResponse): string {
       const text = formatChangeStamp(record.chgTime, record.chgUser);
       if (text === null) {
@@ -1962,7 +1783,6 @@ describe('CustomerDetailDialog', () => {
       return `Last Change ${text}`;
     }
 
-    /** Every "Last Change …" line inside `scope`. */
     function stampLinesIn(scope: HTMLElement): HTMLElement[] {
       return within(scope).queryAllByText(/^Last Change /);
     }
@@ -1974,7 +1794,6 @@ describe('CustomerDetailDialog', () => {
       expect(stampLine.endsWith(` by ${MAINTENANCE_USER.username}`)).toBe(true);
       const { user, dialog } = await openDialog('edit');
 
-      // The form: one stamp line, after the nine fields.
       const formStamp = within(dialog).getByText(stampLine);
       expect(stampLinesIn(dialog)).toEqual([formStamp]);
       expect(formStamp.tagName).toBe('P');
@@ -1984,8 +1803,6 @@ describe('CustomerDetailDialog', () => {
       await retype(user, dialog, 'name', 'stamped name co');
       const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
 
-      // The confirmation: the identical line, once in the window, inside the
-      // panel and after its nine fields, as on the form.
       const confirmStamp = within(panel).getByText(stampLine);
       expect(stampLinesIn(dialog)).toEqual([confirmStamp]);
       expect(confirmStamp.tagName).toBe('P');
@@ -2021,17 +1838,14 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
   // Working State (F04Prompt :364-382, Edit_SD_STATE :488-500)
-  // -------------------------------------------------------------------------
-
   describe('working State in edit (stored CA)', () => {
     it('a prompt selection replaces it: TX chosen, NV typed, a cancelled prompt puts back TX', async () => {
       const { user, dialog } = await openDialog('edit');
 
       await chooseStateInPrompt(user, dialog, 'tex', 'Texas');
 
-      // The picker closed with the code in the field; F4 runs no edit.
+      // F4 runs no edit.
       expect(screen.queryByRole('dialog', { name: STATE_PICKER_NAME })).not.toBeInTheDocument();
       expect(inputOf(dialog, 'state')).toHaveValue('TX');
       await waitFor(() => expect(inputOf(dialog, 'state')).toHaveFocus());
@@ -2224,12 +2038,7 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // While a request is pending (review, F5 reload, save)
-  // -------------------------------------------------------------------------
-
   describe('while a request is pending', () => {
-    /** One key-bar button of the window, by its legend. */
     function keyButton(dialog: HTMLElement, legend: string): HTMLElement {
       const bar = within(dialog).getByRole('toolbar', { name: 'Function keys' });
       return within(bar).getByRole('button', { name: legend });

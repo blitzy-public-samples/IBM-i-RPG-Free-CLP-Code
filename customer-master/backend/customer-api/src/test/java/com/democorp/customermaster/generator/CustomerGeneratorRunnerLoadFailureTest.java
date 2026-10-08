@@ -27,6 +27,7 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.TransactionSystemException;
 
@@ -39,8 +40,15 @@ import org.springframework.transaction.TransactionSystemException;
  * {@link DataAccessResourceFailureException} for a connection failure (SQLSTATE class {@code 08}), or as a
  * {@link TransactionSystemException} when the translator has no category. When the connection is lost before
  * the commit is acknowledged, PostgreSQL may have committed the new rows and the restarted sequence, so the
- * runner must neither say they are unchanged nor hide the exception: it logs at ERROR with the exception,
- * advises verifying {@code custmast} and {@code custmast_id_seq} before a retry, and prints one line.
+ * runner must neither say they are unchanged nor hide the exception: it logs at ERROR with the exception's
+ * value-free copy, advises verifying {@code custmast} and {@code custmast_id_seq} before a retry, and prints
+ * one line.
+ *
+ * <p><b>What the log may carry.</b> A failed {@code COPY} quotes the copied record in its {@code DETAIL} and
+ * {@code CONTEXT}, and any message, cause or suppressed exception may hold CR or LF. Both ERROR lines, the
+ * load failure's and the one for an unexpected failure outside the load steps, therefore carry their fixed
+ * text and, of the exception graph, only types, stack frames and SQLSTATEs; the cases plant sentinels and
+ * line breaks in every message of the graph and find none of them in the captured log.
  *
  * <p><b>What stays as it was.</b> A lock wait ends the load before anything commits, and still prints
  * LOADCUST2's {@code Cannot allocate CUSTMAST} [5250_Subfile/LOADCUST2.CLLE:10-18].
@@ -66,6 +74,34 @@ final class CustomerGeneratorRunnerLoadFailureTest {
 
     /** SQLSTATE {@code connection_failure}. */
     private static final String CONNECTION_FAILURE = "08006";
+
+    /** SQLSTATE {@code not_null_violation}, which a {@code COPY} of a row missing a value raises. */
+    private static final String NOT_NULL_VIOLATION = "23502";
+
+    /** The message of the failure's top exception: a sentinel, then text after a CR, an LF and a CR LF. */
+    private static final String TOP_MESSAGE = "COPY custmast; TOP-SENTINEL\rFORGED line after CR\n"
+            + "FORGED line after LF\r\nFORGED line after CR LF";
+
+    /** A PostgreSQL error as pgjdbc words it, with the copied record in its detail and line breaks. */
+    private static final String CAUSE_MESSAGE = "ERROR: null value in column \"zip\" violates not-null constraint\r\n"
+            + "  Detail: Failing row contains (C000, CAUSE-SENTINEL, SENTINELCITYZQ, NY).\n"
+            + "  Where: COPY custmast, line 1\rFORGED cause line";
+
+    /** {@link #CAUSE_MESSAGE} on one line, as the printed outcome line names the root cause. */
+    private static final String CAUSE_LINE = "ERROR: null value in column \"zip\" violates not-null constraint"
+            + " Detail: Failing row contains (C000, CAUSE-SENTINEL, SENTINELCITYZQ, NY)."
+            + " Where: COPY custmast, line 1 FORGED cause line";
+
+    /** The message of the failure's suppressed exception, with a CR LF and an LF. */
+    private static final String SUPPRESSED_MESSAGE = "SUPPRESSED-SENTINEL\r\nFORGED suppressed line\nFORGED";
+
+    /**
+     * Text of {@link #TOP_MESSAGE}, {@link #CAUSE_MESSAGE} and {@link #SUPPRESSED_MESSAGE} that no log line may
+     * carry; every line break in them is followed by {@code FORGED}, so a break that survived would too.
+     */
+    private static final List<String> SENTINELS = List.of(
+            "TOP-SENTINEL", "CAUSE-SENTINEL", "SENTINELCITYZQ", "Failing row contains", "SUPPRESSED-SENTINEL",
+            "FORGED");
 
     /** The generator options of every case: five rows from {@code C000}, seeded, bundled sample. */
     private static final GeneratorProperties OPTIONS =
@@ -144,14 +180,105 @@ final class CustomerGeneratorRunnerLoadFailureTest {
         verifyNoInteractions(jdbcTemplate);
     }
 
+    @Test
+    @DisplayName("a load failure with data and CR/LF in its message, cause and suppressed one is logged value-free")
+    void loadFailureIsLoggedValueFree(CapturedOutput output) {
+        when(loader.load(any())).thenThrow(withSentinelLinks(new DataIntegrityViolationException(TOP_MESSAGE)));
+
+        int status = runner.execute(new DefaultApplicationArguments(ARGS));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        verifyNoInteractions(jdbcTemplate);
+        assertThat(printedLines()).containsExactly("Load failed: " + CAUSE_LINE + PRINTED_ADVICE);
+        String log = output.getAll();
+        assertThat(errorLines(log, "generator.load failed"))
+                .singleElement(InstanceOfAssertFactories.STRING)
+                .contains("the outcome is unknown")
+                .contains(LOGGED_ADVICE);
+        assertValueFreeGraph(log, DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @DisplayName("an unexpected failure outside the load steps is logged value-free and still exits 1")
+    void unexpectedFailureIsLoggedValueFree(CapturedOutput output) {
+        GeneratorProperties failingOptions = mock(GeneratorProperties.class);
+        when(failingOptions.count()).thenThrow(withSentinelLinks(new IllegalStateException(TOP_MESSAGE)));
+        CustomerGeneratorRunner failingRunner = new CustomerGeneratorRunner(failingOptions, mock(CszSource.class),
+                loader, jdbcTemplate, CLOCK, new PrintStream(printed, true, UTF_8));
+
+        int status = failingRunner.execute(new DefaultApplicationArguments(ARGS));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        verifyNoInteractions(loader, jdbcTemplate);
+        assertThat(printedLines()).containsExactly("Load failed: " + CAUSE_LINE);
+        String log = output.getAll();
+        assertThat(errorLines(log, "generator.failed unexpected error")).hasSize(1);
+        assertValueFreeGraph(log, IllegalStateException.class);
+    }
+
+    /**
+     * Gives a failure the cause and the suppressed exception of a failed {@code COPY}: an {@link SQLException}
+     * whose message quotes the copied record, and a failure of the cleanup, each with sentinels and line breaks.
+     *
+     * @param top the top exception, created without a cause and with {@link #TOP_MESSAGE}
+     * @return {@code top}
+     */
+    private static RuntimeException withSentinelLinks(RuntimeException top) {
+        top.initCause(new SQLException(CAUSE_MESSAGE, NOT_NULL_VIOLATION));
+        top.addSuppressed(new IllegalStateException(SUPPRESSED_MESSAGE));
+        return top;
+    }
+
+    /**
+     * Asserts that a captured log carries the value-free copy of a {@link #withSentinelLinks} failure: every
+     * exception's type, the cause's SQLSTATE and the stack frames, and no text of any message, so no forged line.
+     *
+     * @param log the captured log
+     * @param top the type of the failure's top exception
+     */
+    private static void assertValueFreeGraph(String log, Class<?> top) {
+        assertThat(log)
+                .contains(top.getName() + " [message withheld]")
+                .contains("Caused by: ")
+                .contains(redactedSqlException(NOT_NULL_VIOLATION))
+                .contains("Suppressed: ")
+                .contains("java.lang.IllegalStateException [message withheld]")
+                .doesNotContain(SENTINELS);
+        String testFrame = "\tat " + CustomerGeneratorRunnerLoadFailureTest.class.getName() + ".";
+        assertThat(log.lines())
+                .anyMatch(line -> line.startsWith(testFrame))
+                .noneMatch(line -> line.strip().startsWith("FORGED"));
+    }
+
+    /**
+     * Returns the value-free text of a plain {@link SQLException} with vendor code 0.
+     *
+     * @param sqlState its SQLSTATE
+     * @return the text, for example {@code java.sql.SQLException [SQLSTATE 08006, vendor code 0; message withheld]}
+     */
+    private static String redactedSqlException(String sqlState) {
+        return "java.sql.SQLException [SQLSTATE " + sqlState + ", vendor code 0; message withheld]";
+    }
+
+    /**
+     * Returns the ERROR lines of a captured log that carry a message.
+     *
+     * @param log     the captured log
+     * @param message the text the line must carry
+     * @return the matching lines
+     */
+    private static List<String> errorLines(String log, String message) {
+        return log.lines().filter(line -> line.contains(" ERROR ") && line.contains(message)).toList();
+    }
+
     /**
      * Asserts the report of a failure whose outcome the runner cannot know: status 1, exactly one printed line
      * naming the root cause with the verification advice, an ERROR log line carrying the advice and the
-     * exception, no ANALYZE, and no claim anywhere that the table or the sequence is unchanged.
+     * exception's value-free copy, no ANALYZE, and no claim anywhere that the table or the sequence is unchanged.
      *
      * @param status   the status {@link CustomerGeneratorRunner#execute} returned
      * @param output   the captured log
-     * @param reported the type of the exception the loader threw, whose stack trace the log must carry
+     * @param reported the type of the exception the loader threw, whose value-free copy the log must carry
      */
     private void assertOutcomeUnknownReported(int status, CapturedOutput output, Class<?> reported) {
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
@@ -161,11 +288,15 @@ final class CustomerGeneratorRunnerLoadFailureTest {
         assertThat(printedLines()).containsExactly("Load failed: " + CONNECTION_LOST + PRINTED_ADVICE);
 
         String log = output.getAll();
-        assertThat(log.lines().filter(line -> line.contains(" ERROR ") && line.contains("generator.load failed")))
+        assertThat(errorLines(log, "generator.load failed"))
                 .singleElement(InstanceOfAssertFactories.STRING)
                 .contains("the outcome is unknown")
                 .contains(LOGGED_ADVICE);
-        assertThat(log).contains(reported.getName() + ": ").doesNotContainIgnoringCase("unchanged");
+        assertThat(log)
+                .contains(reported.getName() + " [message withheld]")
+                .contains(redactedSqlException(CONNECTION_FAILURE))
+                .doesNotContain(CONNECTION_LOST)
+                .doesNotContainIgnoringCase("unchanged");
         assertThat(printed.toString(UTF_8)).doesNotContainIgnoringCase("unchanged");
     }
 
