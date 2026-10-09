@@ -206,6 +206,27 @@ interface FocusRequest {
   onlyIfLost: boolean;
 }
 
+/**
+ * A request to show a page from its first row: once the page with the 0-based
+ * index `page` is the one shown, its heading row and first row are brought
+ * into view in whatever scrolls the list (the framed page's or the picker
+ * window's body, or the page itself where it is not framed), as the 5250
+ * displayed each page from its first record (SC_CSR_RCD, PMTCUSTR :135-137,
+ * :559-560). Until then the request waits, as a page focus request does, and
+ * `seq` makes every request distinct, so each is honoured once and a newer
+ * one replaces one still waiting. It never moves focus.
+ */
+interface ScrollRequest {
+  seq: number;
+  page: number;
+}
+
+/**
+ * The least scrolling that brings a row into view, never smooth, so nothing
+ * moves with a timed effect; the scroll container's scroll padding holds.
+ */
+const ROW_INTO_VIEW: ScrollIntoViewOptions = { behavior: 'instant', block: 'nearest', inline: 'nearest' };
+
 /** ProcessOption, :437-499. */
 function classifyOption(mode: SearchMode, option: string): OptionKind | null {
   if (option === '1' && mode === 'selection') {
@@ -246,6 +267,21 @@ function criteriaDiffer(typed: Readonly<Record<FilterField, string>>, applied: S
 function isFocusLost(): boolean {
   const active = document.activeElement;
   return active === null || active === document.body || !active.isConnected;
+}
+
+/**
+ * Every element around `element` that scrolls sideways, the page's root
+ * included, each with its sideways scroll position, so a scroll into view can
+ * put them back.
+ */
+function sidewaysScrollPositions(element: Element | null): Array<readonly [Element, number]> {
+  const positions: Array<readonly [Element, number]> = [];
+  for (let box = element?.parentElement ?? null; box !== null; box = box.parentElement) {
+    if (box.scrollWidth > box.clientWidth) {
+      positions.push([box, box.scrollLeft]);
+    }
+  }
+  return positions;
 }
 
 function isFilterField(field: string): field is FilterField {
@@ -308,6 +344,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   // PmtState (PMTSTATER).
   const [pickerOpen, setPickerOpen] = useState(false);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  const [scrollRequest, setScrollRequest] = useState<ScrollRequest | null>(null);
 
   const containerRef = useRef<HTMLElement | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
@@ -319,6 +356,12 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   // Sequence of focus requests, and the last one honoured.
   const focusSeqRef = useRef(0);
   const handledFocusRef = useRef(0);
+  // The results table's heading row and the first row of the page shown.
+  const headingRowRef = useRef<HTMLTableRowElement | null>(null);
+  const firstRowRef = useRef<HTMLTableRowElement | null>(null);
+  // Sequence of scroll requests, and the last one honoured.
+  const scrollSeqRef = useRef(0);
+  const handledScrollRef = useRef(0);
 
   /** DEM0003 "Key is not active now": every key or action the screen does not enable now. */
   function keyNotActive(): void {
@@ -381,6 +424,17 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     setFocusRequest({ seq: focusSeqRef.current, target, onlyIfLost });
   }
 
+  /**
+   * Asks for the page with the 0-based index `page` to be shown from its first
+   * row once it is the page shown: its heading row and first row scrolled into
+   * view, focus left where it is. Made only by a key that changes the page
+   * shown.
+   */
+  function requestPageScroll(page: number): void {
+    scrollSeqRef.current += 1;
+    setScrollRequest({ seq: scrollSeqRef.current, page });
+  }
+
   const list = useCustomerSearch({
     // Inquiry loads the first page with the criteria on screen at entry
     // (:252-256); Maintenance and Selection wait for the first Enter.
@@ -406,7 +460,13 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   // up only while that very page is shown, so a render that still shows the
   // page being left (the page asked for still loading, or its rows not yet
   // rendered) leaves the request waiting. Each request is honoured once; one
-  // whose page has no rows is dropped. This effect only moves focus.
+  // whose page has no rows is dropped. Focus moves only to the field asked
+  // for. An unconditional request for the field that already has focus (Enter
+  // typed in it, or tapped on the key bar, which keeps focus there) scrolls
+  // that field the least that brings it into view instead, within the scroll
+  // padding that keeps it clear of the message band, because focus() on the
+  // focused element scrolls nothing. A conditional request only moves focus,
+  // and only when focus was lost.
   useEffect(() => {
     if (focusRequest === null || focusRequest.seq === handledFocusRef.current) {
       return;
@@ -423,10 +483,45 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
       return;
     }
     handledFocusRef.current = focusRequest.seq;
-    if (input !== undefined && (!focusRequest.onlyIfLost || isFocusLost())) {
+    if (input === undefined) {
+      return;
+    }
+    if (!focusRequest.onlyIfLost && input === document.activeElement) {
+      input.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else if (!focusRequest.onlyIfLost || isFocusLost()) {
       input.focus();
     }
   }, [focusRequest, list.page, list.position]);
+
+  // Honours a scroll request once the page it names is shown, so its rows are
+  // rendered: the page's first row, then the heading row, each scrolled the
+  // least that brings it into view, so a list already showing both does not
+  // move, and the heading and first row end up in view whether the scroll
+  // position left them above or below the visible part of the list. Only the
+  // block direction moves: `inline: 'nearest'` still aligns the start of a row
+  // wider than the list's sideways-scrolling box with the box's edge, which
+  // would scroll the box's focus-ring room out of view, so every sideways
+  // position is put back. Declared after the focus effect, so a focus move,
+  // which scrolls on its own, comes first. Each request is honoured once.
+  // This effect never moves focus.
+  useEffect(() => {
+    if (scrollRequest === null || scrollRequest.seq === handledScrollRef.current) {
+      return;
+    }
+    if (list.position !== scrollRequest.page) {
+      // The page asked for is not shown yet; the render that shows it runs this again.
+      return;
+    }
+    handledScrollRef.current = scrollRequest.seq;
+    const firstRow = firstRowRef.current;
+    const headingRow = headingRowRef.current;
+    const sideways = sidewaysScrollPositions(headingRow ?? firstRow);
+    firstRow?.scrollIntoView(ROW_INTO_VIEW);
+    headingRow?.scrollIntoView(ROW_INTO_VIEW);
+    for (const [box, left] of sideways) {
+      box.scrollLeft = left;
+    }
+  }, [scrollRequest, list.position]);
 
   /** The SflClear half of the source: the typed options and their errors. */
   function clearOptions(): void {
@@ -449,6 +544,22 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   function openDetail(request: DetailRequest): void {
     openDetailRef.current = request;
     setDetail(request);
+  }
+
+  /**
+   * Enter with nothing to process: the last page loaded so far, cursor on its
+   * first record (PMTCUSTR :506-512). Focus follows to that row only when the
+   * field that had it left with the page it was on; the page is shown from its
+   * first row when it replaces another.
+   */
+  function showLastLoaded(): void {
+    const destination = lastLoadedPage();
+    const changesPage = list.position !== destination;
+    list.toLastLoaded();
+    requestRowFocus({ page: destination }, true);
+    if (changesPage) {
+      requestPageScroll(destination);
+    }
   }
 
   /**
@@ -479,8 +590,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
       requestRowFocus({ custId: walk.lastProcessed }, true);
       return;
     }
-    list.toLastLoaded();
-    requestRowFocus({ page: lastLoadedPage() }, true);
+    showLastLoaded();
   }
 
   /**
@@ -544,8 +654,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
       // the field that had focus left with the page it was on (preserved
       // source defect, :506-513).
       setInvalid({});
-      list.toLastLoaded();
-      requestRowFocus({ page: lastLoadedPage() }, true);
+      showLastLoaded();
       return;
     }
 
@@ -683,7 +792,8 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
    * stays; at the bottom the page stays, as it does when a newer key took
    * over while the page loaded. Focus that was on the page left behind
    * follows to the first row of the new page, once that page is shown, as
-   * the 5250 cursor landed on the page's first record (SFLRCDNBR(CURSOR)).
+   * the 5250 cursor landed on the page's first record (SFLRCDNBR(CURSOR)),
+   * and the new page is shown from its first row (SflFillPage, :570-585).
    */
   function pageDown(): void {
     if (!list.hasList) {
@@ -697,6 +807,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
           keyNotActive();
         } else if (outcome === 'moved' || outcome === 'loaded') {
           requestRowFocus({ page: destination }, true);
+          requestPageScroll(destination);
         }
       },
       (error: unknown) => present(error),
@@ -706,7 +817,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
   /**
    * PageUp: the previous loaded page, with no request (the loaded pages are
    * the cursor stack); DEM0003 with no list; at the first page it stays.
-   * Focus follows as for PageDown.
+   * Focus follows, and the page is shown from its first row, as for PageDown.
    */
   function pageUp(): void {
     if (!list.hasList) {
@@ -716,6 +827,7 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     const destination = list.position - 1;
     if (list.previous()) {
       requestRowFocus({ page: destination }, true);
+      requestPageScroll(destination);
     }
   }
 
@@ -801,6 +913,8 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
           onAction={runAction}
           optionRef={optionRef}
           busy={searching || loadingNextInView}
+          headingRowRef={headingRowRef}
+          firstRowRef={firstRowRef}
         />
         {/*
           List status: the list's one polite live region (aria-atomic; not

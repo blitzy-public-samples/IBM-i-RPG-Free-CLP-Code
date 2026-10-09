@@ -28,6 +28,12 @@ import { cleanup } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { server } from './server';
 
+// jsdom lays nothing out and implements no `scrollIntoView`, which components
+// under test call to bring part of a screen into view. The no-op only fills
+// the gap, so a spec can still spy on the calls; a browser keeps its own
+// implementation.
+Element.prototype.scrollIntoView ??= () => {};
+
 /** The `fetch` in place before {@link installRelativeFetch} wrapped it; `undefined` while no wrapper is installed. */
 let fetchBeforeGuard: typeof globalThis.fetch | undefined;
 

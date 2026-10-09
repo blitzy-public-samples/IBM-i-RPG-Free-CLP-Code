@@ -560,6 +560,49 @@ function statusRegion(): HTMLElement {
   return screen.getByRole('status');
 }
 
+function firstNameOn(rows: readonly CustomerSummaryResponse[], page: number): string {
+  const name = pageNames(rows, page)[0];
+  if (name === undefined) {
+    throw new Error(`Page ${page + 1} of the fixture rows is empty`);
+  }
+  return name;
+}
+
+/** The results table's column heading row, its first row. */
+function headingRow(): HTMLElement {
+  const [row] = within(resultsTable()).getAllByRole('row');
+  if (row === undefined) {
+    throw new Error('The results table has no heading row');
+  }
+  return row;
+}
+
+/**
+ * Spies on `scrollIntoView`, which jsdom lacks and `src/test/setup.ts` fills
+ * with a no-op; `restoreMocks` removes the spy before the next test.
+ */
+function spyOnScrolling() {
+  return vi.spyOn(Element.prototype, 'scrollIntoView');
+}
+
+type ScrollSpy = ReturnType<typeof spyOnScrolling>;
+
+/** The least scrolling, never smooth: a page shown from its first row moves nothing that is already in view. */
+const NEAREST_INSTANT: ScrollIntoViewOptions = { behavior: 'instant', block: 'nearest', inline: 'nearest' };
+
+/**
+ * Waits for the calls that show a page from its first row, the only calls
+ * `scroll` may have received since it was created or cleared: the first row of
+ * that page (`firstName`'s, which exists only once the page has rendered),
+ * then the heading row, each scrolled the least into view.
+ */
+async function expectShownFromFirstRow(scroll: ScrollSpy, firstName: string): Promise<void> {
+  await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+  expect(scroll.mock.contexts[0]).toBe(rowOf(firstName));
+  expect(scroll.mock.contexts[1]).toBe(headingRow());
+  expect(scroll.mock.calls).toEqual([[NEAREST_INSTANT], [NEAREST_INSTANT]]);
+}
+
 describe('CustomerSearchPage', () => {
   it('starts from the fixtures: two active pages, three pages with inactive rows, distinct users per role', () => {
     expect(ACTIVE_ROWS).toHaveLength(23);
@@ -1019,17 +1062,266 @@ describe('CustomerSearchPage', () => {
     });
   });
 
+  // SC_CSR_RCD picks the page shown and its first record (:135-137, :559-560);
+  // SflFillPage :570-585; Enter with nothing to process :506-512.
+  describe('showing a page from its first row', () => {
+    it('PageDown, PageUp and the "Page Down" button scroll the new page\'s first row and the heading into view and leave focus where it was', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      const nameFilter = filterInput(NAME_FILTER);
+      // The first page of a list is shown from the top already.
+      expect(scroll).not.toHaveBeenCalled();
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(nameFilter).toHaveFocus();
+      scroll.mockClear();
+
+      await user.keyboard('{PageUp}');
+
+      await waitForPage(ACTIVE_ROWS, 0);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 0));
+      expect(nameFilter).toHaveFocus();
+      scroll.mockClear();
+
+      await user.click(within(searchKeys()).getByRole('button', { name: 'Page Down' }));
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(nameFilter).toHaveFocus();
+      scroll.mockClear();
+
+      await user.click(within(searchKeys()).getByRole('button', { name: 'Page Up' }));
+
+      await waitForPage(ACTIVE_ROWS, 0);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 0));
+      expect(nameFilter).toHaveFocus();
+      expect(searches).toEqual([FIRST_PAGE, { ...FIRST_PAGE, cursor: 'c1' }]);
+    });
+
+    it("a page change leaves the list's sideways scroll where it was", async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      // The list box scrolls sideways, as on a phone-width screen; jsdom lays
+      // nothing out, so its widths are given here.
+      const box = resultsTable().closest('.scroll-region');
+      if (!(box instanceof HTMLElement)) {
+        throw new Error('The results table is not in a scroll region');
+      }
+      Object.defineProperty(box, 'scrollWidth', { configurable: true, value: 831 });
+      Object.defineProperty(box, 'clientWidth', { configurable: true, value: 368 });
+      box.scrollLeft = 40;
+      // As a browser does for a row wider than the box: its start edge is
+      // aligned with the box's edge, past the box's padding.
+      scroll.mockImplementation(() => {
+        box.scrollLeft = 45;
+      });
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(box.scrollLeft).toBe(40);
+    });
+
+    it('PageUp on the first page and PageDown at the bottom change no page and scroll nothing', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+
+      await user.keyboard('{PageUp}');
+      await settleSearches();
+
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      expect(scroll).not.toHaveBeenCalled();
+
+      await user.keyboard('{PageDown}');
+      await waitForPage(ACTIVE_ROWS, 1);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(pagingIndicator()).toHaveTextContent('Bottom');
+      scroll.mockClear();
+
+      await user.keyboard('{PageDown}');
+      await settleSearches();
+
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 1));
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(2);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('PageDown at the 9,999-row cap repeats DEM0006, changes no page and scrolls nothing', async () => {
+      answerSearch(() =>
+        HttpResponse.json({
+          items: ACTIVE_ROWS.slice(0, PAGE_SIZE).map((row) => ({ ...row })),
+          nextCursor: null,
+          limitReached: true,
+          notice: { code: 'DEM0006', message: messageText('DEM0006') },
+        } satisfies SearchResponse),
+      );
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      const first = await within(statusRegion()).findByText(messageText('DEM0006'));
+      await waitForPage(ACTIVE_ROWS, 0);
+
+      await user.keyboard('{PageDown}');
+
+      await waitFor(() => expect(within(statusRegion()).getByText(messageText('DEM0006'))).not.toBe(first));
+      await settleSearches();
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(1);
+    });
+
+    it.each(['PageDown', 'PageUp'])('%s with no list shows DEM0003 and scrolls nothing', async (key) => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('MAINTENANCE');
+
+      await user.keyboard(`{${key}}`);
+      await settleSearches();
+
+      expect(within(alertRegion()).getByText('Key is not active now')).toBeInTheDocument();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(0);
+    });
+
+    it('Enter with nothing to process on an earlier page shows the last loaded page from its first row; on that page it scrolls nothing', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.keyboard('{PageDown}');
+      await waitForPage(ACTIVE_ROWS, 1);
+      await user.keyboard('{PageUp}');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(4));
+      scroll.mockClear();
+      const nameFilter = filterInput(NAME_FILTER);
+      expect(nameFilter).toHaveFocus();
+
+      await user.keyboard('{Enter}');
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(nameFilter).toHaveFocus();
+      scroll.mockClear();
+
+      // The last page loaded is already shown: Enter changes no page.
+      await user.keyboard('{Enter}');
+      await settleSearches();
+
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 1));
+      expect(scroll).not.toHaveBeenCalled();
+      expect(nameFilter).toHaveFocus();
+      expect(searches).toHaveLength(2);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+  });
+
+  // The cursor on the first rejected option (DSPATR(PC)): a field that already
+  // has focus cannot be focused again, so it is brought into view instead.
+  describe('bringing a rejected option into view', () => {
+    it.each<[how: string, pressEnter: (user: UserEvent) => Promise<void>]>([
+      ['typed in it', (user) => user.keyboard('{Enter}')],
+      ['tapped on the key bar', (user) => user.click(within(searchKeys()).getByRole('button', { name: 'Enter' }))],
+    ])(
+      'Enter %s while the rejected option has focus scrolls that field the least into view and leaves focus there',
+      async (_how, pressEnter) => {
+        const scroll = spyOnScrolling();
+        const user = await renderSearchPage('INQUIRY');
+        await waitForPage(ACTIVE_ROWS, 0);
+        const option = optionInput(FIRST_ACTIVE.name);
+        await user.type(option, 'x');
+        expect(option).toHaveFocus();
+
+        await pressEnter(user);
+
+        expect(within(alertRegion()).getByText(messageText('DEM0004', ['X']))).toBeInTheDocument();
+        expect(option).toHaveAttribute('aria-invalid', 'true');
+        await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+        expect(scroll.mock.contexts[0]).toBe(option);
+        expect(scroll.mock.calls).toEqual([[{ block: 'nearest', inline: 'nearest' }]]);
+        expect(option).toHaveFocus();
+        expect(searches).toHaveLength(1);
+      },
+    );
+
+    it('Enter from the Name filter moves focus to the rejected option and scrolls nothing itself', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      const option = optionInput(FIRST_ACTIVE.name);
+      await user.type(option, 'x');
+      await user.click(filterInput(NAME_FILTER));
+      expect(filterInput(NAME_FILTER)).toHaveFocus();
+
+      await user.keyboard('{Enter}');
+
+      expect(within(alertRegion()).getByText(messageText('DEM0004', ['X']))).toBeInTheDocument();
+      expect(option).toHaveAttribute('aria-invalid', 'true');
+      await waitFor(() => expect(option).toHaveFocus());
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(1);
+    });
+
+    it('Enter with nothing to process from the field it asks for, the first option of the last page loaded, scrolls nothing and leaves focus there', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      const option = optionInput(firstNameOn(ACTIVE_ROWS, 0));
+      await user.click(option);
+
+      await user.keyboard('{Enter}');
+      await settleSearches();
+
+      expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
+      expect(option).toHaveFocus();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(1);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('option 5 typed in its own field: the closed window returns focus there, and the last option run scrolls nothing', async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      const option = optionInput(FIRST_ACTIVE.name);
+      await user.type(option, '5');
+      await user.keyboard('{Enter}');
+      const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
+      await waitFor(() => expect(dialog.querySelector('.customer-detail')).toHaveFocus());
+
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+      await waitFor(() => expect(option).toHaveFocus());
+      expect(option).toHaveValue('');
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(1);
+    });
+
+    it("PageDown from an option field: focus follows to the next page's first option, and only that page's first row and the heading are scrolled", async () => {
+      const scroll = spyOnScrolling();
+      const user = await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+      await user.click(optionInput(firstNameOn(ACTIVE_ROWS, 0)));
+
+      await user.keyboard('{PageDown}');
+
+      await waitForPage(ACTIVE_ROWS, 1);
+      const first = optionInput(firstNameOn(ACTIVE_ROWS, 1));
+      await waitFor(() => expect(first).toHaveFocus());
+      await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+      expect(scroll.mock.contexts).not.toContain(first);
+    });
+  });
+
   // Every key stays live, the latest navigation decides the page shown, and focus follows to the page asked for.
   describe('paging while a next page loads', () => {
     const INCLUDING_INACTIVE: SearchQuery = { ...FIRST_PAGE, includeInactive: 'true' };
-
-    function firstNameOn(rows: readonly CustomerSummaryResponse[], page: number): string {
-      const name = pageNames(rows, page)[0];
-      if (name === undefined) {
-        throw new Error(`Page ${page + 1} of the fixture rows is empty`);
-      }
-      return name;
-    }
 
     /** Holds the page requested with `cursor` until the returned {@link HeldAnswer.release} is called. */
     function holdContinuation(cursor: string): () => Promise<void> {
@@ -1110,6 +1402,27 @@ describe('CustomerSearchPage', () => {
       await waitFor(() => expect(optionInput(firstNameOn(ALL_ROWS, 2))).toHaveFocus());
       expect(searches).toHaveLength(4);
       expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it('a next page that arrives after a newer PageUp scrolls nothing: only the PageUp showed its page from the first row', async () => {
+      const release = holdContinuation('c2');
+      const user = await showSecondOfThreePages();
+      const scroll = spyOnScrolling();
+
+      await user.keyboard('{PageDown}');
+      await waitFor(() => expect(searches.at(-1)).toEqual({ ...INCLUDING_INACTIVE, cursor: 'c2' }));
+      expect(scroll).not.toHaveBeenCalled();
+      await user.keyboard('{PageUp}');
+
+      await waitForPage(ALL_ROWS, 0);
+      await expectShownFromFirstRow(scroll, firstNameOn(ALL_ROWS, 0));
+      scroll.mockClear();
+
+      await release();
+
+      expect(shownNames()).toEqual(pageNames(ALL_ROWS, 0));
+      expect(scroll).not.toHaveBeenCalled();
+      expect(searches).toHaveLength(4);
     });
 
     it('Enter with no option while the next page loads shows the last page loaded so far, and the late page does not replace it', async () => {
@@ -1698,6 +2011,32 @@ describe('CustomerSearchPanel in Selection mode', () => {
 
     expect(onExit).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it("PageDown and PageUp show the picker's next and previous page from the first row, focus left in the Name filter", async () => {
+    const scroll = spyOnScrolling();
+    const user = await renderWithProviders(
+      INQUIRY_USER,
+      <CustomerSearchPanel mode="selection" onSelect={vi.fn()} onExit={vi.fn()} />,
+    );
+    const nameFilter = filterInput(NAME_FILTER);
+
+    await user.keyboard('{Enter}');
+    await waitForPage(ACTIVE_ROWS, 0);
+    expect(scroll).not.toHaveBeenCalled();
+
+    await user.keyboard('{PageDown}');
+
+    await waitForPage(ACTIVE_ROWS, 1);
+    await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 1));
+    expect(nameFilter).toHaveFocus();
+    scroll.mockClear();
+
+    await user.keyboard('{PageUp}');
+
+    await waitForPage(ACTIVE_ROWS, 0);
+    await expectShownFromFirstRow(scroll, firstNameOn(ACTIVE_ROWS, 0));
+    expect(nameFilter).toHaveFocus();
   });
 });
 

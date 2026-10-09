@@ -8,7 +8,9 @@
  * The window shows the catalog DEM1002 text itself (CRTMSGF.CLLE:40, typo
  * corrected), because `useProblemPresenter` publishes no DEM1002 toast when
  * the detail dialog passes `onConflict`. The comparison has one row per
- * customer field, with "Changed" as text so the mark is not colour alone. No
+ * customer field, with "Changed" as text so the mark is not colour alone.
+ * Where the window is too narrow for it, the comparison scrolls sideways in
+ * its own `ScrollRegion` while the DEM1002 text above it stays in place. No
  * request is sent here: the detail dialog owns the record, the draft and the
  * version.
  *
@@ -22,6 +24,7 @@ import { useAuth } from '../../auth/AuthProvider';
 import { Dialog } from '../../components/Dialog';
 import { FunctionKeyBar } from '../../components/FunctionKeyBar';
 import { ScreenHeader } from '../../components/ScreenHeader';
+import { ScrollRegion } from '../../components/ScrollRegion';
 import { useToasts } from '../../components/ToastRegion';
 import { useFunctionKeys } from '../../keyboard/useFunctionKeys';
 import { useMessages } from '../../messages/MessageCatalogProvider';
@@ -99,6 +102,9 @@ const HEADER_ID = 'conflict-compare';
 /** Id of the DEM1002 paragraph, which also describes the Refresh button. */
 const MESSAGE_ID = 'conflict-compare-message';
 
+/** Id of the comparison's caption, which names its scroll region while the table overflows. */
+const CAPTION_ID = 'conflict-compare-caption';
+
 function ConflictCompareBody({ original, mine, current, onRefresh, onReapply }: ConflictCompareDialogProps) {
   const { username } = useAuth();
   const { format } = useMessages();
@@ -135,32 +141,38 @@ function ConflictCompareBody({ original, mine, current, onRefresh, onReapply }: 
           <p id={MESSAGE_ID} className="conflict-message">
             {format('DEM1002')}
           </p>
-          <table className="results-table">
-            <caption>Your changes compared with the current record</caption>
-            <thead>
-              <tr>
-                <th scope="col">Field</th>
-                <th scope="col">Your values</th>
-                <th scope="col">Current record</th>
-                <th scope="col">Differs</th>
-              </tr>
-            </thead>
-            <tbody>
-              {CUSTOMER_FORM_FIELDS.map(({ field, label }) => {
-                const yours = fieldText(mine, field);
-                const stored = fieldText(current, field);
-                const differs = yours !== stored;
-                return (
-                  <tr key={field} className={differs ? 'conflict-row--differs' : undefined}>
-                    <th scope="row">{label}</th>
-                    <td>{yours}</td>
-                    <td>{stored}</td>
-                    <td>{differs ? 'Changed' : ''}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          {/*
+            Only the comparison scrolls sideways when it cannot fit, so the
+            DEM1002 text above it never scrolls sideways with it.
+          */}
+          <ScrollRegion labelledBy={CAPTION_ID} className="conflict-comparison">
+            <table className="results-table">
+              <caption id={CAPTION_ID}>Your changes compared with the current record</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Field</th>
+                  <th scope="col">Your values</th>
+                  <th scope="col">Current record</th>
+                  <th scope="col">Differs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CUSTOMER_FORM_FIELDS.map(({ field, label }) => {
+                  const yours = fieldText(mine, field);
+                  const stored = fieldText(current, field);
+                  const differs = yours !== stored;
+                  return (
+                    <tr key={field} className={differs ? 'conflict-row--differs' : undefined}>
+                      <th scope="row">{label}</th>
+                      <td className="conflict-value">{yours}</td>
+                      <td className="conflict-value">{stored}</td>
+                      <td>{differs ? 'Changed' : ''}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </ScrollRegion>
         </div>
         {/*
           The actions sit in the fixed footer with the key legend, so focusing

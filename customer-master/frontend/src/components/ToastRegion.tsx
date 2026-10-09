@@ -19,7 +19,7 @@
  * The caller chooses the kind; this file inspects no message code and holds no
  * message text.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 /** One displayed message. `id` is unique for the life of the page. */
@@ -127,6 +127,19 @@ export function useToasts(): ToastApi {
  * Each message is keyed by its id, so a text republished after a clear is a
  * new node and is announced again.
  *
+ * Focus in a window stays in view when the first message arrives. On a
+ * viewport narrower than 40rem a window gives up the toast band while no
+ * message shows and ends above it again once one does (global.css, the
+ * dialog rule), so a window at its height limit shrinks from the bottom just
+ * as the message renders. A control focused before then, such as the first
+ * invalid field `useProblemPresenter` focuses as it publishes, could be left
+ * below its body's new end. So when the list goes from empty to holding a
+ * message, a focused element inside an open `<dialog>` is scrolled to the
+ * nearest edge of view, in a layout effect, before the shrunken window
+ * paints. Focus outside every window is left alone, so a page never jumps,
+ * and a control that is already in view does not move; focus that moves
+ * after the message renders scrolls itself.
+ *
  * @throws Error when rendered outside `ToastProvider`.
  */
 export function ToastRegion() {
@@ -134,6 +147,18 @@ export function ToastRegion() {
   if (toasts === null) {
     throw new Error('ToastRegion must be rendered inside ToastProvider');
   }
+
+  const showing = toasts.length > 0;
+
+  useLayoutEffect(() => {
+    if (!showing) {
+      return;
+    }
+    const focused = document.activeElement;
+    if (focused !== null && focused.closest('dialog[open]') !== null) {
+      focused.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [showing]);
 
   const status = toasts.filter((toast) => toast.kind === 'status');
   const alerts = toasts.filter((toast) => toast.kind === 'alert');

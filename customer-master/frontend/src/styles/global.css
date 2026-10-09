@@ -269,9 +269,9 @@ a:active {
  * - Centred with inset 0 + margin auto + fit-content, never with a transform:
  *   a transformed dialog would become the containing block of a nested
  *   picker's fixed backdrop and dialog, trapping them inside its box.
- * - Every window, a State picker nested in the detail dialog included, keeps
- *   the toast band clear at all times (toast clearance, after the
- *   .toast-region rules): its end inset is raised past the band and the
+ * - From 40rem wide every window, a State picker nested in the detail dialog
+ *   included, keeps the toast band clear at all times (toast clearance, after
+ *   the .toast-region rules): its end inset is raised past the band and the
  *   --space-4 margin below it, so it centres in the viewport area above the
  *   band and never moves or shrinks when a message appears. Its height limit
  *   is a further --space-4 short of that area, so a window at its limit keeps
@@ -279,6 +279,16 @@ a:active {
  *   taller keeps its header and its footer in view and scrolls only its body
  *   (frames, after the .screen rule). Its own overflow: auto takes over only
  *   where the header and footer alone are taller than the window.
+ * - Below 40rem the band is up to 10rem tall (tokens.css), a fifth of a
+ *   phone's height; kept empty, it would leave a picker only a few rows.
+ *   There a window keeps the band clear only while a message shows: with
+ *   none, every window takes the band as 0 (the rule after this one), so the
+ *   same inset and limit leave it the whole viewport height but the
+ *   --space-4 margin and the --space-2 gaps. When a message appears the
+ *   window ends above the band again, centred anew or, at its limit,
+ *   shrinking from the bottom, and src/components/ToastRegion.tsx scrolls a
+ *   control focused in its body back into view; when the next action clears
+ *   the message, the window takes the room back.
  * - Painted one layer above its own backdrop (calc(--z-dialog + 1)), so the
  *   order in the DOM does not matter. A State picker nested inside the detail
  *   dialog paints within the detail dialog's stacking context, above it.
@@ -304,6 +314,13 @@ dialog,
   border: 2px solid var(--color-highlight);
   border-radius: var(--radius);
   box-shadow: var(--shadow-dialog);
+}
+
+/* Windows below 40rem while no message shows (dialog, .dialog); the breakpoint is literal like the band's. */
+@media not all and (min-width: 40rem) {
+  :root:not(:has(.toast-region .toast)) :is(dialog, .dialog) {
+    --toast-band-block-size: 0px;
+  }
 }
 
 /* Only reached by a dialog opened with showModal(), which the app never does. */
@@ -374,8 +391,10 @@ dialog::backdrop {
  *   the loading scrim the panel renders are fixed and take no grid cell. On
  *   a smaller viewport a frame would leave the list a body about 200px tall
  *   (375x667), so there the page scrolls as a whole, as every other page
- *   does. The breakpoints are literal: a media query cannot read a custom
- *   property.
+ *   does: the root keeps the same three rows, each only as tall as its
+ *   content, solely to seat the toast region above the footer (toast
+ *   clearance). The breakpoints are literal: a media query cannot read a
+ *   custom property.
  * - The framed page keeps its block gaps a --space-2, as PMTCUSTD puts its
  *   records on adjacent screen lines: main's block padding, the header's end
  *   margin, and the gap from the "Demo Corp of America" line to the
@@ -694,13 +713,15 @@ dialog::backdrop {
  * - The region is a sticky band at the end of the page: --toast-band-block-size
  *   tall between --space-4 margins. On a long page it stays pinned to the
  *   viewport bottom; on a short one the flex column of its parent (toast
- *   clearance, below) pushes it there. The framed search page is the one
- *   exception: there the region takes no space, is as tall as its messages
- *   and lies over the end of the list, or, while a window is open, is a fixed
- *   band (toast clearance).
+ *   clearance, below) pushes it there. The search page, framed or not, is the
+ *   one exception: there the region takes no space, is as tall as its
+ *   messages and lies over the end of the list, above the footer, or, while a
+ *   window is open, is a fixed band (toast clearance).
  * - Its height follows the viewport width alone (tokens.css), never the
- *   messages, so a message never moves a screen or window. Toasts sit at the
- *   bottom of the band, --space-2 apart. Messages too long for the band
+ *   messages, so a message never moves a screen, nor a window from 40rem
+ *   wide (below that a window takes the band's room while no message shows,
+ *   the dialog, .dialog rule). Toasts sit at the bottom of the band,
+ *   --space-2 apart. Messages too long for the band
  *   together (a third message at 40rem wide or more, or one message longer
  *   than the band) start at its top and continue below it, adding that
  *   length to the end of the page, and scrolling the page to its end brings
@@ -754,21 +775,29 @@ dialog::backdrop {
  * Toast clearance: keyboard focus is never hidden behind a message that fits
  * in the band at the viewport bottom. A message longer than the band can
  * cover a control focused in an open window while the page is scrolled to
- * its end (the last point below). Every window, and every page but the framed
- * search page, keeps the band clear at all times rather than only while a
- * toast is shown. src/errors/useProblemPresenter.ts publishes an alert and
- * focuses the first invalid field in the same call, so that focus scrolls
- * before the toast renders; with the band already reserved the field is
- * clear of the message when it arrives, and nothing on a screen or window
- * moves when a message appears or goes.
+ * its end (the last point below). Every page but the search page, and every
+ * window from 40rem wide, keeps the band clear at all times rather than only
+ * while a toast is shown. src/errors/useProblemPresenter.ts publishes an
+ * alert and focuses the first invalid field in the same call, so that focus
+ * scrolls before the toast renders; with the band already reserved the field
+ * is clear of the message when it arrives, and nothing on a screen or such a
+ * window moves when a message appears or goes. Below 40rem a window keeps
+ * the band clear only while a message shows (the last point).
  * - The root scroll-padding makes focus scrolling and scrollIntoView stop a
  *   control a --space-4 gap above the band, a gap that also holds its focus
- *   ring, instead of behind it.
+ *   ring, instead of behind it. At the start it keeps a --space-2 gap, the
+ *   ring room a list body keeps (frames), so on a page that scrolls as a
+ *   whole a control brought into view at the viewport top stops that far
+ *   below it, with its whole focus ring (--focus-ring-width plus its 2px
+ *   offset) in view rather than cut at the edge. Where the root does not
+ *   scroll, as on the framed search page, whose list body scrolls instead,
+ *   neither gap moves anything.
  * - The region's parent, the app root, is a flex column at least the viewport
- *   tall. The band, in flow after the screen, gives a page room to scroll its
- *   last controls (the function-key bar, the footer) clear of it, and the
- *   region's auto start margin seats it at the viewport bottom on a short
- *   page. The other children keep the full width they would have as blocks.
+ *   tall (a grid on the search page, next two points). The band, in flow
+ *   after the screen, gives a page room to scroll its last controls (the
+ *   function-key bar, the footer) clear of it, and the region's auto start
+ *   margin seats it at the viewport bottom on a short page. The other
+ *   children keep the full width they would have as blocks.
  * - On a large enough viewport the framed search page (frames, after the
  *   .screen rule) reserves no band, so its list keeps that height and its
  *   footer sits at the viewport bottom. The region lies in the app root
@@ -782,19 +811,44 @@ dialog::backdrop {
  *   when there are several, until the next action clears them. The body's
  *   end scroll padding holds the band (frames), so a control focused in a
  *   scrolling list stops above where they show.
- * - While a window is open over the framed page, a <dialog open> or the
- *   detail window's loading shell, the region is the fixed band at the
- *   viewport bottom that every window keeps clear (next point), so messages
- *   show below the window and never over its keys. Fixed, it leaves the grid,
- *   where it took no room, so nothing on the page beneath moves.
+ * - On a smaller viewport the unframed search page reserves no band either.
+ *   Its page scrolls as a whole, and a sticky band in flow at its end would
+ *   hold messages over the function-key bar whenever the bar passed the
+ *   viewport bottom. The app root is a grid there too, of the same three
+ *   rows, each only as tall as its content, so the extra height of its
+ *   viewport-tall minimum stays below the footer. main and its panel are row
+ *   subgrids, and the body's first and last child drop the outer margins that
+ *   no longer collapse through a grid item, so every part stays where the
+ *   flow would put it. The region spans the header row and the body row and,
+ *   as on the framed page, is as tall as its messages and ends a --space-3
+ *   into the footer row. Sticky with a --space-4 end inset, it moves up from
+ *   that place only to stay a --space-4 above the viewport bottom, and never
+ *   out of its grid area: while the footer lies below the viewport, messages
+ *   show there, where the band shows them on other pages, and once the
+ *   footer comes into view they ride up with it, just above the "Demo Corp
+ *   of America" line. None lies over a function key at any scroll position.
+ *   The root scroll-padding still stops a focused control above the band
+ *   while the page can scroll; at the page end messages stack over the
+ *   "More..." or "Bottom" line, as on the framed page.
+ * - While a window is open over the search page, framed or not, a
+ *   <dialog open> or the detail window's loading shell, the region is the
+ *   fixed band at the viewport bottom that every window keeps clear (next
+ *   point), so messages show below the window and never over its keys.
+ *   Fixed, it leaves the grid, where it took no room, so nothing on the page
+ *   beneath moves.
  * - Every window ends above the band through its own end inset and height
- *   limit (the dialog, .dialog rule). Windows are fixed and the band scrolls
- *   with the page, so while the page is scrolled to its end to read a long
- *   message, the message reaches above the band, over an open window, by as
- *   much as it is longer than the band, until the page is scrolled back.
+ *   limit (the dialog, .dialog rule); below 40rem only while a message
+ *   shows, and with none it takes the band's room, so a picker shows its
+ *   rows on a phone. When the first message arrives such a window rises or
+ *   shrinks above the band before it paints, and
+ *   src/components/ToastRegion.tsx scrolls a control focused in it back into
+ *   view. Windows are fixed and the band scrolls with the page, so while the
+ *   page is scrolled to its end to read a long message, the message reaches
+ *   above the band, over an open window, by as much as it is longer than the
+ *   band, until the page is scrolled back.
  */
 :root {
-  scroll-padding-block-end: calc(var(--toast-band-block-size) + 2 * var(--space-4));
+  scroll-padding-block: var(--space-2) calc(var(--toast-band-block-size) + 2 * var(--space-4));
 }
 
 :where(:has(> .toast-region)) {
@@ -822,18 +876,75 @@ dialog::backdrop {
   :where(:has(> .toast-region)):has(> .screen--framed) > .toast-region > :last-child {
     padding-block-end: 0;
   }
+}
 
-  :where(:has(> .toast-region)):has(> .screen--framed):has(dialog[open], .dialog--loading) > .toast-region {
-    position: fixed;
-    inset-inline: 0;
-    block-size: calc(var(--toast-band-block-size) + 2 * var(--space-4));
-    margin-block: 0;
-    padding-block: var(--space-4) 0;
+/* The unframed search page: the complement of the frames' query, literal for the same reason. */
+@media not all and (min-width: 40rem) and (min-height: 30rem) {
+  :where(:has(> .toast-region)):has(> .screen--framed) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    align-content: start;
   }
 
-  :where(:has(> .toast-region)):has(> .screen--framed):has(dialog[open], .dialog--loading) > .toast-region > :last-child {
-    padding-block-end: var(--space-4);
+  .screen--framed,
+  .screen--framed > .search-panel {
+    display: grid;
+    grid-row: 1 / -1;
+    grid-column: 1;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: subgrid;
   }
+
+  .screen--framed > .search-panel > .screen-header {
+    grid-row: 1;
+  }
+
+  .screen--framed > .search-panel > .screen-body {
+    grid-row: 2;
+  }
+
+  .screen--framed > .search-panel > .screen-footer {
+    grid-row: 3;
+  }
+
+  .screen--framed > .search-panel > .screen-body > :first-child,
+  .screen--framed > .search-panel > .screen-body > :first-child > :first-child {
+    margin-block-start: 0;
+  }
+
+  .screen--framed > .search-panel > .screen-body > :last-child,
+  .screen--framed > .search-panel > .screen-body > :last-child > :last-child {
+    margin-block-end: 0;
+  }
+
+  :where(:has(> .toast-region)):has(> .screen--framed) > .toast-region {
+    grid-row: 1 / 3;
+    grid-column: 1;
+    align-self: end;
+    inset-block-end: var(--space-4);
+    block-size: auto;
+    margin-block: 0 calc(-1 * var(--space-3));
+    padding-block: 0;
+  }
+
+  :where(:has(> .toast-region)):has(> .screen--framed) > .toast-region > :last-child {
+    padding-block-end: 0;
+  }
+}
+
+/* While a window is open over the search page, framed or not, its region is the fixed band. */
+:where(:has(> .toast-region)):has(> .screen--framed):has(dialog[open], .dialog--loading) > .toast-region {
+  position: fixed;
+  inset-inline: 0;
+  inset-block-end: 0;
+  block-size: calc(var(--toast-band-block-size) + 2 * var(--space-4));
+  margin-block: 0;
+  padding-block: var(--space-4) 0;
+}
+
+:where(:has(> .toast-region)):has(> .screen--framed):has(dialog[open], .dialog--loading) > .toast-region > :last-child {
+  padding-block-end: var(--space-4);
 }
 
 .toast {
@@ -1153,6 +1264,9 @@ textarea[aria-invalid="true"] {
  * for assistive technology. Text wraps only between words: a data value
  * breaks inside a word only when that one word is longer than its whole
  * column (a 40-character name with no blank), and a heading never does.
+ * The conflict comparison's two value columns are the one exception: they
+ * break a value anywhere, so that table fits a phone-width window
+ * (.conflict-value, with the conflict window's rules).
  * --cell-padding-inline is the inline padding of every cell, which the
  * column widths of the lists below include.
  */
@@ -1678,6 +1792,56 @@ main > .search-panel .customer-list {
  */
 .dialog--conflict .results-table tbody th {
   vertical-align: top;
+}
+
+/*
+ * The comparison's box (.conflict-comparison, the ScrollRegion of
+ * src/features/customers/ConflictCompareDialog.tsx). Its table holds no
+ * control, so the box drops the ring room .scroll-region keeps for the
+ * controls at a list's edges: the table lines up with the DEM1002 text as
+ * before, the window gains no height, and the box's own focus ring, while it
+ * overflows and takes focus, draws in the .screen-body padding rather than
+ * under that body's clip.
+ * - While the table is wider than the box, a shadow on each inline edge with
+ *   columns beyond it shows that the box scrolls sideways: the technique of
+ *   the .screen-body block edges, turned to the inline axis. The covers
+ *   (local) scroll with the table and hide the shadows (scroll) at an edge
+ *   the table has reached. The cue is the same at both edges, so it reads
+ *   the same in either writing direction.
+ * - The .screen-body block edges use radial shadows across its width, but a
+ *   comparison can be many times taller than the visible body, and a radial
+ *   shadow down its full height would fade toward its top and bottom, the
+ *   parts in view. Its inline-edge shadows are therefore linear and equally
+ *   strong at every height.
+ * - The cue, and with it the opaque covers, exists only while the box
+ *   overflows, which is exactly while ScrollRegion makes it a region
+ *   ([role="region"]). A comparison that fits therefore paints nothing over
+ *   the .screen-body top and bottom scroll shadows when the body scrolls it
+ *   past them. Where the browser has no ResizeObserver the box stays plain,
+ *   without the cue, and still scrolls (ScrollRegion's fallback).
+ */
+.conflict-comparison {
+  margin: 0;
+  padding: 0;
+}
+
+.conflict-comparison[role="region"] {
+  background:
+    linear-gradient(to right, var(--color-surface) 30%, transparent) left / var(--space-6) 100% no-repeat local,
+    linear-gradient(to left, var(--color-surface) 30%, transparent) right / var(--space-6) 100% no-repeat local,
+    linear-gradient(to right, var(--color-backdrop), transparent) left / var(--space-3) 100% no-repeat scroll,
+    linear-gradient(to left, var(--color-backdrop), transparent) right / var(--space-3) 100% no-repeat scroll;
+}
+
+/*
+ * The two value columns (Your values, Current record) may break a value
+ * anywhere, so the table's minimum width no longer grows with its longest
+ * value (a 40-character name with no blank) and both columns fit a
+ * phone-width window. Headings, field labels and the "Changed" mark keep
+ * the table's between-words rule, so each of their words stays whole.
+ */
+.conflict-comparison .conflict-value {
+  overflow-wrap: anywhere;
 }
 
 .conflict-actions {

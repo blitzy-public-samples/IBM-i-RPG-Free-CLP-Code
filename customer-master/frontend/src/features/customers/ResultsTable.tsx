@@ -52,9 +52,14 @@
  * viewport bottom. The Customer picker's window reserves nothing and sizes to
  * its rows, so a short list and its "More..." / "Bottom" line show together
  * without scrolling.
+ *
+ * `headingRowRef` and `firstRowRef` hand the panel the heading row and the
+ * first row of the page shown, so after a page change it can bring the top of
+ * the new page into view in whatever scrolls the list. The table itself never
+ * scrolls anything.
  */
 import { useId } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, Ref } from 'react';
 import type { CustomerSummaryResponse } from '../../api/customers';
 import { ScrollRegion } from '../../components/ScrollRegion';
 
@@ -93,6 +98,14 @@ export interface ResultsTableProps {
    * `aria-busy="true"` on the table until they arrive. Defaults to false.
    */
   busy?: boolean;
+  /** Optional ref to the heading row, the `<thead>` row of the column headings (the SFLCTL headings). */
+  headingRowRef?: Ref<HTMLTableRowElement>;
+  /**
+   * Optional ref to the first row of `rows`, the page's first subfile record:
+   * it follows the first row of each page rendered, and is null while `rows`
+   * is empty.
+   */
+  firstRowRef?: Ref<HTMLTableRowElement>;
 }
 
 /** The option-code order of the source legends. */
@@ -143,6 +156,8 @@ export function ResultsTable({
   optionRef,
   caption = DEFAULT_CAPTION,
   busy = false,
+  headingRowRef,
+  firstRowRef,
 }: ResultsTableProps) {
   // Opt input ids are `${idPrefix}-opt-${custId}`: unique per row, and per
   // table, so a Customer picker's table over the search page shares no id.
@@ -169,7 +184,7 @@ export function ResultsTable({
         <col className="col--actions" />
       </colgroup>
       <thead>
-        <tr>
+        <tr ref={headingRowRef}>
           <th scope="col">Opt</th>
           <th scope="col" aria-sort="ascending" className="is-sorted">
             Customer Name
@@ -187,7 +202,7 @@ export function ResultsTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((row) => {
+        {rows.map((row, index) => {
           const { custId } = row;
           // Typed as strings; the fallbacks keep a malformed row from ever
           // showing "undefined" in a label or a cell.
@@ -197,7 +212,11 @@ export function ResultsTable({
           const error = invalid[custId] ?? '';
           const errorId = `${optionId}-error`;
           return (
-            <tr key={custId} className={inactive ? 'row--inactive' : undefined}>
+            <tr
+              key={custId}
+              ref={index === 0 ? firstRowRef : undefined}
+              className={inactive ? 'row--inactive' : undefined}
+            >
               <td>
                 <label htmlFor={optionId} className="visually-hidden">
                   {`Option for ${name}`}

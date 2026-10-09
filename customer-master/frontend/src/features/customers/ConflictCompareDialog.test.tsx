@@ -267,6 +267,27 @@ describe('ConflictCompareDialog', () => {
       expect(within(footer).getByRole('button', { name: 'Refresh' })).toHaveFocus();
       expect(body.scrollTop).toBe(0);
     });
+
+    it('puts the comparison, and not the DEM1002 text, in the scroll region inside the body', async () => {
+      const { dialog } = await openDialog();
+      const body = dialog.querySelector('.screen-body');
+      if (!(body instanceof HTMLElement)) {
+        throw new Error('The window renders no body');
+      }
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      const region = table.closest('.scroll-region');
+      if (!(region instanceof HTMLElement)) {
+        throw new Error('The comparison is not in a scroll region');
+      }
+
+      // Only the table scrolls sideways when the window is too narrow; the
+      // DEM1002 text stays in the body, outside the region, so it never moves.
+      expect(body).toContainElement(region);
+      expect(region).toContainElement(table);
+      const message = within(dialog).getByText(messageText('DEM1002'));
+      expect(body).toContainElement(message);
+      expect(region).not.toContainElement(message);
+    });
   });
 
   describe('field comparison', () => {

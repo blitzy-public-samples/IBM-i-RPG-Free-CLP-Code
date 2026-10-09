@@ -75,12 +75,18 @@
   --z-toast: 1000;
   /*
    * Height of the toast band, the strip above the bottom --space-4 margin
-   * where messages show. Every window, and every screen but the framed search
-   * page, keeps it clear at all times, so a message that fits in the band
-   * never hides a focused control, even one focused just before the message
-   * renders. The framed search page shows messages over the end of its list
-   * instead, and its list's end scroll padding holds the band, so focus
-   * scrolling stops a control above them (toast clearance in global.css).
+   * where messages show. Every screen but the search page, and every window
+   * from 40rem wide, keeps it clear at all times, so a message that fits in
+   * the band never hides a focused control, even one focused just before the
+   * message renders. Below 40rem a window keeps it clear only while a message
+   * shows and takes its room while none does, so a picker shows its rows on a
+   * phone; when a message appears the window ends above the band and the
+   * focused control is scrolled back into view (the dialog rule in
+   * global.css, ToastRegion.tsx). The search page, framed or not, shows
+   * messages over the end of its list instead, above its footer and never
+   * over a function key, and the end scroll padding of its list (framed) or
+   * of the page (unframed) holds the band, so focus scrolling stops a control
+   * above them (toast clearance in global.css).
    * A one-line toast is about 42px tall (a 24px line plus its padding and
    * borders), each further line adds 24px, and two messages (a status and
    * an alert, or two alerts) show 8px apart; an empty live region adds no
