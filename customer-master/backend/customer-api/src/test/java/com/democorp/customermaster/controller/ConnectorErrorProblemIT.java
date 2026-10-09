@@ -328,8 +328,9 @@ class ConnectorErrorProblemIT extends AbstractPostgresIT {
     }
 
     /**
-     * Asserts the headers Spring Security's default header configuration adds to every response the
-     * filter chain answers, and no HSTS, since the test server speaks plain HTTP.
+     * Asserts the headers the security filter chain adds to every response it answers: Spring Security's
+     * defaults, and the strict {@code Content-Security-Policy} and the {@code Referrer-Policy}, each sent
+     * exactly once; and no HSTS, since the test server speaks plain HTTP.
      *
      * @param response the raw response
      */
@@ -342,6 +343,10 @@ class ConnectorErrorProblemIT extends AbstractPostgresIT {
         assertThat(headers.getFirst(HttpHeaders.PRAGMA)).isEqualTo("no-cache");
         assertThat(headers.getFirst(HttpHeaders.EXPIRES)).isEqualTo("0");
         assertThat(headers.getFirst("X-Frame-Options")).isEqualTo("DENY");
+        assertThat(headers.get("Content-Security-Policy")).as("Content-Security-Policy values")
+                .containsExactly("default-src 'none'; frame-ancestors 'none'");
+        assertThat(headers.get("Referrer-Policy")).as("Referrer-Policy values")
+                .containsExactly("no-referrer");
         assertThat(headers.containsKey("Strict-Transport-Security"))
                 .as("HSTS over plain HTTP").isFalse();
     }

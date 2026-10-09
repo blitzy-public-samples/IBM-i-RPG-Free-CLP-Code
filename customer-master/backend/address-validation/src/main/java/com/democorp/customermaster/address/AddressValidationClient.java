@@ -87,6 +87,10 @@ public interface AddressValidationClient {
      *         {@code AddressValidateResponse}, not exactly one {@code Address}, a value
      *         wider than its field, a blank {@code City} without exactly one valid
      *         {@code Error})
+     * @throws IllegalArgumentException when the implementation's request format cannot carry
+     *         a character of a request value, which is a caller error and no service fault:
+     *         {@link UspsWebToolsAddressValidationClient} refuses a character outside the
+     *         XML 1.0 {@code Char} production this way, before sending anything
      */
     AddressValidationResult validate(AddressValidationRequest request);
 }

@@ -22,7 +22,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 /**
- * Specifies the {@code errors[]} member of 400 APP0400 and the rejection of text PostgreSQL cannot store.
+ * Specifies the {@code errors[]} member of 400 APP0400 and the rejection of request text that cannot be
+ * stored, shown, searched or sent to the address service as it is.
  *
  * <p><b>Field errors.</b> When a request fails bean or method validation, or binds a value of the wrong
  * type, on a JSON property or a query or path parameter, the problem keeps its {@code detail}
@@ -55,13 +56,25 @@ import org.springframework.http.ResponseEntity;
  * they reject U+0000, while a high and a low escape in order are one supplementary character, accepted
  * and stored.
  *
+ * <p><b>Control, format and separator characters, and noncharacters.</b> A 5250 field could hold none
+ * of them, and they break two later uses of a value: the USPS request is an XML 1.0 document, which
+ * cannot carry U+0001–U+0008, U+000B, U+000C, U+000E–U+001F, U+FFFE or U+FFFF, so a review of such an
+ * address would answer 502 APP0502 on every retry with no field marked; and a bidirectional control such
+ * as U+202E, or an invisible zero-width or format character, makes a stored value display and search as
+ * a different string (a name stored reversed behind U+202E reads {@code ACME COMPANY}). The same nine
+ * fields therefore reject a control character (TAB, LF and CR included), a format character, U+2028,
+ * U+2029 and a noncharacter as they reject U+0000: 400 APP0400 on that field, nothing stored, nothing
+ * sent to the address service, no id consumed and an updated row left unchanged. Nothing is stripped or
+ * replaced. A no-break space, U+FFFD, a private-use character and a combining mark are still accepted
+ * and stored as sent.
+ *
  * <p><b>Business rules.</b> The text checks leave the field rules to {@code CustomerValidator}: a blank
  * or missing field reaches it (422 DEM0502), and an add without {@code active} stores {@code Y}.
  *
  * <p>The base context variant: no mocked beans. Bodies are serialized with the application's mapper, which
  * writes a NUL as the JSON escape {@code \u005Cu0000}.
  */
-@DisplayName("APP0400 field errors and text that PostgreSQL cannot store")
+@DisplayName("APP0400 field errors and request text that cannot be stored")
 class RequestFieldErrorsIT extends AbstractPostgresIT {
 
     /** The collection path. */
@@ -577,6 +590,166 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Control, format and separator characters, and noncharacters
+    // ---------------------------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "[{index}] {0} with {1}")
+    @MethodSource("textFieldsWithUnstorableCharacter")
+    @DisplayName("review with a control, bidi, zero-width or noncharacter in one field: 400 on that field, no 200 echo")
+    void unstorableCharacterOnReviewIsRejected(String field, String codePoint, String value) {
+        Map<String, Object> body = reviewBody();
+        body.put(field, value);
+
+        JsonNode problem = assertInvalid(post(REVIEW, body), field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(problem.path("errors").get(0).path("message").asText())
+                .isEqualTo("Request is not valid: " + field + " " + NOT_STORABLE);
+        assertThat(problem.has("stateAccepted")).as(codePoint).isFalse();
+        assertThat(customerCount()).isZero();
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} with {1}")
+    @MethodSource("textFieldsWithUnstorableCharacter")
+    @DisplayName("add with a control, bidi, zero-width or noncharacter in one field: 400 on that field, no id used")
+    void unstorableCharacterOnAddIsRejected(String field, String codePoint, String value) {
+        Map<String, Object> body = validFields();
+        body.put(field, value);
+
+        JsonNode problem = assertInvalid(post(CUSTOMERS, body), field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(customerCount()).as(codePoint).isZero();
+        assertThat(addValidCustomer()).isEqualTo(DatabaseCleaner.FIRST_INTERACTIVE_ID);
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} with {1}")
+    @MethodSource("textFieldsWithUnstorableCharacter")
+    @DisplayName("PUT with a control, bidi, zero-width or noncharacter in one field: 400 on that field, row unchanged")
+    void unstorableCharacterOnUpdateIsRejected(String field, String codePoint, String value) {
+        String custId = addValidCustomer();
+        Map<String, Object> before = storedRow(custId);
+        Map<String, Object> body = validFields();
+        body.put(field, value);
+        body.put("version", 0);
+
+        JsonNode problem = assertInvalid(put(custId, body), field + " " + NOT_STORABLE);
+
+        assertErrors(problem, List.of(field));
+        assertThat(storedRow(custId)).as(codePoint).isEqualTo(before);
+        assertThat(before.get("row_version")).isEqualTo(0L);
+    }
+
+    static Stream<Arguments> textFieldsWithUnstorableCharacter() {
+        // One code point each, so every value fits every column, active's 1 included.
+        return TEXT_FIELDS.stream().flatMap(field -> Stream.of(
+                Arguments.of(field, "U+0001", "\u0001"),
+                Arguments.of(field, "U+202E", "\u202E"),
+                Arguments.of(field, "U+200B", "\u200B"),
+                Arguments.of(field, "U+FFFF", "\uFFFF")));
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("xmlIllegalCodePoints")
+    @DisplayName("ADD review with an address no XML 1.0 request can carry: 400 on addr, never 502 APP0502")
+    void xmlIllegalAddressOnReviewIsRejected(String codePoint, String character) {
+        Map<String, Object> body = reviewBody();
+        body.put("addr", "1 A" + character + "B RD");
+
+        JsonNode problem = assertInvalid(post(REVIEW, body), "addr " + NOT_STORABLE);
+
+        assertErrors(problem, List.of("addr"));
+        assertThat(problem.has("stateAccepted")).as(codePoint).isFalse();
+        assertThat(customerCount()).isZero();
+    }
+
+    static Stream<Arguments> xmlIllegalCodePoints() {
+        return Stream.of(
+                Arguments.of("U+0001", "\u0001"),
+                Arguments.of("U+0008", "\u0008"),
+                Arguments.of("U+000B", "\u000B"),
+                Arguments.of("U+000C", "\u000C"),
+                Arguments.of("U+000E", "\u000E"),
+                Arguments.of("U+001F", "\u001F"),
+                Arguments.of("U+FFFE", "\uFFFE"),
+                Arguments.of("U+FFFF", "\uFFFF"));
+    }
+
+    @Test
+    @DisplayName("add of reversed name, city and account manager behind U+202E: 400 naming the three, nothing stored")
+    void bidiOverrideOnAddIsRejected() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("name", "\u202EYNAPMOC EMCA");
+        body.put("addr", "1 MAIN ST");
+        body.put("city", "\u202ESELEGNA SOL");
+        body.put("state", "CA");
+        body.put("zip", "90001");
+        body.put("corpPhone", "1");
+        body.put("acctMgr", "\u202EHTIMS ENAJ");
+        body.put("acctPhone", "2");
+        body.put("active", "Y");
+
+        JsonNode problem = assertInvalid(post(CUSTOMERS, body), "acctMgr " + NOT_STORABLE);
+
+        assertErrors(problem, List.of("acctMgr", "city", "name"));
+        assertThat(customerCount()).isZero();
+        assertThat(addValidCustomer()).isEqualTo(DatabaseCleaner.FIRST_INTERACTIVE_ID);
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("unstorableInsideAValue")
+    @DisplayName("add and EDIT review with a control, separator or format character inside name: 400 on name")
+    void unstorableCharacterInsideAValueIsRejected(String character, String value) {
+        Map<String, Object> add = validFields();
+        add.put("name", value);
+        assertErrors(assertInvalid(post(CUSTOMERS, add), "name " + NOT_STORABLE), List.of("name"));
+
+        Map<String, Object> review = reviewBody();
+        review.put("purpose", "EDIT");
+        review.put("active", "Y");
+        review.put("name", value);
+        assertErrors(assertInvalid(post(REVIEW, review), "name " + NOT_STORABLE), List.of("name"));
+
+        assertThat(customerCount()).as(character).isZero();
+        assertThat(addValidCustomer()).isEqualTo(DatabaseCleaner.FIRST_INTERACTIVE_ID);
+    }
+
+    static Stream<Arguments> unstorableInsideAValue() {
+        return Stream.of(
+                Arguments.of("TAB", "ACME\tINC"),
+                Arguments.of("LF", "ACME\nINC"),
+                Arguments.of("CR", "ACME\rINC"),
+                Arguments.of("CR LF", "ACME\r\nINC"),
+                Arguments.of("BEL U+0007", "ACME\u0007INC"),
+                Arguments.of("DEL U+007F", "ACME\u007FINC"),
+                Arguments.of("NEL U+0085", "ACME\u0085INC"),
+                Arguments.of("U+2028", "ACME\u2028INC"),
+                Arguments.of("U+2029", "ACME\u2029INC"),
+                Arguments.of("U+00AD", "AC\u00ADME INC"),
+                Arguments.of("U+2066", "ACME \u2066INC\u2069"),
+                Arguments.of("U+FEFF", "\uFEFFACME INC"),
+                Arguments.of("U+E0001", "ACME INC" + new String(Character.toChars(0xE0001))),
+                Arguments.of("U+1FFFE", "ACME INC" + new String(Character.toChars(0x1FFFE))),
+                Arguments.of("U+FDD0", "ACME\uFDD0INC"),
+                Arguments.of("trailing TAB", "ACME INC\t"));
+    }
+
+    @Test
+    @DisplayName("add with a no-break space, U+FFFD, a private-use character and a combining mark: 201, stored as sent")
+    void storableUnusualCharactersAreStored() {
+        Map<String, Object> body = validFields();
+        String name = "N\u00A0A \uFFFD \uE000 E\u0301 " + EMOJI;
+        body.put("name", name);
+
+        ResponseEntity<String> response = post(CUSTOMERS, body);
+
+        assertThat(response.getStatusCode()).as(response.getBody()).isEqualTo(HttpStatus.CREATED);
+        String custId = json(response).path("custId").asText();
+        assertThat(json(response).path("name").asText()).isEqualTo(name);
+        assertThat(storedText("name", custId)).isEqualTo(name);
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Business rules unchanged
     // ---------------------------------------------------------------------------------------------
 
@@ -795,6 +968,17 @@ class RequestFieldErrorsIT extends AbstractPostgresIT {
     private String storedText(String field, String custId) {
         return jdbcTemplate.queryForObject("SELECT " + column(field) + " FROM custmast WHERE custid = ?",
                 String.class, custId);
+    }
+
+    /**
+     * Reads every data, stamp and version column of one stored customer.
+     *
+     * @param custId the customer id
+     * @return the row, keyed by column name
+     */
+    private Map<String, Object> storedRow(String custId) {
+        return jdbcTemplate.queryForMap("SELECT name, addr, city, state, zip, corpphone, acctmgr, acctphone,"
+                + " active, chgtime, chguser, row_version FROM custmast WHERE custid = ?", custId);
     }
 
     /**

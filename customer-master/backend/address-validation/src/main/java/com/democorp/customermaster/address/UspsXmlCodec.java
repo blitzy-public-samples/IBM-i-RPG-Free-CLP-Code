@@ -41,7 +41,14 @@ import org.xml.sax.SAXParseException;
  * without escaping [74-93], so an {@code &} or {@code <} in an address produced a
  * malformed request; {@link #requestDocument requestDocument} writes the same elements,
  * attributes and order with a StAX {@link XMLStreamWriter}, which escapes them, and
- * {@link #requestQuery requestQuery} adds the query prefix and URL encoding. The source
+ * {@link #requestQuery requestQuery} adds the query prefix and URL encoding. Escaping
+ * cannot represent a character outside the XML 1.0 {@code Char} production, such as
+ * U+0001, U+FFFF or an unpaired surrogate, which the writer would copy as it is into a
+ * malformed document; both methods therefore refuse a value or credential holding one
+ * with {@link IllegalArgumentException}, naming the element or attribute and never the
+ * value, before any document exists, so nothing is sent. Nothing is stripped or replaced
+ * beyond the surrounding whitespace. customer-api's request rule keeps such characters out
+ * of the customer fields, so the refusal guards callers that skip it. The source
  * read the response through XMLTABLE [98-136]; {@link #parse parse} reads the same paths
  * with XPath over a hardened DOM.
  *
@@ -181,7 +188,13 @@ public final class UspsXmlCodec {
      * <p>Every value and both credentials are stripped of surrounding whitespace, as the
      * source trims the data-area credentials [USADRVAL.SQLRPGLE:66-69]; {@code null}
      * credentials are written as {@code ""}. Text and attribute values are escaped by the
-     * writer, so {@code &}, {@code <} and {@code "} cannot break the document.
+     * writer, so {@code &}, {@code <} and {@code "} cannot break the document. Before
+     * anything is written, every stripped value and both stripped credentials are checked
+     * against the XML 1.0 {@code Char} production
+     * ({@code #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]}, an
+     * unpaired surrogate being no {@code Char}); one outside it is refused rather than
+     * written into a malformed document, and no character is removed or replaced. TAB, LF
+     * and CR are {@code Char}s and are written as they are.
      *
      * <p>For an all-empty request with user {@code U} and password {@code P} the result is
      * <pre>{@code
@@ -194,18 +207,27 @@ public final class UspsXmlCodec {
      * @param userId   the USPS Web Tools user id; {@code null} is written as {@code ""}
      * @param password the USPS Web Tools password; {@code null} is written as {@code ""}
      * @return the request document
-     * @throws NullPointerException  if {@code request} is {@code null}
-     * @throws IllegalStateException if the XML writer fails, which a {@link StringWriter}
-     *                               target does not do in practice; the message carries
-     *                               no value and no credential
+     * @throws NullPointerException     if {@code request} is {@code null}
+     * @throws IllegalArgumentException if a stripped value or credential holds a character
+     *                                  XML 1.0 cannot carry; the message names the first such
+     *                                  element or attribute in document order, for example
+     *                                  {@code USPS request Address2 holds a character XML 1.0
+     *                                  cannot carry}, and never the value or a credential
+     * @throws IllegalStateException    if the XML writer fails, which a {@link StringWriter}
+     *                                  target does not do in practice; the message carries
+     *                                  no value and no credential
      */
     public String requestDocument(AddressValidationRequest request, String userId, String password) {
         Objects.requireNonNull(request, "request");
+        String cleanUserId = clean(userId);
+        String cleanPassword = clean(password);
+        // Checked before the writer starts, so a value XML 1.0 cannot carry yields no document at all.
+        requireXmlChars(request, cleanUserId, cleanPassword);
         StringWriter out = new StringWriter();
         try {
             XMLStreamWriter xml = newWriter(out);
             try {
-                writeRequest(xml, request, clean(userId), clean(password));
+                writeRequest(xml, request, cleanUserId, cleanPassword);
                 xml.flush();
             } finally {
                 xml.close();
@@ -233,8 +255,12 @@ public final class UspsXmlCodec {
      * @param userId   the USPS Web Tools user id; {@code null} is written as {@code ""}
      * @param password the USPS Web Tools password; {@code null} is written as {@code ""}
      * @return the query string, without a leading {@code ?}
-     * @throws NullPointerException  if {@code request} is {@code null}
-     * @throws IllegalStateException if the XML writer fails
+     * @throws NullPointerException     if {@code request} is {@code null}
+     * @throws IllegalArgumentException if a stripped value or credential holds a character
+     *                                  XML 1.0 cannot carry, as
+     *                                  {@link #requestDocument requestDocument} states; no
+     *                                  query is built
+     * @throws IllegalStateException    if the XML writer fails
      */
     public String requestQuery(AddressValidationRequest request, String userId, String password) {
         return QUERY_PREFIX
@@ -462,6 +488,62 @@ public final class UspsXmlCodec {
         xml.writeStartElement(name);
         xml.writeCharacters(value);
         xml.writeEndElement();
+    }
+
+    /**
+     * Checks that both credentials and the six address values, each exactly as
+     * {@link #writeRequest writeRequest} writes it (stripped), consist of XML 1.0
+     * {@code Char}s only. The JDK writer escapes markup characters but writes every other
+     * character as it is, so a value holding, for example, U+0001 would otherwise make the
+     * document malformed.
+     *
+     * @throws IllegalArgumentException naming the first element or attribute, in document
+     *                                  order, that holds a character outside the production;
+     *                                  never the value
+     */
+    private static void requireXmlChars(AddressValidationRequest request, String userId, String password) {
+        requireXmlChars("USERID attribute", userId);
+        requireXmlChars("PASSWORD attribute", password);
+        requireXmlChars(ADDRESS1, clean(request.address1()));
+        requireXmlChars(ADDRESS2, clean(request.address2()));
+        requireXmlChars(CITY, clean(request.city()));
+        requireXmlChars(STATE, clean(request.state()));
+        requireXmlChars(ZIP5, clean(request.zip5()));
+        requireXmlChars(ZIP4, clean(request.zip4()));
+    }
+
+    /**
+     * Checks one value against the XML 1.0 {@code Char} production
+     * {@code #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]},
+     * reading it by code point: a high surrogate followed by a low one is the
+     * supplementary character they encode, and any other surrogate is read on its own and
+     * is no {@code Char}.
+     *
+     * @param name  the element or attribute the value is written as; the only part of the
+     *              value's context the message carries
+     * @param value the value as written
+     * @throws IllegalArgumentException if a code point lies outside the production; the
+     *                                  message names {@code name} and never quotes the
+     *                                  value, which is customer data or a credential
+     */
+    private static void requireXmlChars(String name, String value) {
+        int length = value.length();
+        int index = 0;
+        while (index < length) {
+            int codePoint = value.codePointAt(index);
+            if (!isXmlChar(codePoint)) {
+                throw new IllegalArgumentException(
+                        "USPS request " + name + " holds a character XML 1.0 cannot carry");
+            }
+            index += Character.charCount(codePoint);
+        }
+    }
+
+    private static boolean isXmlChar(int codePoint) {
+        return codePoint == 0x9 || codePoint == 0xA || codePoint == 0xD
+                || (codePoint >= 0x20 && codePoint <= 0xD7FF)
+                || (codePoint >= 0xE000 && codePoint <= 0xFFFD)
+                || (codePoint >= 0x10000 && codePoint <= 0x10FFFF);
     }
 
     /**

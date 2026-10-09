@@ -281,6 +281,52 @@ class UspsWebToolsAddressValidationClientTest {
         assertNoCredentials(output, null);
     }
 
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("xmlIllegalRequests")
+    @DisplayName("a value or credential XML 1.0 cannot carry throws IllegalArgumentException and sends nothing")
+    void xmlIllegalValueSendsNoRequest(String target, String userId, String password,
+            AddressValidationRequest request, CapturedOutput output) throws IOException {
+        // A request that reached the fake would be answered with a success, never with a fault.
+        byte[] body = fixture("success-zip4.xml");
+        handler.set(exchange -> drainAndRespond(exchange, 200, body));
+
+        Throwable thrown;
+        try (UspsWebToolsAddressValidationClient client = client(
+                "http://127.0.0.1:" + port + ENDPOINT_PATH, userId, password, NORMAL_CONNECT_TIMEOUT,
+                NORMAL_READ_TIMEOUT)) {
+            thrown = catchThrowable(() -> client.validate(request));
+        }
+
+        assertThat(thrown).isExactlyInstanceOf(IllegalArgumentException.class)
+                .hasMessage("USPS request " + target + " holds a character XML 1.0 cannot carry")
+                .hasNoCause();
+        assertThat(endpointHits.get()).withFailMessage("the fake endpoint received a request").isZero();
+        assertThat(redirectedHits.get()).isZero();
+        assertThat(output.getAll().contains("USPS address"))
+                .withFailMessage("captured output holds a USPS log line")
+                .isFalse();
+        assertNoCredentials(output, null);
+    }
+
+    /**
+     * One character outside the XML 1.0 {@code Char} production inside each kind of value:
+     * the street, the city, the state, the ZIP code, the user id and the password. Each sits
+     * between other characters, so stripping cannot remove it.
+     */
+    static Stream<Arguments> xmlIllegalRequests() {
+        return Stream.of(
+                Arguments.of("Address2", USER_ID, PASSWORD,
+                        new AddressValidationRequest("STE 2", "8 ELMWOOD\u0001DR", "OLD HAVEN", "CT", "06399", "")),
+                Arguments.of("City", USER_ID, PASSWORD,
+                        new AddressValidationRequest("STE 2", "8 ELMWOOD DR", "OLD\uFFFFHAVEN", "CT", "06399", "")),
+                Arguments.of("State", USER_ID, PASSWORD,
+                        new AddressValidationRequest("STE 2", "8 ELMWOOD DR", "OLD HAVEN", "C\u0008", "06399", "")),
+                Arguments.of("Zip5", USER_ID, PASSWORD,
+                        new AddressValidationRequest("STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06\uD80099", "")),
+                Arguments.of("USERID attribute", "TEST\u000EUSER123", PASSWORD, REQUEST),
+                Arguments.of("PASSWORD attribute", USER_ID, "pl&ce\u001Fholder", REQUEST));
+    }
+
     @Test
     @DisplayName("an address-level error on a 200 is returned as a result, not thrown")
     void returnsAddressLevelErrorAsResult(CapturedOutput output) throws IOException {

@@ -1475,8 +1475,10 @@ async function bindWriteRequest(request: Request, shape: RequestShape): Promise<
  * The server's bean-validation violations of a bound body, all at once: per
  * text property `<name> is too long` beyond its width (code points, as
  * {@link codePointLength} counts them; an unpaired surrogate counts as one),
- * then `<name> contains a character that cannot be stored` for a U+0000 or
- * an unpaired surrogate ({@link hasUnpairedSurrogate}), plus
+ * then `<name> contains a character that cannot be stored` for an unpaired
+ * surrogate, a control or format character (U+0000, TAB, LF, CR, the
+ * bidirectional and zero-width characters included), U+2028, U+2029 or a
+ * noncharacter ({@link hasUnstorableCharacter}), plus
  * `missing`, the required properties left out. Ordered by property name in
  * Java's `String` order, then by constraint; {@link requestNotValid} keeps
  * each property's first.
@@ -1491,7 +1493,7 @@ function bodyViolations(text: TextFields, missing: readonly RequestViolation[]):
     if (codePointLength(value) > width) {
       violations.push({ field: name, reason: `${name} is too long` });
     }
-    if (value.includes('\u0000') || hasUnpairedSurrogate(value)) {
+    if (hasUnstorableCharacter(value)) {
       violations.push({ field: name, reason: `${name} contains a character that cannot be stored` });
     }
   }
@@ -2872,14 +2874,35 @@ function databaseText(text: string): string {
 }
 
 /**
- * Whether `text` holds an unpaired surrogate (a high surrogate not followed
- * by a low one, or a low surrogate not preceded by a high one), which a JSON
- * `\u` escape can produce: the server's `StorableText` rejects it as a
- * character that cannot be stored, since {@link databaseText} would turn it
- * into `?`. A well-formed pair is one supplementary character and passes.
+ * A code point the server's `StorableText` rejects, read with the `u` flag so
+ * a well-formed surrogate pair is the one supplementary character it encodes
+ * and is judged by that character's category:
+ * - `\p{Cs}`, a surrogate the string does not pair (a high one not followed by
+ *   a low one, or a low one not preceded by a high one), which a JSON `\u`
+ *   escape can produce and {@link databaseText} would turn into `?`;
+ * - `\p{Cc}`, a control character: U+0000–U+001F (NUL, TAB, LF and CR
+ *   included) and U+007F–U+009F;
+ * - `\p{Cf}`, a format character: the bidirectional controls U+061C, U+200E,
+ *   U+200F, U+202A–U+202E and U+2066–U+2069, the zero-width U+200B–U+200D,
+ *   U+2060–U+2064 and U+FEFF, U+00AD and the tags U+E0001 and U+E0020–U+E007F;
+ * - `\p{Zl}` and `\p{Zp}`, U+2028 and U+2029;
+ * - a noncharacter: U+FDD0–U+FDEF and the last two code points of every plane
+ *   (U+FFFE, U+FFFF, U+1FFFE … U+10FFFF).
+ * The browser's Unicode version can be newer than the server's Java one, so a
+ * code point assigned to Cf between the two versions may be judged
+ * differently; every code point listed here is judged alike by both.
  */
-function hasUnpairedSurrogate(text: string): boolean {
-  return /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
+const UNSTORABLE_CODE_POINT = /[\p{Cs}\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Noncharacter_Code_Point}]/u;
+
+/**
+ * Whether `text` holds a character the server's `StorableText` rejects as one
+ * that cannot be stored ({@link UNSTORABLE_CODE_POINT}): such a value cannot
+ * be stored, shown, searched or sent in the USPS XML 1.0 request as it is.
+ * Ordinary letters, combining marks, symbols, U+00A0, U+FFFD, private-use and
+ * other supplementary characters pass.
+ */
+function hasUnstorableCharacter(text: string): boolean {
+  return UNSTORABLE_CODE_POINT.test(text);
 }
 
 /**

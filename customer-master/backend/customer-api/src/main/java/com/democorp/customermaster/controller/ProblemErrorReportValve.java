@@ -19,7 +19,9 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.lang.Nullable;
 import org.springframework.security.web.header.HeaderWriter;
 import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
+import org.springframework.security.web.header.writers.ContentSecurityPolicyHeaderWriter;
 import org.springframework.security.web.header.writers.HstsHeaderWriter;
+import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
 import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
 import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
@@ -66,11 +68,15 @@ import org.springframework.security.web.header.writers.frameoptions.XFrameOption
  * server name, version, exception message or class name reaches the body or the headers.
  *
  * <p><b>Security headers.</b> These responses never pass the security filter chain, so the valve adds the
- * headers that chain's default header configuration adds to every other response, through the same Spring
- * Security writers: {@code X-Content-Type-Options: nosniff}, {@code X-XSS-Protection: 0},
+ * headers that chain adds to every other response, through the same Spring Security writers: its default
+ * {@code X-Content-Type-Options: nosniff}, {@code X-XSS-Protection: 0},
  * {@code Cache-Control: no-cache, no-store, max-age=0, must-revalidate} with {@code Pragma: no-cache} and
  * {@code Expires: 0}, {@code Strict-Transport-Security} on secure requests only, and
- * {@code X-Frame-Options: DENY}. Each writer leaves a header that is already present unchanged.
+ * {@code X-Frame-Options: DENY}, then the chain's own strict
+ * {@code Content-Security-Policy} ({@link SecurityHeaderPolicies#API_CONTENT_SECURITY_POLICY}) and
+ * {@code Referrer-Policy} ({@link SecurityHeaderPolicies#REFERRER_POLICY}), read from the same constants.
+ * The body is problem+json, never a Swagger UI page, so the strict policy applies whatever the path. Each
+ * writer leaves a header that is already present unchanged.
  *
  * <p><b>Fail-safe.</b> The controller and the factory are looked up when an error is reported, not when
  * the web server is built, so building the server initializes no application bean early. When either
@@ -88,15 +94,18 @@ final class ProblemErrorReportValve extends ErrorReportValve {
     private static final int MIN_ERROR_STATUS = 400;
 
     /**
-     * The writers of the security headers, in the order Spring Security's default header configuration
-     * applies them. Each is stateless once built, so the list is shared by every request.
+     * The writers of the security headers, in the order of the slots Spring Security's header
+     * configuration gives them: its defaults, then the content security and referrer policies the
+     * security filter chain adds. Each is stateless once built, so the list is shared by every request.
      */
     private static final List<HeaderWriter> SECURITY_HEADER_WRITERS = List.of(
             new XContentTypeOptionsHeaderWriter(),
             new XXssProtectionHeaderWriter(),
             new CacheControlHeadersWriter(),
             new HstsHeaderWriter(),
-            new XFrameOptionsHeaderWriter(XFrameOptionsMode.DENY));
+            new XFrameOptionsHeaderWriter(XFrameOptionsMode.DENY),
+            new ContentSecurityPolicyHeaderWriter(SecurityHeaderPolicies.API_CONTENT_SECURITY_POLICY),
+            new ReferrerPolicyHeaderWriter(SecurityHeaderPolicies.REFERRER_POLICY));
 
     private static final Logger log = LoggerFactory.getLogger(ProblemErrorReportValve.class);
 

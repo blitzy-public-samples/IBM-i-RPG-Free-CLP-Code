@@ -19,8 +19,10 @@ import org.hibernate.validator.constraints.CodePointLength;
  * an {@code ADD} review.
  *
  * <p><b>400 versus 422.</b> {@link CodePointLength} and {@link StorableText} reject a value that is
- * too long, contains U+0000 or holds an unpaired surrogate with 400 APP0400 and an
- * {@code errors[]} entry on the property, before the service runs. A blank or missing value is a
+ * too long, or holds an unpaired surrogate, a control or format character (U+0000, TAB, a line
+ * break and the bidirectional and zero-width characters included), a line or paragraph separator
+ * or a noncharacter, with 400 APP0400 and an {@code errors[]} entry on the property, before the
+ * service runs. A blank or missing value is a
  * business-rule failure that {@code service/CustomerValidator} reports as 422 DEM0501, DEM0502 or
  * DEM0503, in source order and stopping at the first, so no component is {@code @NotNull} or
  * {@code @NotBlank}.

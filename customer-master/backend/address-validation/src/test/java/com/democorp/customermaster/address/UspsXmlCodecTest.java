@@ -10,6 +10,7 @@ import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -18,6 +19,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 
@@ -46,7 +48,13 @@ import org.xml.sax.SAXException;
  *
  * <p><b>Request</b> [USADRVAL.SQLRPGLE:74-93]. The source concatenates values unescaped, so an
  * {@code &} or {@code <} breaks the document; the codec escapes them, a deliberate behaviour
- * change, and strips surrounding blanks, as the source trims its data-area credentials.
+ * change, and strips surrounding blanks, as the source trims its data-area credentials. A
+ * value or credential holding a character outside the XML 1.0 {@code Char} production
+ * (U+0001, U+0008, U+000B, U+000C, U+000E, U+001F, U+FFFE, U+FFFF, a lone surrogate) is
+ * refused with {@link IllegalArgumentException} naming only its element or attribute, so no
+ * malformed document is ever produced; TAB, LF, CR, U+FFFD, private-use characters and
+ * supplementary characters are written as they are. Display names name code points as
+ * {@code U+XXXX} and never hold the values, most of which no XML test report can carry.
  *
  * <p><b>Valid responses</b> [USADRVAL.SQLRPGLE:100-133]. A missing or empty element reads
  * {@code ""}, the XMLTABLE {@code default ' '}; a non-blank City is a success whatever else the
@@ -90,6 +98,13 @@ class UspsXmlCodecTest {
     private static final String[] BASE_ROW = {"STE 2", "8 ELMWOOD DR", "OLD HAVEN", "CT", "06399", "1234"};
 
     private static final int ADDRESS_NOT_FOUND = -2147219401;
+
+    /**
+     * UTF-16 units outside the XML 1.0 {@code Char} production: the C0 controls the reports
+     * name, the two BMP noncharacters XML excludes, and a lone high and a lone low surrogate.
+     */
+    private static final int[] XML_ILLEGAL_UNITS =
+            {0x0001, 0x0008, 0x000B, 0x000C, 0x000E, 0x001F, 0xFFFE, 0xFFFF, 0xD800, 0xDC00};
 
     private final UspsXmlCodec codec = new UspsXmlCodec();
 
@@ -188,6 +203,120 @@ class UspsXmlCodecTest {
                 .doesNotContain("<", ">", "&", "\"", " ", "=");
         assertThat(URLDecoder.decode(encoded, StandardCharsets.UTF_8))
                 .isEqualTo(codec.requestDocument(BASE_REQUEST, USER_ID, PASSWORD));
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} with {1}")
+    @MethodSource("xmlIllegalValues")
+    @DisplayName("a value XML 1.0 cannot carry is refused naming its element, with no document and no query")
+    void requestRefusesXmlIllegalValue(String element, String codePoint, AddressValidationRequest request) {
+        String expected = "USPS request " + element + " holds a character XML 1.0 cannot carry";
+
+        Throwable document = catchThrowable(() -> codec.requestDocument(request, USER_ID, PASSWORD));
+        Throwable query = catchThrowable(() -> codec.requestQuery(request, USER_ID, PASSWORD));
+
+        for (Throwable thrown : List.of(document, query)) {
+            assertThat(thrown).as(codePoint).isExactlyInstanceOf(IllegalArgumentException.class)
+                    .hasMessage(expected)
+                    .hasNoCause();
+            // Printable ASCII only, so neither the refused character nor the value is quoted.
+            assertThat(thrown.getMessage()).matches("[ -~]+").doesNotContain(USER_ID, PASSWORD);
+        }
+    }
+
+    /**
+     * Each code point outside the XML 1.0 {@code Char} production the reports name, between
+     * two digits in each address element, so stripping cannot remove it; State, two
+     * characters wide, holds it after one letter, which only a non-whitespace code point
+     * survives, since {@link String#strip()} removes U+000B, U+000C and U+001F at an end.
+     */
+    static Stream<Arguments> xmlIllegalValues() {
+        List<Arguments> cases = new ArrayList<>();
+        for (int unit : XML_ILLEGAL_UNITS) {
+            String character = String.valueOf((char) unit);
+            String label = String.format("U+%04X", unit);
+            String between = "1" + character + "2";
+            cases.add(Arguments.of("Address1", label, new AddressValidationRequest(between, "", "", "", "", "")));
+            cases.add(Arguments.of("Address2", label, new AddressValidationRequest("", between, "", "", "", "")));
+            cases.add(Arguments.of("City", label, new AddressValidationRequest("", "", between, "", "", "")));
+            if (!Character.isWhitespace(unit)) {
+                cases.add(Arguments.of("State", label,
+                        new AddressValidationRequest("", "", "", "C" + character, "", "")));
+            }
+            cases.add(Arguments.of("Zip5", label, new AddressValidationRequest("", "", "", "", between, "")));
+            cases.add(Arguments.of("Zip4", label, new AddressValidationRequest("", "", "", "", "", between)));
+        }
+        return cases.stream();
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} with {1}")
+    @MethodSource("xmlIllegalCredentials")
+    @DisplayName("a credential XML 1.0 cannot carry is refused naming its attribute, never quoting it")
+    void requestRefusesXmlIllegalCredential(String attribute, String codePoint, String userId, String password) {
+        String expected = "USPS request " + attribute + " attribute holds a character XML 1.0 cannot carry";
+
+        Throwable document = catchThrowable(() -> codec.requestDocument(BASE_REQUEST, userId, password));
+        Throwable query = catchThrowable(() -> codec.requestQuery(BASE_REQUEST, userId, password));
+
+        for (Throwable thrown : List.of(document, query)) {
+            assertThat(thrown).as(codePoint).isExactlyInstanceOf(IllegalArgumentException.class)
+                    .hasMessage(expected)
+                    .hasNoCause();
+            // Printable ASCII only, and no part of either credential or of the address.
+            assertThat(thrown.getMessage()).matches("[ -~]+")
+                    .doesNotContain("QZ", USER_ID, PASSWORD, "8 ELMWOOD DR");
+        }
+    }
+
+    /**
+     * Each code point outside the XML 1.0 {@code Char} production, inside a fictitious user
+     * id with the valid password, and inside a fictitious password with the valid user id.
+     * The {@code QZ} fragments mark the credentials, so a message quoting one is detected.
+     */
+    static Stream<Arguments> xmlIllegalCredentials() {
+        return Arrays.stream(XML_ILLEGAL_UNITS).boxed().flatMap(unit -> {
+            String character = String.valueOf((char) unit.intValue());
+            String label = String.format("U+%04X", unit);
+            return Stream.of(
+                    Arguments.of("USERID", label, "TESTQZ" + character + "IDQZ", PASSWORD),
+                    Arguments.of("PASSWORD", label, USER_ID, "pwQZ" + character + "QZpw"));
+        });
+    }
+
+    @Test
+    @DisplayName("TAB, LF, U+FFFD, private use and U+1F600 are written as they are and parse back unchanged")
+    void requestWritesEveryXmlCharUnchanged() throws Exception {
+        String emoji = new String(Character.toChars(0x1F600));
+        String[] values = {"STE\t2", "8 ELMWOOD\nDR", "OLD\uFFFDHAVEN", "C\uE000", "0" + emoji + "399", "\uE00012"};
+        AddressValidationRequest request =
+                new AddressValidationRequest(values[0], values[1], values[2], values[3], values[4], values[5]);
+        String userId = "TEST\uE000" + emoji;
+        String password = "pl\uFFFD&" + emoji;
+
+        String document = codec.requestDocument(request, userId, password);
+
+        assertThat(document).contains("<Address1>STE\t2</Address1>", "<Address2>8 ELMWOOD\nDR</Address2>");
+        Element root = parseHardened(document).getDocumentElement();
+        assertThat(root.getAttribute("USERID")).isEqualTo(userId);
+        assertThat(root.getAttribute("PASSWORD")).isEqualTo(password);
+        assertThat(childElements(assertSingleChild(root, "Address"))).extracting(Element::getTextContent)
+                .containsExactly(values);
+        assertThat(URLDecoder.decode(codec.requestQuery(request, userId, password)
+                .substring(UspsXmlCodec.QUERY_PREFIX.length()), StandardCharsets.UTF_8)).isEqualTo(document);
+    }
+
+    @Test
+    @DisplayName("a CR inside a value is a Char: written as it is, read back as LF by XML end-of-line handling")
+    void requestWritesCarriageReturnAsItIs() throws Exception {
+        AddressValidationRequest request =
+                new AddressValidationRequest("", "8 ELMWOOD\rDR", "OLD\r\nHAVEN", "CT", "06399", "");
+
+        String document = codec.requestDocument(request, USER_ID, PASSWORD);
+
+        assertThat(document).contains("<Address2>8 ELMWOOD\rDR</Address2>", "<City>OLD\r\nHAVEN</City>");
+        Element address = assertSingleChild(parseHardened(document).getDocumentElement(), "Address");
+        // XML 1.0 section 2.11: a parser passes CR and CR LF on as one LF.
+        assertThat(assertSingleChild(address, "Address2").getTextContent()).isEqualTo("8 ELMWOOD\nDR");
+        assertThat(assertSingleChild(address, "City").getTextContent()).isEqualTo("OLD\nHAVEN");
     }
 
     @Test
@@ -718,6 +847,25 @@ class UspsXmlCodecTest {
     private static Document parseXml(String xml)
             throws ParserConfigurationException, SAXException, IOException {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        return factory.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
+    }
+
+    /**
+     * Parses the codec's own output with a namespace-aware DOM builder hardened as the
+     * codec's response parser is: secure processing, no DOCTYPE, no external entities or
+     * DTD, no XInclude. A malformed document fails the parse.
+     */
+    private static Document parseHardened(String xml)
+            throws ParserConfigurationException, SAXException, IOException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newDefaultInstance();
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
         factory.setNamespaceAware(true);
         return factory.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
     }

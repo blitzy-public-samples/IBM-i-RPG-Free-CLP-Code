@@ -49,14 +49,15 @@ import org.springframework.lang.Nullable;
  *       named locations {@code @api_bad_gateway} and {@code @api_gateway_timeout}, and each body must
  *       equal what {@code create(status, "DEM9999", List.of(), instance)} serializes to.</li>
  *   <li><b>Rejection.</b> nginx rejects the request before forwarding it: a malformed or oversized
- *       request line, header or body, {@code TRACE}, an unknown transfer coding or HTTP version. The
+ *       request line, header or body, {@code TRACE}, an unknown transfer coding or HTTP version, or a
+ *       credentialed request beyond the throttle's burst. The
  *       {@code error_page} lists of the server block and of {@code location /api/} send each such
  *       status to its internal page under {@code /_nginx/rejection/}, which answers problem+json when
  *       {@code $api_request} places the request target under {@code /api/}, and nginx's own HTML page
- *       otherwise. For 400, 405, 413, 414 and 494 (which nginx sends as 400) the body must equal what
- *       {@link ProblemErrorController#problemFor} builds for the status sent, as for a request Tomcat's
- *       connector rejects: {@code APP0400} with the lower-case reason phrase. For 501 and 505 it must
- *       equal DEM9999 at that status, as for the gateway.</li>
+ *       otherwise. For 400, 405, 413, 414, 429 and 494 (which nginx sends as 400) the body must equal
+ *       what {@link ProblemErrorController#problemFor} builds for the status sent, as for a request
+ *       Tomcat's connector rejects: {@code APP0400} with the lower-case reason phrase. For 501 and 505
+ *       it must equal DEM9999 at that status, as for the gateway.</li>
  * </ul>
  * Equal means the same members, values and member order, the catalog's {@code detail} and the
  * {@code args} included, with no member repeated. A change to a catalog text or to the problem shape
@@ -94,7 +95,21 @@ import org.springframework.lang.Nullable;
  * header once, with {@code always}, as a literal, so every location, page and gateway body inherits it
  * whatever a failed upstream sent; {@code location /api/} must add each once, with {@code always}, from
  * a map over the API's own header that yields the server's value only when the API sent none; and no
- * other level may set {@code add_header} or {@code add_header_inherit}.
+ * other level may set {@code add_header} or {@code add_header_inherit}. The server block must also add
+ * {@code Retry-After} once, with {@code always}, from {@code $api_retry_after}, a map over
+ * {@code $status} that yields {@code 1} for 429 and nothing for any other status, so the 429 page,
+ * which inherits it, tells the client when to retry and no other answer carries the header.
+ *
+ * <p><b>Throttle.</b> The API keeps no per-caller state between requests, so the gateway is where
+ * repeated sign-in attempts are slowed. The top level must declare one {@code limit_req_zone}, keyed by
+ * {@code $api_credentials_client}, named {@code api_credentials}, of 1 MB at 10 requests per second.
+ * That key's map, over {@code $http_authorization}, must yield {@code ""}, which nginx does not count,
+ * for a request without an {@code Authorization} header, and the connection's client address
+ * {@code $binary_remote_addr} for any other, so anonymous requests, the public {@code GET /api/messages}
+ * included, are never throttled, and the key is never a value the client sends. {@code location /api/}
+ * must apply the zone once with a burst of 20 whose first 10 pass undelayed, so a client that awaits
+ * each answer is slowed rather than refused, answer beyond the burst with {@code limit_req_status 429},
+ * and route 429 to its page; no other level may limit requests.
  *
  * <p><b>Configuration file.</b> System property {@value #NGINX_CONF_PATH_PROPERTY} names it. When
  * absent, the path {@value #DEFAULT_NGINX_CONF_PATH} is resolved against the working directory, which
@@ -149,6 +164,24 @@ final class NginxGatewayProblemTest {
 
     /** The status nginx sent. */
     private static final String STATUS_VARIABLE = "status";
+
+    /** The {@code Authorization} request header, the source variable of the throttle's key map. */
+    private static final String AUTHORIZATION_VARIABLE = "http_authorization";
+
+    /** The throttle's key: the client address of a credentialed request, {@code ""} otherwise. */
+    private static final String THROTTLE_KEY_VARIABLE = "api_credentials_client";
+
+    /** The client address in binary form, the throttle's key for a credentialed request. */
+    private static final String BINARY_CLIENT_ADDRESS_VARIABLE = "binary_remote_addr";
+
+    /** The shared-memory zone of the throttle. */
+    private static final String THROTTLE_ZONE = "api_credentials";
+
+    /** The {@code Retry-After} value: {@code "1"} for a 429, {@code ""} otherwise. */
+    private static final String RETRY_AFTER_VARIABLE = "api_retry_after";
+
+    /** The header that tells a throttled client when to retry. */
+    private static final String RETRY_AFTER_HEADER = "Retry-After";
 
     /** The browser security headers the server block adds, each with a part its value must hold. */
     private static final Map<String, String> SECURITY_HEADERS = Map.of(
@@ -246,6 +279,9 @@ final class NginxGatewayProblemTest {
 
         /** A request line over nginx's buffer. */
         URI_TOO_LONG(414, 414, "/_nginx/rejection/414"),
+
+        /** A credentialed request beyond the burst of the throttle in {@code location /api/}. */
+        TOO_MANY_REQUESTS(429, 429, "/_nginx/rejection/429"),
 
         /** An unknown {@code Transfer-Encoding}. */
         NOT_IMPLEMENTED(501, 501, "/_nginx/rejection/501"),
@@ -589,6 +625,93 @@ final class NginxGatewayProblemTest {
                 .filter(d -> d.name().equals("add_header") || d.name().equals("add_header_inherit")))
                 .as("add_header and add_header_inherit below the server block")
                 .containsExactlyInAnyOrderElementsOf(apiHeaders);
+    }
+
+    /**
+     * Holds the throttle to its one zone and its one place: the top level declares the only
+     * {@code limit_req_zone}, keyed by {@code $api_credentials_client}, named {@code api_credentials},
+     * 1 MB at 10 requests per second, and {@code location /api/} applies it once with a burst of 20 whose
+     * first 10 pass undelayed, answers beyond the burst with 429 and routes 429 to its page. No other
+     * directive anywhere in the server block limits requests or sets their rejection status.
+     */
+    @Test
+    @DisplayName("location /api/ throttles credentialed requests to 10/s, burst 20 (10 undelayed), and rejects"
+            + " beyond it with 429 to its page")
+    void apiLocationThrottlesCredentialedRequestsAndRejectsBeyondTheBurstWith429() {
+        Directive zone = only(config, d -> d.name().equals("limit_req_zone"), "limit_req_zone");
+        assertThat(zone.args()).as("limit_req_zone")
+                .containsExactly("$" + THROTTLE_KEY_VARIABLE, "zone=" + THROTTLE_ZONE + ":1m", "rate=10r/s");
+        assertThat(config.stream().filter(d -> d.name().startsWith("limit_req")))
+                .as("limit_req directives at the top level").containsExactly(zone);
+
+        Directive api = apiLocation();
+        Directive limit = only(api.children(), d -> d.name().equals("limit_req"), "limit_req in location /api/");
+        assertThat(limit.args()).as("limit_req in location /api/")
+                .containsExactly("zone=" + THROTTLE_ZONE, "burst=20", "delay=10");
+        Directive status = only(api.children(), d -> d.name().equals("limit_req_status"),
+                "limit_req_status in location /api/");
+        String tooManyRequests = String.valueOf(Rejection.TOO_MANY_REQUESTS.nginxStatus);
+        assertThat(status.args()).as("limit_req_status in location /api/").containsExactly(tooManyRequests);
+        only(api.children(), d -> d.name().equals("error_page")
+                && d.args().equals(List.of(tooManyRequests, Rejection.TOO_MANY_REQUESTS.page)),
+                "error_page " + tooManyRequests + " " + Rejection.TOO_MANY_REQUESTS.page + " in location /api/");
+
+        Directive server = server();
+        assertThat(Stream.concat(server.children().stream(), nested(server))
+                .filter(d -> d.name().startsWith("limit_req")))
+                .as("limit_req directives in the server block, at any depth")
+                .containsExactlyInAnyOrder(limit, status);
+    }
+
+    /**
+     * Holds the throttle's key to the client address of a credentialed request. nginx counts no request
+     * whose key is empty, so the map must yield {@code ""} for a request without an {@code Authorization}
+     * header, which leaves anonymous requests, the public {@code GET /api/messages} included, unthrottled,
+     * and {@code $binary_remote_addr}, the peer of the connection, for any request that carries one,
+     * whatever its value, so wrong and malformed credentials count and the key is never a value the client
+     * sends, such as {@code X-Forwarded-For}.
+     */
+    @Test
+    @DisplayName("the throttle's key is the client address of a request with an Authorization header, empty"
+            + " otherwise")
+    void throttleKeyIsTheClientAddressOfACredentialedRequestOnly() {
+        NginxMap key = NginxMap.of(map(AUTHORIZATION_VARIABLE, THROTTLE_KEY_VARIABLE));
+
+        assertThat(key.exact()).as("keys of the throttle key map").containsOnlyKeys("").containsEntry("", "");
+        assertThat(key.patterns()).as("expressions of the throttle key map").isEmpty();
+        assertThat(key.defaultValue()).as("the key of a request with an Authorization header")
+                .isEqualTo("$" + BINARY_CLIENT_ADDRESS_VARIABLE);
+        assertThat(key.valueFor("")).as("the key of a request without an Authorization header").isEmpty();
+    }
+
+    /**
+     * Holds {@code Retry-After} to the throttle's 429: the server block adds it once, with
+     * {@code always}, from {@code $api_retry_after}, which the 429 page inherits, and that map over
+     * {@code $status} yields {@code 1} for 429 and {@code ""}, for which nginx adds no header, for every
+     * other status. {@link #serverAddsLiteralSecurityHeadersApiAddsThoseTheApiDidNotSend()} keeps any
+     * other level from adding it.
+     */
+    @Test
+    @DisplayName("the server block adds Retry-After: 1 to the throttle's 429 and to no other status")
+    void retryAfterIsOneSecondForTheThrottles429Only() {
+        Directive retryAfter = securityHeader(server(), "server", RETRY_AFTER_HEADER);
+        assertThat(retryAfter.args().get(1)).as("the value of add_header %s in the server block",
+                RETRY_AFTER_HEADER).isEqualTo("$" + RETRY_AFTER_VARIABLE);
+
+        NginxMap value = NginxMap.of(map(STATUS_VARIABLE, RETRY_AFTER_VARIABLE));
+        assertThat(value.patterns()).as("expressions of the %s map", RETRY_AFTER_HEADER).isEmpty();
+        assertThat(value.defaultValue()).as("%s of any other status", RETRY_AFTER_HEADER).isEmpty();
+        String tooManyRequests = String.valueOf(Rejection.TOO_MANY_REQUESTS.wireStatus);
+        assertThat(value.valueFor(tooManyRequests)).as("%s of %s", RETRY_AFTER_HEADER, tooManyRequests)
+                .isEqualTo("1");
+        List<String> others = new ArrayList<>();
+        for (int status = 0; status <= 999; status++) {
+            String code = String.format(Locale.ROOT, "%03d", status);
+            if (!code.equals(tooManyRequests) && !value.valueFor(code).isEmpty()) {
+                others.add(code);
+            }
+        }
+        assertThat(others).as("other statuses given a %s", RETRY_AFTER_HEADER).isEmpty();
     }
 
     /**

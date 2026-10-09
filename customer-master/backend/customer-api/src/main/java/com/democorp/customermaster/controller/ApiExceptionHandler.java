@@ -1013,9 +1013,10 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      * @param code the constraint code, such as {@code NotNull}; may be empty
      * @return {@code is required}, {@code is too long} (a {@code Size} maximum, or a
      *     {@code CodePointLength} maximum, which counts characters as the column does),
-     *     {@code has an invalid format}, {@code contains a character that cannot be stored} (a
-     *     character a text column cannot hold, which
-     *     {@link com.democorp.customermaster.controller.dto.StorableText} rejects) or {@code is invalid}
+     *     {@code has an invalid format}, {@code contains a character that cannot be stored} (an
+     *     unpaired surrogate, a control or format character, a line or paragraph separator or a
+     *     noncharacter, which {@link com.democorp.customermaster.controller.dto.StorableText}
+     *     rejects) or {@code is invalid}
      */
     private static String constraintPhrase(String code) {
         return switch (code) {

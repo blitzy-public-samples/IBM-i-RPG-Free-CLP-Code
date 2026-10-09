@@ -1,6 +1,7 @@
 package com.democorp.customermaster.security;
 
 import com.democorp.customermaster.controller.ProblemFactory;
+import com.democorp.customermaster.controller.SecurityHeaderPolicies;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -29,6 +30,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchyImpl;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.InsufficientAuthenticationException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.ObjectPostProcessor;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -47,6 +49,12 @@ import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.authentication.AuthenticationConverter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationConverter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.header.writers.ContentSecurityPolicyHeaderWriter;
+import org.springframework.security.web.header.writers.DelegatingRequestMatcherHeaderWriter;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
+import org.springframework.security.web.util.matcher.NegatedRequestMatcher;
+import org.springframework.security.web.util.matcher.OrRequestMatcher;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.util.function.SingletonSupplier;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.DefaultCorsProcessor;
@@ -87,8 +95,20 @@ import org.springframework.web.servlet.handler.AbstractHandlerMapping;
  * anonymous preflight never gets that far: it is answered 401 like any anonymous request to a
  * protected path. Logout and the request cache are disabled too: there is no session to end and no
  * login page to return to, and the default logout filter would otherwise answer {@code POST /logout}
- * with a redirect rather than letting an unknown path reach the 404 of the MVC layer. The default
- * security headers stay in place.
+ * with a redirect rather than letting an unknown path reach the 404 of the MVC layer.
+ *
+ * <p><b>Security headers.</b> Spring Security's default headers stay in place:
+ * {@code X-Content-Type-Options: nosniff}, {@code X-XSS-Protection: 0}, the no-store
+ * {@code Cache-Control} set (unless the handler chose its own), HSTS on secure requests only, and
+ * {@code X-Frame-Options: DENY}. The chain adds two of its own to every response, its 401 and 403
+ * included: {@code Referrer-Policy: no-referrer}, and exactly one {@code Content-Security-Policy}, the
+ * Swagger UI's {@link SecurityHeaderPolicies#SWAGGER_UI_CONTENT_SECURITY_POLICY} for
+ * {@link #SWAGGER_UI_PATHS} and the strict {@link SecurityHeaderPolicies#API_CONTENT_SECURITY_POLICY}
+ * for everything else. No writer replaces a header already set, and the headers are written while the
+ * request's own dispatch runs, so a response that the ERROR dispatch to {@code /error} finishes keeps
+ * the policy of the path the client asked for; only a request the firewall rejects first meets the
+ * writers on that dispatch, and gets the strict policy. A request Tomcat's connector rejects never
+ * reaches this chain; {@code ProblemErrorReportValve} adds the same headers to its answer.
  *
  * <p><b>401 and 403 bodies.</b> One {@link ProblemAuthenticationEntryPoint} answers missing or bad
  * credentials and an anonymous request to a protected path alike: 401 {@code APP0401}. A
@@ -100,6 +120,14 @@ import org.springframework.web.servlet.handler.AbstractHandlerMapping;
  * {@link ProblemFactory} only, and carry no exception message, class name or attempted username.
  * Because the Basic filter runs before authorization, bad credentials sent to a public endpoint are
  * still answered 401; the SPA therefore fetches {@code /api/messages} without credentials.
+ *
+ * <p><b>Failed sign-ins.</b> Credentials that were sent and rejected, whether wrong, unknown or
+ * malformed, are logged at WARN, one line per request, with the code, the method, whether a challenge
+ * was sent and the type of the failure; an anonymous 401 is logged at debug level only. The API keeps
+ * no per-caller state between requests, so it counts no failures and locks out no user or client:
+ * throttling repeated attempts is the job of the Compose {@code frontend}'s nginx, the only browser
+ * ingress, which limits the rate of credentialed {@code /api/} requests per client address and answers
+ * a flood beyond its burst with 429.
  *
  * <p><b>Registration and the generator.</b> This class is the only registrar of
  * {@link UsersProperties}; the application declares no {@code @ConfigurationPropertiesScan}. It exists
@@ -175,7 +203,19 @@ public class SecurityConfig {
     static final List<String> MAINTENANCE_PUT_PATHS = List.of(
             "/api/customers/*");
 
-    /** Startup summary and debug diagnostics; never a password, a username or a request path. */
+    /**
+     * The Swagger UI's paths, public under {@link #PUBLIC_GET_PATHS}: its pages and resources, and the
+     * {@code springdoc.swagger-ui.path} that redirects to them. Only these responses get the Swagger UI's
+     * {@code Content-Security-Policy}; every other response gets the strict API policy.
+     */
+    static final List<String> SWAGGER_UI_PATHS = List.of(
+            "/swagger-ui/**",
+            "/swagger-ui.html");
+
+    /**
+     * Startup summary, the WARN line of each rejected sign-in and debug diagnostics; never a password,
+     * a username, a request path or query, a header value or a client address.
+     */
     private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
 
     /**
@@ -268,12 +308,24 @@ public class SecurityConfig {
         // protected path produce the same 401.
         AuthenticationEntryPoint entryPoint = new ProblemAuthenticationEntryPoint(problems);
         AccessDeniedHandler accessDenied = new ProblemAccessDeniedHandler(problems);
+        RequestMatcher swaggerUi = swaggerUiRequests();
 
         http
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
+                // The defaults stay; the Swagger UI matcher and its negation never both match, so each
+                // response gets exactly one Content-Security-Policy.
+                .headers(headers -> headers
+                        .referrerPolicy(referrer -> referrer.policy(SecurityHeaderPolicies.REFERRER_POLICY))
+                        .addHeaderWriter(new DelegatingRequestMatcherHeaderWriter(swaggerUi,
+                                new ContentSecurityPolicyHeaderWriter(
+                                        SecurityHeaderPolicies.SWAGGER_UI_CONTENT_SECURITY_POLICY)))
+                        .addHeaderWriter(new DelegatingRequestMatcherHeaderWriter(
+                                new NegatedRequestMatcher(swaggerUi),
+                                new ContentSecurityPolicyHeaderWriter(
+                                        SecurityHeaderPolicies.API_CONTENT_SECURITY_POLICY))))
                 // The strict converter turns a Basic header without its space separator, and a
                 // password longer than BCrypt verifies, into the same 401 as bad credentials.
                 .httpBasic(basic -> basic
@@ -313,6 +365,21 @@ public class SecurityConfig {
     }
 
     /**
+     * Matches a request for the Swagger UI, any method: one of {@link #SWAGGER_UI_PATHS}, matched as
+     * Spring MVC matches paths.
+     *
+     * @return a matcher that matches when any of those paths does
+     */
+    private static RequestMatcher swaggerUiRequests() {
+        PathPatternRequestMatcher.Builder pathPatterns = PathPatternRequestMatcher.withDefaults();
+        List<RequestMatcher> matchers = new ArrayList<>(SWAGGER_UI_PATHS.size());
+        for (String path : SWAGGER_UI_PATHS) {
+            matchers.add(pathPatterns.matcher(path));
+        }
+        return new OrRequestMatcher(matchers);
+    }
+
+    /**
      * Installs one {@link ProblemCorsProcessor} on every Spring MVC handler mapping, so a cross-origin
      * request Spring rejects is answered 403 {@code APP0403} problem+json whichever mapping found its
      * handler: the controllers, the Actuator endpoints, the API docs and the Swagger UI resources alike.
@@ -339,6 +406,16 @@ public class SecurityConfig {
      * and by the exception translation filter when an anonymous request reaches a protected path. The
      * challenge header is set before the body is written; {@link ProblemFactory#write} keeps it. The
      * body names neither the failure nor the attempted username.
+     *
+     * <p><b>Logging.</b> Credentials that were sent and rejected, any failure other than
+     * {@link InsufficientAuthenticationException} (a {@link BadCredentialsException} from the user store
+     * or from {@link StrictBasicAuthenticationConverter} included), write one WARN line carrying the
+     * code, the method, whether a challenge was sent and the failure's simple class name, so repeated
+     * guessing shows in the operational log. An anonymous request, which the exception translation
+     * filter reports as {@link InsufficientAuthenticationException}, is routine for the SPA's sign-in
+     * and is logged at debug level only. No line carries the username, the password, the path, the
+     * query, a header value or the client address. The entry point counts nothing and delays nothing,
+     * as the API keeps no per-caller state; the Compose {@code frontend}'s nginx throttles clients.
      */
     static final class ProblemAuthenticationEntryPoint implements AuthenticationEntryPoint {
 
@@ -360,7 +437,8 @@ public class SecurityConfig {
          *
          * @param request the request that failed authentication
          * @param response the response to write
-         * @param authException why authentication failed; logged by type at debug level only
+         * @param authException why authentication failed, logged by type only: at WARN when credentials
+         *     were sent and rejected, at debug level for an anonymous request or when absent
          * @throws IOException when writing to the client fails
          */
         @Override
@@ -370,7 +448,11 @@ public class SecurityConfig {
             if (challenge) {
                 response.setHeader(HttpHeaders.WWW_AUTHENTICATE, BASIC_CHALLENGE);
             }
-            if (log.isDebugEnabled()) {
+            if (authException != null && !(authException instanceof InsufficientAuthenticationException)) {
+                log.warn("Authentication failed: 401 {} for {} request (challenge sent: {}, cause: {})",
+                        CODE_UNAUTHORIZED, request.getMethod(), challenge,
+                        authException.getClass().getSimpleName());
+            } else if (log.isDebugEnabled()) {
                 log.debug("401 {} for {} request (challenge sent: {}, cause: {})", CODE_UNAUTHORIZED,
                         request.getMethod(), challenge,
                         authException == null ? "-" : authException.getClass().getSimpleName());

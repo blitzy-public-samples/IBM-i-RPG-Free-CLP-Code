@@ -240,13 +240,20 @@ public class UspsWebToolsAddressValidationClient implements AddressValidationCli
      * {@code jdk.httpclient.disableRetryConnect} system property covers refused connects
      * only, for the whole JVM. Any response, whatever its status, a response cut short
      * after its first bytes and a read timeout each send the request once; a refused or
-     * timed-out connect sends none.
+     * timed-out connect, and a value or credential the request document cannot carry,
+     * send none.
      *
      * @param request the address to check; never {@code null}
      * @return the standardized address, or the address-level error the service reported
      * @throws AddressServiceUnavailableException for a status outside 2xx, a body over
      *         {@value #MAX_BODY_BYTES} bytes, a timeout or other I/O failure, or a response
      *         that fails the response rules of {@link UspsXmlCodec#parse(byte[])}
+     * @throws IllegalArgumentException if a request value or a configured credential holds a
+     *         character the XML 1.0 request document cannot carry, as
+     *         {@link UspsXmlCodec#requestDocument UspsXmlCodec.requestDocument} states. It is
+     *         raised before the request URI is built, so nothing is sent and nothing is logged;
+     *         the message names the element or attribute only. It is a caller error, never a
+     *         service fault, and is not turned into {@link AddressServiceUnavailableException}
      * @throws NullPointerException if {@code request} is {@code null}
      */
     @Override

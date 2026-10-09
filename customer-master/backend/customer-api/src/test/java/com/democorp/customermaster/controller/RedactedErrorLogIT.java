@@ -40,8 +40,10 @@ import org.springframework.web.client.RestClientException;
  *       add allocates, so the add's {@code INSERT} fails with SQLSTATE 23505. Spring Data JDBC wraps that
  *       failure in a {@code DbActionExecutionException} whose message quotes the aggregate, and the driver's
  *       message quotes {@code Key (custid)=(EEEF) already exists}; every request value is a sentinel, some
- *       with an embedded CR/LF followed by text shaped like a log line. {@code ApiExceptionHandler} must
- *       answer 500 {@code DEM9999} and log it once, redacted.</li>
+ *       followed by text shaped like a log line ({@code FORGED-LINE-…}). The values hold no CR or LF,
+ *       which the request rule rejects with 400 APP0400 before any {@code INSERT}; the filter failure
+ *       below keeps a CR/LF in its exception message. {@code ApiExceptionHandler} must answer 500
+ *       {@code DEM9999} and log it once, redacted.</li>
  *   <li><b>Filter failure.</b> A test-only servlet filter, registered last, throws outside any controller.
  *       {@code ErrorDispatchFilter} must hand it to the ERROR dispatch, so {@code ProblemErrorController}
  *       answers 500 {@code DEM9999} in {@code application/problem+json} and writes the only ERROR line;
@@ -95,13 +97,14 @@ class RedactedErrorLogIT extends AbstractPostgresIT {
                 + " VALUES (?, 'EXISTING ROW', '1 MAIN ST', 'AUBURN', 'ME', '04210')",
                 DatabaseCleaner.FIRST_INTERACTIVE_ID);
         Map<String, String> body = new LinkedHashMap<>();
-        body.put("name", "SENTNAME1\r\nFORGED-LINE-NAME ERROR");
-        body.put("addr", "SENTADDR1\r\nFORGED-LINE-ADDR");
+        // Control-free: the request rule rejects a CR or LF in a value with 400 before the INSERT runs.
+        body.put("name", "SENTNAME1 FORGED-LINE-NAME ERROR");
+        body.put("addr", "SENTADDR1 FORGED-LINE-ADDR");
         body.put("city", "SENTCITY1");
         body.put("state", "ME");
         body.put("zip", "SENTZIP1");
         body.put("corpPhone", "SENTCORP1");
-        body.put("acctMgr", "SENTMGR1\nFORGED-LINE-MGR");
+        body.put("acctMgr", "SENTMGR1 FORGED-LINE-MGR");
         body.put("acctPhone", "SENTACCT1");
         body.put("active", "Y");
 
