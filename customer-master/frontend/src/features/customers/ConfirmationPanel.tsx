@@ -60,10 +60,9 @@ export interface ConfirmationPanelProps {
    * Ref to the panel's `tabIndex={-1}` container (focusable by script, not a
    * Tab stop), which the panel focuses on mount. The dialog passes it, or a
    * ref to an enclosing element, to `useFunctionKeys` as `containerRef`, so
-   * Enter on the container commits. On a protected field in it, a read-only
-   * textarea, Enter keeps its native action. Focusing the panel also takes
-   * focus off the form input that pressed Enter, which unmounts with the
-   * form.
+   * Enter on the container commits, as Enter on a protected field in it, a
+   * read-only textarea, does. Focusing the panel also takes focus off the
+   * form input that pressed Enter, which unmounts with the form.
    */
   containerRef: RefObject<HTMLDivElement | null>;
   /**

@@ -677,18 +677,24 @@ describe('keyboard scope contract (AAP 0.4.4): Enter is a command only in a text
     },
   );
 
-  it('Enter on a read-only textarea (a protected value) keeps its native action: not prevented, nothing dispatched, the value unchanged', async () => {
+  it('Enter on a read-only textarea (a protected value) runs the Enter binding once and is prevented, the value unchanged', async () => {
     const user = userEvent.setup();
     const fixture = scopeFixture('detail', DETAIL_KEYS, calls, { withContainer: true });
     mountStack([fixture.props]);
     const readOnly = screen.getByLabelText<HTMLTextAreaElement>('detail read-only textarea');
+    act(() => {
+      readOnly.focus();
+    });
 
-    expect(isPrevented(readOnly, { key: 'Enter' })).toBe(false);
-    await user.type(readOnly, '{Enter}');
+    await user.keyboard('{Enter}');
 
+    expect(mockFor(fixture, 'Enter')).toHaveBeenCalledTimes(1);
+    expect(fixture.onUnbound).not.toHaveBeenCalled();
+    expect(calls).toEqual(['detail:Enter']);
     expect(readOnly).toHaveValue('PROTECTED VALUE');
-    expectUntouched(fixture);
-    expect(calls).toEqual([]);
+    expect(readOnly).toHaveFocus();
+    expect(isPrevented(readOnly, { key: 'Enter' })).toBe(true);
+    expect(calls).toEqual(['detail:Enter', 'detail:Enter']);
   });
 
   it('Enter on an editable textarea keeps its new line and runs no binding', async () => {

@@ -926,10 +926,10 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // The window's only key scope. The State picker and the conflict
   // comparison push their own scopes on top while open, which suspends this
   // one until they close (search → detail → picker). Enter is a command on
-  // the text inputs and on the container: the confirmation panel while
-  // confirming (it takes focus on mount), the window's content otherwise (a
-  // Display window opens with focus there). On a protected value's read-only
-  // textarea Enter keeps its native action.
+  // the text inputs, on a protected value's read-only textarea (the Customer
+  // Id, every Display field, every confirmation field) and on the container:
+  // the confirmation panel while confirming (it takes focus on mount), the
+  // window's content otherwise (a Display window opens with focus there).
   useFunctionKeys(keys, {
     onUnbound: keyNotActive,
     containerRef: confirming ? confirmRef : bodyRef,

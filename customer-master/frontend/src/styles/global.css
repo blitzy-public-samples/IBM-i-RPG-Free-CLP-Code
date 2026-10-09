@@ -1588,9 +1588,9 @@ main > .search-panel .customer-list {
 }
 
 /*
- * A Display window opens with focus on its content, the key container where
- * Enter closes it: its fields are read-only textareas, on which Enter keeps
- * its native action. There the content is the window's deliberate focus, not
+ * A Display window opens with focus on its content, the key container, where
+ * Enter closes it as it does on any of its read-only fields (each a protected
+ * value's textarea). There the content is the window's deliberate focus, not
  * the incidental one the key-scope rule (after :focus-visible) hides, so it
  * keeps the ring. The ring is drawn --space-2 outside the content, in the
  * window's --space-4 padding: clear of the header, the fields and the key bar

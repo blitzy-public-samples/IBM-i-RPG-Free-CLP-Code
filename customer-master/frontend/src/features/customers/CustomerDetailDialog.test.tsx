@@ -851,26 +851,20 @@ describe('CustomerDetailDialog', () => {
       },
     );
 
-    it('Enter on a focused protected field keeps its native action: the window stays open and nothing changes', async () => {
+    it('Enter on a focused protected field closes once, as on the key container', async () => {
       const { user, dialog, onClose } = await openDialog('display');
       const name = inputOf(dialog, 'name');
       expect(name).toBeInstanceOf(HTMLTextAreaElement);
-      await user.click(name);
+      // Off the key container: Tab past Customer Id and Active to Name.
+      await user.tab();
+      await user.tab();
+      await user.tab();
       expect(name).toHaveFocus();
 
       await user.keyboard('{Enter}');
 
-      expect(onClose).not.toHaveBeenCalled();
-      expect(dialog).toBeInTheDocument();
-      expect(name).toHaveFocus();
-      expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
-      expect(alertRegion()).toBeEmptyDOMElement();
-      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
-
-      // The keys the window enables still close it from the field.
-      await user.keyboard('{F12}');
-
       expectClosedOnce(onClose);
+      expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
     });
 
     it('shows DEM0003 "Key is not active now" for F3 and stays open', async () => {
@@ -1332,7 +1326,7 @@ describe('CustomerDetailDialog', () => {
       ]);
     });
 
-    it('edit: Enter on a focused protected field of the confirmation keeps its native action: no PUT, the confirmation stays', async () => {
+    it('edit: Enter on a focused protected field of the confirmation commits once: one PUT with the version read, then the window closes', async () => {
       const reviewed: FieldValues = { ...fieldsOf(STORED), name: 'FOCUSED FIELD CO' };
       const saved: CustomerResponse = { ...STORED, ...reviewed, version: STORED.version + 1 };
       answerReview(() => reviewPassed('EDIT', reviewed));
@@ -1343,26 +1337,9 @@ describe('CustomerDetailDialog', () => {
       const protectedName = inputOf(panel, 'name');
       expect(protectedName).toBeInstanceOf(HTMLTextAreaElement);
 
-      // Focused as Tab would focus it: a click would clear the notice itself.
+      // Focused as Tab would focus it, off the panel: a click would clear the notice itself.
       act(() => protectedName.focus());
       expect(protectedName).toHaveFocus();
-      await user.keyboard('{Enter}');
-
-      // A dispatched Enter would clear the notice and start the save (the
-      // Enter key disabled) before the keystroke returns.
-      expect(within(statusRegion()).getByText('Press Enter to update. F12 to Cancel.')).toBeInTheDocument();
-      const keyBar = within(dialog).getByRole('toolbar', { name: 'Function keys' });
-      expect(within(keyBar).getByRole('button', { name: 'Enter' })).toBeEnabled();
-      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
-      expect(onClose).not.toHaveBeenCalled();
-      expect(queryConfirmation(dialog)).toBe(panel);
-      expect(protectedName).toHaveFocus();
-      expect(protectedName).toHaveValue('FOCUSED FIELD CO');
-      expect(alertRegion()).toBeEmptyDOMElement();
-
-      // Back on the panel, the window's key container, Enter commits once.
-      await user.click(panel);
-      expect(panel).toHaveFocus();
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
@@ -1370,7 +1347,44 @@ describe('CustomerDetailDialog', () => {
       expect(await bodiesOf<CustomerUpdateRequest>('PUT', CUSTOMER_PATH)).toEqual([
         { ...reviewed, version: STORED.version },
       ]);
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      expect(sent('POST', ADD_PATH)).toHaveLength(0);
+      expect(alertRegion()).toBeEmptyDOMElement();
     });
+
+    it.each([
+      ['edit', 'DEM0000'],
+      ['add', 'DEM0009'],
+    ] as const)(
+      "%s: Enter on the form's focused protected Customer Id reviews once and shows the %s confirmation",
+      async (mode, notice) => {
+        const values = mode === 'edit' ? fieldsOf(STORED) : NEW_CUSTOMER;
+        answerReview(() => reviewPassed(mode === 'edit' ? 'EDIT' : 'ADD', values));
+        const { user, dialog, onClose } = await openDialog(mode);
+        if (mode === 'add') {
+          await fillForm(user, dialog, NEW_CUSTOMER);
+        }
+        const customerId = within(dialog).getByLabelText(CUSTOMER_ID_CONTRACT.label);
+        expect(customerId).toBeInstanceOf(HTMLTextAreaElement);
+        expect(customerId).toHaveAttribute('readonly');
+        // Shift+Tab from Active, the first editable field, as a keyboard user reaches it.
+        act(() => inputOf(dialog, 'active').focus());
+        await user.tab({ shift: true });
+        expect(customerId).toHaveFocus();
+        expect(sent('POST', REVIEW_PATH)).toHaveLength(0);
+
+        const panel = await reviewToConfirmation(user, dialog, notice);
+
+        expect(await bodiesOf<ReviewRequest>('POST', REVIEW_PATH)).toEqual([
+          { purpose: mode === 'edit' ? 'EDIT' : 'ADD', ...values },
+        ]);
+        expect(valuesOf(panel)).toEqual(values);
+        expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+        expect(sent('POST', ADD_PATH)).toHaveLength(0);
+        expect(alertRegion()).toBeEmptyDOMElement();
+        expect(onClose).not.toHaveBeenCalled();
+      },
+    );
 
     it('add: opens cleared with Active Y, confirms with DEM0009, adds and closes', async () => {
       const { user, dialog, onClose } = await openDialog('add');
@@ -1864,6 +1878,24 @@ describe('CustomerDetailDialog', () => {
       expect(queryConfirmation(dialog)).toBe(panel);
       expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
       expect(sent('POST', ADD_PATH)).toHaveLength(0);
+    });
+
+    it('Enter on a focused protected field adds once: one POST of the reviewed values, then the window closes', async () => {
+      const { user, panel, onClose } = await confirmAdd();
+      const protectedCity = inputOf(panel, 'city');
+      expect(protectedCity).toBeInstanceOf(HTMLTextAreaElement);
+      // Focused as Tab would focus it, off the panel: a click would clear the notice itself.
+      act(() => protectedCity.focus());
+      expect(protectedCity).toHaveFocus();
+
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ added: true });
+      expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
+      expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(alertRegion()).toBeEmptyDOMElement();
     });
   });
 

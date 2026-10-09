@@ -135,17 +135,23 @@ function isFunctionKey(key: CommandKey): key is FunctionKey {
 
 /**
  * The Enter target rule. Enter is a command only when the event target is a
- * text-entry `<input>` or is exactly the scope's own container.
- * `HTMLInputElement.type` reads a missing or unknown `type` as `text`, which
- * covers the option fields, and read-only inputs count. On a button, link,
- * checkbox, radio, `<select>`, any `<textarea>` (the read-only textarea
- * `components/FormField.tsx` renders for a protected value included) or
- * anything else Enter keeps its native action, such as a button's click or a
- * new line. A window of protected values therefore takes Enter through its
- * container, which the Display window and the confirmation panel focus.
+ * text field or is exactly the scope's own container. The text fields are a
+ * text-entry `<input>`, read-only ones included (`HTMLInputElement.type`
+ * reads a missing or unknown `type` as `text`, which covers the option
+ * fields), and a read-only `<textarea>`: the protected value
+ * `components/FormField.tsx` renders so a long value wraps. A read-only
+ * textarea holds one protected value and can take no new line, so it has no
+ * native Enter action to keep: Enter on a protected field (a Display window's
+ * fields, a confirmation panel's, a form's Customer Id) does what Enter on
+ * its window's container does. On a button, link, checkbox, radio,
+ * `<select>`, an editable `<textarea>` or anything else Enter keeps its
+ * native action, such as a button's click or a new line.
  */
 function isEnterCommandTarget(target: EventTarget | null, scope: KeyScope): boolean {
   if (target instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(target.type)) {
+    return true;
+  }
+  if (target instanceof HTMLTextAreaElement && target.readOnly) {
     return true;
   }
   const container = scope.getContainer();
