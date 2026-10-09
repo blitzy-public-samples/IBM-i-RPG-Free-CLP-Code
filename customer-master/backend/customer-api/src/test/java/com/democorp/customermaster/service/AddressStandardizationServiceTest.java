@@ -42,6 +42,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
@@ -68,7 +70,8 @@ import org.springframework.core.io.ClassPathResource;
  *       the IPv4 loopback address on an ephemeral port, which proves what actually goes over the wire
  *       for a 38-character street;</li>
  *   <li>the real {@link StubAddressValidationClient} with its bundled fixture keyed on the first 30
- *       characters of that street.</li>
+ *       characters of that street, and with the fixtures an EDIT review of an address it already
+ *       standardized meets, so the stored ZIP+4 survives a second review.</li>
  * </ul>
  *
  * <p>Plain JUnit 5, Mockito and AssertJ: no Spring application context, no database, no Docker. The
@@ -526,6 +529,38 @@ final class AddressStandardizationServiceTest {
         assertThat(result.standardized()).isFalse();
         assertThat(result.address()).isSameAs(in);
         verifyNoInteractions(client, stateService);
+    }
+
+    @Nested
+    @DisplayName("an address the real stub already standardized, reviewed again")
+    final class StubStandardizedAddressReviewedAgain {
+
+        @ParameterizedTest(name = "[{index}] {0} -> {4} {5}")
+        @CsvSource(delimiter = '|', textBlock = """
+                41 QUARRY HILL ROAD                    | GRANITE FALLS  | NH | 03999 | 41 QUARRY HILL RD    | 03999-2210
+                4400 SOUTHEAST LAKEVIEW TERRACE APT 12 | CEDAR BLUFF    | OR | 97999 | 4400 SE LAKEVIEW TER | 97999-5512
+                15 ORCHARD PLACE                       | MAPLE CROSSING | NJ | 08999 | 15 ORCHARD PL        | 08999-3101
+                """)
+        @DisplayName("an EDIT review of the stored values keeps the standardized street and the ZIP+4")
+        void editReviewOfStoredValuesKeepsZipPlus4(
+                String addr, String city, String state, String zip, String standardizedAddr, String standardizedZip) {
+            when(stateService.exists(state)).thenReturn(true);
+            AddressStandardizationService stub = service(new StubAddressValidationClient(), enabledStubProps());
+            Address stored = new Address(standardizedAddr, city, state, standardizedZip);
+
+            AddressStandardizationService.Result added = stub.standardize(new Address(addr, city, state, zip));
+            assertThat(added.standardized()).isTrue();
+            assertThat(added.address()).isEqualTo(stored);
+
+            // The EDIT review standardizes the stored values: the standardized street and the
+            // ZIP whose first five characters are sent as Zip5.
+            AddressStandardizationService.Result reviewed = stub.standardize(added.address());
+
+            assertThat(reviewed.standardized()).isTrue();
+            assertThat(reviewed.address().addr()).isEqualTo(standardizedAddr);
+            assertThat(reviewed.address().zip()).isEqualTo(standardizedZip);
+            assertThat(reviewed.address()).isEqualTo(stored);
+        }
     }
 
     @Nested

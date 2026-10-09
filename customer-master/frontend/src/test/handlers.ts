@@ -1688,6 +1688,31 @@ const STUB_ADDRESS_FIXTURES: readonly StubAddressFixture[] = deepFreeze([
     input: { address2: '15 ORCHARD PLACE', city: 'MAPLE CROSSING', state: 'NJ', zip5: '08999' },
     output: { address1: '', address2: '15 ORCHARD PL', city: 'MAPLE CROSSING', state: 'NJ', zip5: '08999', zip4: '3101' },
   },
+  {
+    description: "Re-standardization of F1's output: an already standardized address keeps its ZIP+4 on review",
+    input: { address2: '41 QUARRY HILL RD', city: 'GRANITE FALLS', state: 'NH', zip5: '03999' },
+    output: { address1: '', address2: '41 QUARRY HILL RD', city: 'GRANITE FALLS', state: 'NH', zip5: '03999', zip4: '2210' },
+  },
+  {
+    description: 'Re-standardization of the output F2 and F3 share: an already standardized address keeps its ZIP+4 on review',
+    input: { address2: '8 ELMWOOD DR', city: 'OLD HAVEN', state: 'CT', zip5: '06399' },
+    output: { address1: '', address2: '8 ELMWOOD DR', city: 'OLD HAVEN', state: 'CT', zip5: '06399', zip4: '1234' },
+  },
+  {
+    description: "Re-standardization of F4's output: an already standardized address keeps its ZIP+4 on review",
+    input: { address2: '300 W AMBER ST', city: 'PASO VERDE', state: 'CA', zip5: '91999' },
+    output: { address1: '', address2: '300 W AMBER ST', city: 'PASO VERDE', state: 'CA', zip5: '91999', zip4: '0042' },
+  },
+  {
+    description: "Re-standardization of F8's output: an already standardized address keeps its ZIP+4 on review",
+    input: { address2: '4400 SE LAKEVIEW TER', city: 'CEDAR BLUFF', state: 'OR', zip5: '97999' },
+    output: { address1: '', address2: '4400 SE LAKEVIEW TER', city: 'CEDAR BLUFF', state: 'OR', zip5: '97999', zip4: '5512' },
+  },
+  {
+    description: "Re-standardization of F9's output: an already standardized address keeps its ZIP+4 on review",
+    input: { address2: '15 ORCHARD PL', city: 'MAPLE CROSSING', state: 'NJ', zip5: '08999' },
+    output: { address1: '', address2: '15 ORCHARD PL', city: 'MAPLE CROSSING', state: 'NJ', zip5: '08999', zip4: '3101' },
+  },
 ]);
 
 /** The first `width` code points of `value`, as the server's address mapping cuts a component. */

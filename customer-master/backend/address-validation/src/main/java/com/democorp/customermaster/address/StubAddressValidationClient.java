@@ -41,7 +41,11 @@ import org.springframework.core.io.Resource;
  *       [USPS_Address/MTNCUSTR.SQLRPGLE:473], so a longer street matches a fixture keyed on
  *       its first 30 characters. {@code address1} (the secondary line, which Edit_Address
  *       leaves blank) is not part of the key. A hit returns the fixture's standardized
- *       address, including its ZIP+4 when it has one.</li>
+ *       address, including its ZIP+4 when it has one. Every fixture's standardized address
+ *       that carries a ZIP+4 is also a key, or is already its own fixture's input, answering
+ *       with that same address, so re-reviewing an address the stub already standardized
+ *       keeps its ZIP+4, as USPS does. One without a ZIP+4 needs no such key, because the
+ *       echo returns it unchanged.</li>
  *   <li><b>Echo.</b> Anything else returns
  *       {@link AddressValidationResult#success success(...)} with the stripped, uppercased
  *       input and a blank {@code zip4}. An input whose city is blank therefore echoes as

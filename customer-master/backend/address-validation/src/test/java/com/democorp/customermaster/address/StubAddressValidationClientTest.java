@@ -36,9 +36,16 @@ import org.springframework.core.io.Resource;
  * by the e2e spec {@code add-with-address-standardization.spec.ts}, and F8 (the 30-character
  * key cut from a 38-character street) by customer-api's
  * {@code AddressStandardizationServiceTest}. {@link FixtureFile#publishedFixturesMatchTheFile()}
- * pins the F1, F4, F7 and F8 constants to the file, so a fixture edit that would break those
+ * pins the F1, F4, F7, F8 and F9 constants to the file, so a fixture edit that would break those
  * consumers fails here first. The file is read through {@link JsonParserFactory}, as the stub
  * itself reads it, because this module carries no JSON library.
+ *
+ * <p><b>Re-standardization.</b> An EDIT review sends the stored, already standardized address
+ * back to the stub, which must answer with that same address, ZIP+4 included, as USPS does. Every
+ * fixture output with a ZIP+4 is therefore itself a key, or equals its own input; an output
+ * without one needs no entry, because the echo returns it unchanged.
+ * {@link FixtureFile#everyFixtureOutputStandardizesToItself()} pins this over the whole file, so a
+ * fixture added without its re-standardization entry fails here.
  */
 @DisplayName("StubAddressValidationClient: fixture hits, BADADDR error and uppercase echo")
 class StubAddressValidationClientTest {
@@ -89,6 +96,15 @@ class StubAddressValidationClientTest {
     private static final String F8_ZIP5 = "97999";
     private static final AddressValidationResult F8_OUTPUT = AddressValidationResult.success(
             "", "4400 SE LAKEVIEW TER", "CEDAR BLUFF", "OR", "97999", "5512");
+
+    // ------------------------------------------------ F9: street with ZIP+4, reachable through the UI
+
+    private static final String F9_STREET = "15 ORCHARD PLACE";
+    private static final String F9_CITY = "MAPLE CROSSING";
+    private static final String F9_STATE = "NJ";
+    private static final String F9_ZIP5 = "08999";
+    private static final AddressValidationResult F9_OUTPUT = AddressValidationResult.success(
+            "", "15 ORCHARD PL", "MAPLE CROSSING", "NJ", "08999", "3101");
 
     // ------------------------------------------------ duplicate-key resources
 
@@ -194,9 +210,42 @@ class StubAddressValidationClientTest {
             assertThat(result).isEqualTo(F1_OUTPUT);
         }
 
+        @Test
+        @DisplayName("F1's standardized output, sent again as an EDIT review sends it, keeps its ZIP+4 2210")
+        void f1StandardizedOutputKeepsZip4WhenSentAgain() {
+            final AddressValidationResult first = client.validate(
+                    new AddressValidationRequest("", F1_STREET, F1_CITY, F1_STATE, F1_ZIP5, ""));
+            assertThat(first).isEqualTo(F1_OUTPUT);
+
+            final AddressValidationResult again = client.validate(sentAgain(first));
+
+            assertThat(again.standardized()).isTrue();
+            assertThat(again.address2()).isEqualTo("41 QUARRY HILL RD");
+            assertThat(again.city()).isEqualTo("GRANITE FALLS");
+            assertThat(again.state()).isEqualTo("NH");
+            assertThat(again.zip5()).isEqualTo("03999");
+            assertThat(again.zip4()).isEqualTo("2210");
+            assertThat(again.errorNumber()).isZero();
+            assertThat(again).isEqualTo(F1_OUTPUT);
+        }
+
+        @Test
+        @DisplayName("F8's and F9's standardized outputs, sent again, keep their ZIP+4 5512 and 3101")
+        void f8AndF9StandardizedOutputsKeepZip4WhenSentAgain() {
+            final AddressValidationResult f8 = client.validate(
+                    new AddressValidationRequest("", F8_STREET, F8_CITY, F8_STATE, F8_ZIP5, ""));
+            final AddressValidationResult f9 = client.validate(
+                    new AddressValidationRequest("", F9_STREET, F9_CITY, F9_STATE, F9_ZIP5, ""));
+            assertThat(f8).as("F8").isEqualTo(F8_OUTPUT);
+            assertThat(f9).as("F9").isEqualTo(F9_OUTPUT);
+
+            assertThat(client.validate(sentAgain(f8))).as("F8 sent again").isEqualTo(F8_OUTPUT);
+            assertThat(client.validate(sentAgain(f9))).as("F9 sent again").isEqualTo(F9_OUTPUT);
+        }
+
         @ParameterizedTest(name = "[{index}] {4}")
         @CsvSource(delimiter = '|', textBlock = """
-                41 QUARRY HILL RD   | GRANITE FALLS | NH | 03999 | street differs
+                41 QUARRY HILL LN   | GRANITE FALLS | NH | 03999 | street differs
                 41 QUARRY HILL ROAD | GRANITE FALL  | NH | 03999 | city differs
                 41 QUARRY HILL ROAD | GRANITE FALLS | VT | 03999 | state differs
                 41 QUARRY HILL ROAD | GRANITE FALLS | NH | 03998 | ZIP differs
@@ -390,7 +439,37 @@ class StubAddressValidationClientTest {
         }
 
         @Test
-        @DisplayName("F1, F4, F7 and F8 constants match the fixture file exactly")
+        @DisplayName("every fixture's standardized output, sent again, standardizes to itself, ZIP+4 included")
+        void everyFixtureOutputStandardizesToItself() throws IOException {
+            final List<Object> entries = fixtureEntries();
+
+            final SoftAssertions softly = new SoftAssertions();
+            for (int index = 0; index < entries.size(); index++) {
+                assertJsonObject(entries.get(index), "fixture " + index);
+                final Map<String, Object> entry = jsonObject(entries.get(index));
+                final String name = "fixture " + index + " (" + text(entry, "description") + ") output sent again";
+                assertJsonObject(entry.get("output"), name);
+                final Map<String, Object> out = jsonObject(entry.get("output"));
+
+                // Sent as an EDIT review sends it: address1 and zip4 blank. address1 is not
+                // compared: the key ignores it, so the output of a fixture that returns a
+                // secondary line (STE 2) meets the entry for the same street without one.
+                final AddressValidationResult result = client.validate(new AddressValidationRequest(
+                        "", text(out, "address2"), text(out, "city"), text(out, "state"), text(out, "zip5"), ""));
+
+                softly.assertThat(result.standardized()).as(name + " standardized").isTrue();
+                softly.assertThat(result.address2()).as(name + " address2").isEqualTo(text(out, "address2"));
+                softly.assertThat(result.city()).as(name + " city").isEqualTo(text(out, "city"));
+                softly.assertThat(result.state()).as(name + " state").isEqualTo(text(out, "state"));
+                softly.assertThat(result.zip5()).as(name + " zip5").isEqualTo(text(out, "zip5"));
+                softly.assertThat(result.zip4()).as(name + " zip4").isEqualTo(text(out, "zip4"));
+                softly.assertThat(result.errorNumber()).as(name + " errorNumber").isZero();
+            }
+            softly.assertAll();
+        }
+
+        @Test
+        @DisplayName("F1, F4, F7, F8 and F9 constants match the fixture file exactly")
         void publishedFixturesMatchTheFile() throws IOException {
             final List<Object> entries = fixtureEntries();
 
@@ -398,6 +477,7 @@ class StubAddressValidationClientTest {
             assertThat(outputFor(entries, F4_STREET, F4_CITY, F4_STATE, F4_ZIP5)).as("F4").isEqualTo(F4_OUTPUT);
             assertThat(outputFor(entries, F7_STREET, F7_CITY, F7_STATE, F7_ZIP5)).as("F7").isEqualTo(F7_OUTPUT);
             assertThat(outputFor(entries, F8_STREET, F8_CITY, F8_STATE, F8_ZIP5)).as("F8").isEqualTo(F8_OUTPUT);
+            assertThat(outputFor(entries, F9_STREET, F9_CITY, F9_STATE, F9_ZIP5)).as("F9").isEqualTo(F9_OUTPUT);
         }
 
         @Test
@@ -552,6 +632,16 @@ class StubAddressValidationClientTest {
     private static List<Object> fixtureEntries() throws IOException {
         final String json = new ClassPathResource(FIXTURES).getContentAsString(StandardCharsets.UTF_8);
         return JsonParserFactory.getJsonParser().parseList(json);
+    }
+
+    /**
+     * The request an EDIT review sends for an address the stub already standardized: its
+     * street, city, state and ZIP as returned, with {@code address1} and {@code zip4} blank,
+     * as customer-api always sends them.
+     */
+    private static AddressValidationRequest sentAgain(AddressValidationResult standardized) {
+        return new AddressValidationRequest(
+                "", standardized.address2(), standardized.city(), standardized.state(), standardized.zip5(), "");
     }
 
     /**
