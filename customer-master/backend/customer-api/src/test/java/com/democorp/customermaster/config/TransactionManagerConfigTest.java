@@ -21,11 +21,12 @@ import org.springframework.transaction.support.TransactionTemplate;
  * Specifies {@link TransactionManagerConfig} beside the transaction auto-configurations Spring Boot runs in
  * the application: Boot's own manager backs off, the one manager is a
  * {@link BrokenConnectionTransactionManager} named {@code transactionManager}, Boot's customizers
- * ({@code spring.transaction.*} and execution listeners) reach it, and Boot's {@link TransactionTemplate}
- * drives it.
+ * ({@code spring.transaction.*} and execution listeners) reach it, Boot's {@link TransactionTemplate}
+ * drives it, and it consults the application's one {@link ConnectionPoolSaturation}.
  *
- * <p>An {@link ApplicationContextRunner} over a mocked {@link DataSource}: no database, no Docker. Creating
- * the manager must not touch the data source.
+ * <p>An {@link ApplicationContextRunner} over a mocked {@link DataSource}, with
+ * {@link DataSourceHealthConfig} registering the saturation checks as in the application: no database, no
+ * Docker. Creating the manager must not touch the data source.
  */
 @DisplayName("TransactionManagerConfig: the one transaction manager, customized as Boot's would be")
 final class TransactionManagerConfigTest {
@@ -38,7 +39,7 @@ final class TransactionManagerConfigTest {
                     TransactionManagerCustomizationAutoConfiguration.class,
                     DataSourceTransactionManagerAutoConfiguration.class,
                     TransactionAutoConfiguration.class))
-            .withUserConfiguration(TransactionManagerConfig.class)
+            .withUserConfiguration(DataSourceHealthConfig.class, TransactionManagerConfig.class)
             .withBean(DataSource.class, () -> mock(DataSource.class));
 
     @Test
@@ -52,6 +53,28 @@ final class TransactionManagerConfigTest {
                     .isSameAs(context.getBean(BEAN_NAME));
             verifyNoInteractions(context.getBean(DataSource.class));
         });
+    }
+
+    @Test
+    @DisplayName("the manager consults the context's one ConnectionPoolSaturation")
+    void receivesTheContextsSaturationChecks() {
+        runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(ConnectionPoolSaturation.class);
+            assertThat(context.getBean(BrokenConnectionTransactionManager.class))
+                    .extracting("poolSaturation")
+                    .isSameAs(context.getBean(ConnectionPoolSaturation.class));
+        });
+    }
+
+    @Test
+    @DisplayName("without the saturation checks the context does not start")
+    void requiresTheSaturationChecks() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(TransactionManagerConfig.class)
+                .withBean(DataSource.class, () -> mock(DataSource.class))
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().rootCause().hasMessageContaining(ConnectionPoolSaturation.class.getName()));
     }
 
     @Test

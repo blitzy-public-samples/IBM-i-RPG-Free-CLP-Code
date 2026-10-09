@@ -2,6 +2,12 @@ package com.democorp.customermaster.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.democorp.customermaster.config.BrokenConnectionTransactionManager;
 import com.democorp.customermaster.support.AbstractPostgresIT;
 import com.democorp.customermaster.support.DatabaseCleaner;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthComponent;
@@ -41,18 +48,21 @@ import org.springframework.test.context.TestPropertySource;
 /**
  * Proves that an add or update that cannot borrow a connection within the connection timeout, while
  * PostgreSQL answers, is 409 {@code DEM1001}, the answer of the lock wait it is, not 500 {@code DEM9999},
- * and that readiness stays UP, not DOWN, while requests waiting on locks hold every pooled connection.
+ * that a search or get in the same position waits for a connection instead of failing, and that readiness
+ * stays UP, not DOWN, while requests waiting on locks hold every pooled connection.
  *
  * <ul>
  *   <li><b>Load lock, reads holding the pool.</b> A separate JDBC connection holds
- *       {@code LOCK TABLE custmast IN ACCESS EXCLUSIVE MODE}, as a generator load does. More reads than
- *       the pool has connections wait behind it, so every pooled connection is held. An add then
- *       answers 409 {@code DEM1001} after the connection timeout, consuming no id; readiness answers
- *       200 UP, its {@code db} check reporting the database and {@code isValid()} from the direct
- *       probe; once the lock is released, the reads holding connections answer 200. The reads beyond
- *       the pool size get no connection and answer 500 {@code DEM9999} after the connection timeout:
- *       reads wait for a load without a bound, and a read that cannot even borrow a connection is not
- *       a write, so it is answered as any other unexpected failure.</li>
+ *       {@code LOCK TABLE custmast IN ACCESS EXCLUSIVE MODE}, as a generator load does. As many gets as
+ *       the pool has connections wait behind it, so every pooled connection is held. A get and a search
+ *       beyond the pool size then wait for a connection: the transaction manager logs, from each of
+ *       their threads, the DEBUG line of a read-only transaction that borrows again after the connection
+ *       timeout. An add then answers 409 {@code DEM1001} after the connection timeout, consuming no id;
+ *       readiness answers 200 UP, its {@code db} check reporting the database and {@code isValid()} from
+ *       the direct probe; and no read has answered, although each read beyond the pool size has by then
+ *       outlasted the connection timeout at least twice. Once the lock is released, every read answers
+ *       200 with the customer, and none is logged as an unhandled error: reads wait for a load until it
+ *       commits, whether or not they hold a connection.</li>
  *   <li><b>Row lock, more writers than connections.</b> A separate JDBC connection holds the row lock
  *       of an {@code UPDATE}. More updates of that row than the pool has connections run at once: those
  *       holding a connection wait out the lock timeout, the others the connection timeout, which is
@@ -69,7 +79,8 @@ import org.springframework.test.context.TestPropertySource;
  *
  * <p>The lock holders open their own connections with {@link DriverManager}, outside the pool, and are
  * closed in {@code finally}, which rolls back and releases their locks. Console output is captured by
- * {@link OutputCaptureExtension}.
+ * {@link OutputCaptureExtension}. The load-lock test sets the transaction manager's logger to DEBUG and
+ * attaches a list appender to it, and restores both before it returns.
  */
 @ExtendWith(OutputCaptureExtension.class)
 @TestPropertySource(properties = {
@@ -78,7 +89,7 @@ import org.springframework.test.context.TestPropertySource;
     "spring.datasource.hikari.validation-timeout=500",
     "customer-master.db.lock-timeout=" + ConnectionPoolSaturationIT.LOCK_TIMEOUT_SECONDS + "s"
 })
-@DisplayName("Connection pool saturation: writes answer 409 DEM1001 and readiness stays UP")
+@DisplayName("Connection pool saturation: writes answer 409 DEM1001, reads wait, readiness stays UP")
 class ConnectionPoolSaturationIT extends AbstractPostgresIT {
 
     /** Connections of this context's pool. */
@@ -90,7 +101,7 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
     /** This context's lock timeout of adds and updates, longer than the connection timeout. */
     static final int LOCK_TIMEOUT_SECONDS = 3;
 
-    /** Reads sent during the load lock: two more than the pool has connections. */
+    /** Reads sent during the load lock: two more than the pool has connections, a get and a search. */
     private static final int READERS = POOL_SIZE + 2;
 
     /** Updates sent during the row lock: twice the pool size. */
@@ -98,6 +109,18 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
 
     /** The add route. */
     private static final String CUSTOMERS = "/api/customers";
+
+    /** A search whose name prefix matches every customer this class adds. */
+    private static final String SEARCH = CUSTOMERS + "?name=POOL";
+
+    /** The logger of the transaction manager, which writes the DEBUG line of a new borrow. */
+    private static final String MANAGER_LOGGER = BrokenConnectionTransactionManager.class.getName();
+
+    /** The start of the manager's DEBUG line for a read-only transaction's new borrow. */
+    private static final String BORROW_AGAIN_LINE = "Read-only transaction found every pooled connection busy";
+
+    /** The start of the ERROR line of every 500 {@code DEM9999}. */
+    private static final String UNHANDLED_ERROR = "Unhandled error";
 
     /** The readiness probe path. */
     private static final String READINESS = "/actuator/health/readiness";
@@ -130,26 +153,45 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
     private HealthEndpoint healthEndpoint;
 
     @Test
-    @DisplayName("load lock with every connection held by reads: add 409 DEM1001, readiness UP, reads 200")
-    void addDuringALoadLockWhileReadsHoldThePoolIsALockWait(CapturedOutput output) throws Exception {
+    @DisplayName("load lock with every connection held by reads: add 409 DEM1001, readiness UP, reads beyond"
+            + " the pool wait, every read 200")
+    void addDuringALoadLockWhileReadsHoldThePoolIsALockWaitAndEveryReadWaits(CapturedOutput output)
+            throws Exception {
         String custId = addCustomer("POOL SATURATION READ");
+        String get = CUSTOMERS + "/" + custId;
         long rowsBefore = rowCount();
         Map<String, Object> sequenceBefore = sequenceState();
         HikariPoolMXBean pool = pool();
         ExecutorService readers = Executors.newFixedThreadPool(READERS);
-        List<Future<ResponseEntity<String>>> reads = new ArrayList<>();
+        List<Future<ResponseEntity<String>>> holding = new ArrayList<>();
+        List<Future<ResponseEntity<String>>> beyond = new ArrayList<>();
+        List<String> beyondPaths = new ArrayList<>();
+        LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+        Logger managerLogger = loggerContext.getLogger(MANAGER_LOGGER);
+        Level originalLevel = managerLogger.getLevel();
+        ListAppender<ILoggingEvent> managerEvents = new ListAppender<>();
+        managerEvents.setContext(loggerContext);
+        managerEvents.start();
+        // DEBUG is set explicitly, so the check does not depend on whatever configured the root logger.
+        managerLogger.setLevel(Level.DEBUG);
+        managerLogger.addAppender(managerEvents);
         try {
             try (Connection holder = lockHolder()) {
                 try (Statement statement = holder.createStatement()) {
                     statement.execute("LOCK TABLE custmast IN ACCESS EXCLUSIVE MODE");
                 }
-                CyclicBarrier start = new CyclicBarrier(READERS);
-                for (int i = 0; i < READERS; i++) {
-                    reads.add(readers.submit(started(start,
-                            () -> inquiryXhr().get().uri(CUSTOMERS + "/" + custId).retrieve()
-                                    .toEntity(String.class))));
+                CyclicBarrier start = new CyclicBarrier(POOL_SIZE);
+                for (int i = 0; i < POOL_SIZE; i++) {
+                    holding.add(readers.submit(started(start, () -> read(get))));
                 }
                 awaitEveryConnectionWaitingOnTheLock(pool, holder);
+                // Sent once the pool is saturated, so a get and a search are the reads without a connection.
+                for (int i = 0; i < READERS - POOL_SIZE; i++) {
+                    String path = i % 2 == 0 ? get : SEARCH;
+                    beyondPaths.add(path);
+                    beyond.add(readers.submit(() -> read(path)));
+                }
+                awaitBorrowingAgain(managerEvents, READERS - POOL_SIZE);
 
                 long addStart = System.nanoTime();
                 ResponseEntity<String> add = maintenanceXhr().post().uri(CUSTOMERS)
@@ -183,41 +225,47 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
                 assertThat(pool.getActiveConnections())
                         .as("the reads still hold every pooled connection")
                         .isEqualTo(POOL_SIZE);
-                // The reads beyond the pool size answer while the lock is held, so none of them can
-                // receive a connection freed by the release below.
-                awaitAnswered(reads, READERS - POOL_SIZE);
+                assertThat(beyond)
+                        .as("the reads beyond the pool size still wait for a connection while the lock is"
+                                + " held, after the add and readiness each outlasted the connection timeout")
+                        .noneMatch(Future::isDone);
+                assertThat(holding).as("the reads holding a connection still wait on the lock")
+                        .noneMatch(Future::isDone);
 
                 holder.rollback();
             }
 
-            List<ResponseEntity<String>> answers = new ArrayList<>();
-            for (Future<ResponseEntity<String>> read : reads) {
-                answers.add(read.get(RESPONSE_DEADLINE.toMillis(), TimeUnit.MILLISECONDS));
+            for (Future<ResponseEntity<String>> read : holding) {
+                ResponseEntity<String> answer = read.get(RESPONSE_DEADLINE.toMillis(), TimeUnit.MILLISECONDS);
+                assertThat(answer.getStatusCode()).as("get holding a connection: %s", answer.getBody())
+                        .isEqualTo(HttpStatus.OK);
+                assertThat(json(answer).path("custId").asText()).isEqualTo(custId);
             }
-            List<ResponseEntity<String>> found = answers.stream()
-                    .filter(answer -> answer.getStatusCode().value() == HttpStatus.OK.value())
-                    .toList();
-            List<ResponseEntity<String>> notServed = answers.stream()
-                    .filter(answer -> answer.getStatusCode().value() != HttpStatus.OK.value())
-                    .toList();
-            assertThat(found).as("the reads that held a connection answer once the lock is released")
-                    .hasSize(POOL_SIZE)
-                    .allSatisfy(answer -> assertThat(json(answer).path("custId").asText()).isEqualTo(custId));
-            assertThat(notServed)
-                    .as("the reads beyond the pool size get no connection: the documented cost of reads"
-                            + " waiting for a load without a bound, answered 500 DEM9999")
-                    .hasSize(READERS - POOL_SIZE)
-                    .allSatisfy(answer -> {
-                        assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-                        assertThat(problem(answer).path("code").asText()).isEqualTo("DEM9999");
-                    });
+            for (int i = 0; i < beyond.size(); i++) {
+                String path = beyondPaths.get(i);
+                ResponseEntity<String> answer = beyond.get(i).get(RESPONSE_DEADLINE.toMillis(), TimeUnit.MILLISECONDS);
+                assertThat(answer.getStatusCode()).as("%s beyond the pool size: %s", path, answer.getBody())
+                        .isEqualTo(HttpStatus.OK);
+                if (path.equals(SEARCH)) {
+                    assertThat(json(answer).path("items").findValuesAsText("custId"))
+                            .as("the search finds the customer").contains(custId);
+                } else {
+                    assertThat(json(answer).path("custId").asText()).isEqualTo(custId);
+                }
+            }
         } finally {
             readers.shutdownNow();
+            managerLogger.detachAppender(managerEvents);
+            managerEvents.stop();
+            managerLogger.setLevel(originalLevel);
         }
 
+        assertThat(beyondPaths).as("a get and a search wait beyond the pool size").containsExactly(get, SEARCH);
         assertThat(rowCount()).as("the add inserted nothing").isEqualTo(rowsBefore);
         assertThat(sequenceState()).as("the add consumed no id").isEqualTo(sequenceBefore);
         assertThat(saturationWarnings(output, CUSTOMERS)).as("one WARN line for the add").isEqualTo(1);
+        assertThat(unhandledErrors(output, get) + unhandledErrors(output, CUSTOMERS))
+                .as("no read is answered 500 DEM9999").isZero();
     }
 
     @Test
@@ -347,22 +395,53 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
     }
 
     /**
-     * Waits until a number of the requests have answered.
+     * Waits until the transaction manager has logged the DEBUG line of a new borrow from a number of
+     * threads, each a read whose borrow timed out on the saturated pool and that borrows again.
      *
-     * @param requests the requests in flight
-     * @param expected how many must have answered
+     * @param managerEvents the list appender on the manager's logger
+     * @param expected      how many threads must have logged it
      * @throws InterruptedException if the wait is interrupted
-     * @throws AssertionError if fewer have answered within {@link #RESPONSE_DEADLINE}
+     * @throws AssertionError if fewer threads have logged it within {@link #RESPONSE_DEADLINE}
      */
-    private static void awaitAnswered(List<Future<ResponseEntity<String>>> requests, int expected)
+    private static void awaitBorrowingAgain(ListAppender<ILoggingEvent> managerEvents, int expected)
             throws InterruptedException {
         long deadline = System.nanoTime() + RESPONSE_DEADLINE.toNanos();
-        while (requests.stream().filter(Future::isDone).count() < expected) {
+        while (borrowingAgainThreads(managerEvents) < expected) {
             if (System.nanoTime() - deadline >= 0) {
-                throw new AssertionError(expected + " requests did not answer within " + RESPONSE_DEADLINE);
+                throw new AssertionError(expected + " reads did not borrow again within " + RESPONSE_DEADLINE
+                        + ": threads=" + borrowingAgainThreads(managerEvents));
             }
             Thread.sleep(50);
         }
+    }
+
+    /**
+     * Counts the threads that logged the manager's DEBUG line of a new borrow.
+     *
+     * @param managerEvents the list appender on the manager's logger
+     * @return the number of distinct threads
+     */
+    private static long borrowingAgainThreads(ListAppender<ILoggingEvent> managerEvents) {
+        List<ILoggingEvent> events;
+        // The appender adds under its own lock (AppenderBase.doAppend), so the copy is consistent.
+        synchronized (managerEvents) {
+            events = List.copyOf(managerEvents.list);
+        }
+        return events.stream()
+                .filter(event -> event.getFormattedMessage().startsWith(BORROW_AGAIN_LINE))
+                .map(ILoggingEvent::getThreadName)
+                .distinct()
+                .count();
+    }
+
+    /**
+     * Sends a read as the inquiry user.
+     *
+     * @param path the path and query of the get or search
+     * @return the response
+     */
+    private ResponseEntity<String> read(String path) {
+        return inquiryXhr().get().uri(path).retrieve().toEntity(String.class);
     }
 
     /**
@@ -425,6 +504,22 @@ class ConnectionPoolSaturationIT extends AbstractPostgresIT {
     private static long saturationWarnings(CapturedOutput output, String uri) {
         return output.getAll().lines()
                 .filter(line -> line.contains(SATURATED_WARNING) && line.endsWith("uri=" + uri))
+                .count();
+    }
+
+    /**
+     * Counts the ERROR lines of requests answered 500 {@code DEM9999}, for one URI, in the format of the
+     * exception handler ({@code uri} last) and of the error controller ({@code uri} before
+     * {@code sqlState}).
+     *
+     * @param output the captured console output
+     * @param uri    the request URI the lines name, without the query
+     * @return the number of lines
+     */
+    private static long unhandledErrors(CapturedOutput output, String uri) {
+        return output.getAll().lines()
+                .filter(line -> line.contains(UNHANDLED_ERROR)
+                        && (line.endsWith(" uri=" + uri) || line.contains(" uri=" + uri + " ")))
                 .count();
     }
 

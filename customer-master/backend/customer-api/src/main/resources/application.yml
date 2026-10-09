@@ -27,9 +27,14 @@ spring:
       # Keeps unqualified names resolving when Testcontainers @ServiceConnection
       # replaces the URL with one that carries no currentSchema.
       schema: ${DB_SCHEMA:customer_master}
-      # Longest wait, in ms, for a pooled connection (Hikari's default is 30000).
-      # It bounds the borrow of the db check of /actuator/health/readiness while
-      # PostgreSQL is unreachable.
+      # Longest wait, in ms, of one borrow of a pooled connection (Hikari's
+      # default is 30000). It bounds the borrow of the db check of
+      # /actuator/health/readiness while PostgreSQL is unreachable. When every
+      # connection stays busy (reads behind a generator load hold them until it
+      # commits) and PostgreSQL answers a direct probe, an add or update whose
+      # borrow expires answers 409 DEM1001, and the read-only transaction of a
+      # search or get borrows again after each expiry, so the read waits
+      # (config.BrokenConnectionTransactionManager).
       connection-timeout: 5000
       # Longest aliveness check, in ms, of a connection: the pool's check before it
       # hands one out, and the db check's own validation of the connection it holds

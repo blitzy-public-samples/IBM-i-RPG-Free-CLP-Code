@@ -34,10 +34,11 @@ import org.springframework.util.Assert;
  * add or update until the lock timeout, a read behind a generator load's {@code ACCESS EXCLUSIVE} lock
  * until the load commits. Once such requests hold every connection, the next request cannot borrow one
  * within {@code spring.datasource.hikari.connection-timeout} and fails before it reaches the database,
- * although PostgreSQL answers. {@code controller.ApiExceptionHandler} answers such an add or update as
- * the lock wait it is, 409 {@code DEM1001}, and {@link BoundedDataSourceHealthIndicator} keeps the
- * readiness probe UP; both ask this class first, so a database that is lost still gives 500
- * {@code DEM9999} and a DOWN probe.
+ * although PostgreSQL answers. {@link BrokenConnectionTransactionManager} has the read-only transaction
+ * of such a search or get borrow again, so the read waits until a connection is free;
+ * {@code controller.ApiExceptionHandler} answers such an add or update as the lock wait it is, 409
+ * {@code DEM1001}; and {@link BoundedDataSourceHealthIndicator} keeps the readiness probe UP. All three
+ * ask this class first, so a database that is lost still gives 500 {@code DEM9999} and a DOWN probe.
  *
  * <p><b>The saturated pool.</b> When a borrow times out, HikariCP throws a
  * {@link SQLTransientConnectionException} and attaches the last failure to create a connection as its

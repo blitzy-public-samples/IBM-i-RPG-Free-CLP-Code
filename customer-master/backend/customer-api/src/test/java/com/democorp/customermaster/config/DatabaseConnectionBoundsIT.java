@@ -91,9 +91,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * start their own short-lived contexts over the real {@code application.yml} with an
  * {@link ApplicationContextRunner}, outside the Spring test context cache, running only
  * {@link DataSourceAutoConfiguration} (plus, for the transactional stall test, the transaction
- * auto-configurations and {@link TransactionManagerConfig}), and close them, their pools and the relay
- * before they return. No test holds a lock, and every database call of the stall tests is bounded by
- * {@link #QUERY_BUDGET}.
+ * auto-configurations, {@link DataSourceHealthConfig} and {@link TransactionManagerConfig}), and close
+ * them, their pools and the relay before they return. No test holds a lock, and every database call of
+ * the stall tests is bounded by {@link #QUERY_BUDGET}.
  */
 class DatabaseConnectionBoundsIT extends AbstractPostgresIT {
 
@@ -454,7 +454,8 @@ class DatabaseConnectionBoundsIT extends AbstractPostgresIT {
     /**
      * Runs {@link #stallRunner(int)} with the application's {@link TransactionManagerConfig} beside the
      * transaction auto-configurations of the application context, so the transactions run on the
-     * application's manager, customized as in the application.
+     * application's manager, customized as in the application, and with {@link DataSourceHealthConfig},
+     * which registers the {@link ConnectionPoolSaturation} checks that manager consults.
      *
      * @param relayPort the loopback port of the relay
      * @return a new runner
@@ -465,7 +466,7 @@ class DatabaseConnectionBoundsIT extends AbstractPostgresIT {
                         TransactionManagerCustomizationAutoConfiguration.class,
                         DataSourceTransactionManagerAutoConfiguration.class,
                         TransactionAutoConfiguration.class))
-                .withUserConfiguration(TransactionManagerConfig.class);
+                .withUserConfiguration(DataSourceHealthConfig.class, TransactionManagerConfig.class);
     }
 
     /**

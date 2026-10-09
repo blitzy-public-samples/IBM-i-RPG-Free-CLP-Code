@@ -2,10 +2,12 @@ package com.democorp.customermaster.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -14,8 +16,10 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.zaxxer.hikari.HikariDataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.SQLTransientConnectionException;
 import java.util.List;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
@@ -25,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.support.JdbcTransactionManager;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -34,7 +39,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Specifies {@link BrokenConnectionTransactionManager}: a transaction whose connection is already closed
- * ends without a rollback call and without an exception of its own, while every other path is
+ * ends without a rollback call and without an exception of its own, a read-only transaction borrows
+ * again after a saturated pool's borrow timeout while PostgreSQL answers, and every other path is
  * {@link JdbcTransactionManager}'s.
  *
  * <p><b>The case that matters.</b> HikariCP swaps a broken connection's physical connection for a closed
@@ -44,12 +50,20 @@ import org.springframework.transaction.support.TransactionTemplate;
  * its "Application exception overridden by rollback exception" ERROR line, which quotes that exception's
  * message, must not appear. The same case over the base manager shows the failure the subclass removes.
  *
+ * <p><b>The saturated pool.</b> The mocked {@link DataSource} throws what HikariCP throws when a borrow
+ * times out with every connection busy, a {@link SQLTransientConnectionException} with neither a cause
+ * nor a next exception, and a mocked {@link ConnectionPoolSaturation} answers the direct probe. A
+ * read-only transaction must borrow again only while that timeout comes on a thread that is not
+ * interrupted and the probe answers; a timeout that carries a creation failure, a transaction that is
+ * not read-only and an interrupted thread must fail on the first borrow without a probe.
+ *
  * <p>Pure JUnit 5, Mockito, AssertJ and Logback over a mocked {@link DataSource}: no Spring context, no
  * database, no Docker. The base manager's exception translator is Spring's
  * {@code SQLExceptionSubclassTranslator}, which needs no database. The list appenders and logger levels
  * are global state, so {@link #restoreLogging()} puts them back after every case.
  */
-@DisplayName("BrokenConnectionTransactionManager: no rollback on a closed connection, JdbcTransactionManager otherwise")
+@DisplayName("BrokenConnectionTransactionManager: no rollback on a closed connection, read-only borrows wait"
+        + " out a saturated pool, JdbcTransactionManager otherwise")
 final class BrokenConnectionTransactionManagerTest {
 
     /** The logger of {@link TransactionTemplate}, which writes the override line. */
@@ -82,6 +96,15 @@ final class BrokenConnectionTransactionManagerTest {
     /** Text of the statement's exception that no log line of the manager may repeat. */
     private static final String STATEMENT_SECRET = "SELECT secret_column FROM custmast";
 
+    /** The start of the manager's DEBUG line for a read-only transaction's new borrow. */
+    private static final String BORROW_AGAIN_LINE = "Read-only transaction found every pooled connection busy";
+
+    /** Text of a borrow timeout that no log line of the manager may repeat. */
+    private static final String BORROW_SECRET = "HikariPool-secret - Connection is not available, request timed out";
+
+    /** SQLSTATE {@code sqlclient_unable_to_establish_sqlconnection}, as pgjdbc reports a refused connection. */
+    private static final String CONNECTION_REFUSED = "08001";
+
     private final LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
 
     private final Logger templateLogger = loggerContext.getLogger(TEMPLATE_LOGGER);
@@ -99,6 +122,8 @@ final class BrokenConnectionTransactionManagerTest {
     private DataSource dataSource;
 
     private Connection connection;
+
+    private ConnectionPoolSaturation poolSaturation;
 
     private BrokenConnectionTransactionManager manager;
 
@@ -121,7 +146,8 @@ final class BrokenConnectionTransactionManagerTest {
         when(dataSource.getConnection()).thenReturn(connection);
         // As a pooled connection is handed out: in auto-commit mode, which the manager switches off.
         when(connection.getAutoCommit()).thenReturn(true);
-        manager = new BrokenConnectionTransactionManager(dataSource);
+        poolSaturation = mock(ConnectionPoolSaturation.class);
+        manager = new BrokenConnectionTransactionManager(dataSource, poolSaturation);
     }
 
     @AfterEach
@@ -331,6 +357,162 @@ final class BrokenConnectionTransactionManagerTest {
         assertThat(templateEvents.list)
                 .extracting(ILoggingEvent::getFormattedMessage)
                 .anyMatch(message -> message.contains(OVERRIDE_LINE));
+    }
+
+    @Test
+    @DisplayName("the saturation checks are required")
+    void theSaturationChecksAreRequired() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new BrokenConnectionTransactionManager(dataSource, null))
+                .withMessageContaining("poolSaturation");
+    }
+
+    @Test
+    @DisplayName("read-only, saturated pool, database answers: borrows again and the callback runs")
+    void aReadOnlyTransactionBorrowsAgainWhileThePoolIsSaturatedAndTheDatabaseAnswers() throws SQLException {
+        doThrow(saturationTimeout()).doReturn(connection).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        String result = readOnlyTemplate(manager).execute(status -> "read");
+
+        assertThat(result).isEqualTo("read");
+        verify(dataSource, times(2)).getConnection();
+        verify(poolSaturation).databaseAnswers();
+        verify(connection).commit();
+        verify(connection).close();
+        assertThat(TransactionSynchronizationManager.hasResource(dataSource)).isFalse();
+        assertThat(managerLines(BORROW_AGAIN_LINE))
+                .as("one DEBUG line per new borrow, with the attempt number and no exception attached")
+                .singleElement()
+                .satisfies(event -> {
+                    assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
+                    assertThat(event.getThrowableProxy()).isNull();
+                    assertThat(event.getFormattedMessage())
+                            .contains("attempt=1")
+                            .as("a data source that is not a Hikari pool has no connection timeout to report")
+                            .endsWith("connectionTimeoutMs=-");
+                });
+        assertThat(managerEvents.list)
+                .as("no line of the manager repeats the borrow timeout's message")
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .noneMatch(message -> message.contains(BORROW_SECRET));
+    }
+
+    @Test
+    @DisplayName("read-only: keeps borrowing for as long as the pool stays saturated and the database answers")
+    void aReadOnlyTransactionKeepsBorrowingWhileThePoolStaysSaturated() throws SQLException {
+        doThrow(saturationTimeout(), saturationTimeout(), saturationTimeout())
+                .doReturn(connection).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        String result = readOnlyTemplate(manager).execute(status -> "read");
+
+        assertThat(result).isEqualTo("read");
+        verify(dataSource, times(4)).getConnection();
+        verify(poolSaturation, times(3)).databaseAnswers();
+        assertThat(managerLines(BORROW_AGAIN_LINE))
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .satisfiesExactly(
+                        first -> assertThat(first).contains("attempt=1"),
+                        second -> assertThat(second).contains("attempt=2"),
+                        third -> assertThat(third).contains("attempt=3"));
+    }
+
+    @Test
+    @DisplayName("the DEBUG line of a new borrow reports a Hikari pool's connection timeout")
+    void theNewBorrowLineReportsTheHikariConnectionTimeout() throws SQLException {
+        HikariDataSource pool = mock(HikariDataSource.class);
+        when(pool.getConnectionTimeout()).thenReturn(1234L);
+        doThrow(saturationTimeout()).doReturn(connection).when(pool).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        readOnlyTemplate(new BrokenConnectionTransactionManager(pool, poolSaturation)).execute(status -> "read");
+
+        assertThat(managerLines(BORROW_AGAIN_LINE))
+                .singleElement()
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .satisfies(message -> assertThat(message).endsWith("attempt=1 connectionTimeoutMs=1234"));
+    }
+
+    @Test
+    @DisplayName("read-only, saturated pool, database does not answer: CannotCreateTransactionException after one borrow")
+    void aReadOnlyTransactionFailsWhenTheDatabaseDoesNotAnswer() throws SQLException {
+        SQLTransientConnectionException timeout = saturationTimeout();
+        doThrow(timeout).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(false);
+
+        Throwable thrown = catchThrowable(() -> readOnlyTemplate(manager).execute(status -> "read"));
+
+        assertThat(thrown).isInstanceOf(CannotCreateTransactionException.class).hasCause(timeout);
+        verify(dataSource).getConnection();
+        verify(poolSaturation).databaseAnswers();
+        assertThat(managerLines(BORROW_AGAIN_LINE)).isEmpty();
+        assertThat(TransactionSynchronizationManager.hasResource(dataSource)).isFalse();
+    }
+
+    @Test
+    @DisplayName("read-only, borrow timeout carrying a creation failure: thrown without a probe")
+    void aReadOnlyTransactionFailsWithoutAProbeWhenThePoolCannotCreateConnections() throws SQLException {
+        SQLTransientConnectionException timeout = new SQLTransientConnectionException(BORROW_SECRET, null,
+                new SQLException("Connection to localhost:5432 refused.", CONNECTION_REFUSED));
+        doThrow(timeout).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        Throwable thrown = catchThrowable(() -> readOnlyTemplate(manager).execute(status -> "read"));
+
+        assertThat(thrown).isInstanceOf(CannotCreateTransactionException.class).hasCause(timeout);
+        verify(dataSource).getConnection();
+        verify(poolSaturation, never()).databaseAnswers();
+        assertThat(managerLines(BORROW_AGAIN_LINE)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("read-write, saturated pool: thrown after one borrow without a probe, as by JdbcTransactionManager")
+    void aReadWriteTransactionFailsOnTheFirstBorrowTimeout() throws SQLException {
+        SQLTransientConnectionException timeout = saturationTimeout();
+        doThrow(timeout).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        Throwable thrown = catchThrowable(() -> new TransactionTemplate(manager).execute(status -> "write"));
+
+        assertThat(thrown).isInstanceOf(CannotCreateTransactionException.class).hasCause(timeout);
+        verify(dataSource).getConnection();
+        verify(poolSaturation, never()).databaseAnswers();
+        assertThat(managerLines(BORROW_AGAIN_LINE)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("read-only on an interrupted thread: thrown after one borrow without a probe, interrupt kept")
+    void aReadOnlyTransactionOnAnInterruptedThreadFailsOnTheFirstBorrowTimeout() throws SQLException {
+        SQLTransientConnectionException timeout = saturationTimeout();
+        doThrow(timeout).when(dataSource).getConnection();
+        when(poolSaturation.databaseAnswers()).thenReturn(true);
+
+        Throwable thrown;
+        boolean stillInterrupted;
+        Thread.currentThread().interrupt();
+        try {
+            thrown = catchThrowable(() -> readOnlyTemplate(manager).execute(status -> "read"));
+        } finally {
+            // Clears the flag, so no later case runs on an interrupted thread.
+            stillInterrupted = Thread.interrupted();
+        }
+
+        assertThat(thrown).isInstanceOf(CannotCreateTransactionException.class).hasCause(timeout);
+        assertThat(stillInterrupted).as("the manager leaves the thread's interrupt in place").isTrue();
+        verify(dataSource).getConnection();
+        verify(poolSaturation, never()).databaseAnswers();
+        assertThat(managerLines(BORROW_AGAIN_LINE)).isEmpty();
+    }
+
+    /**
+     * The exception HikariCP throws when a borrow times out while every connection stays busy and no
+     * connection attempt failed.
+     *
+     * @return a borrow timeout with neither a cause nor a next exception
+     */
+    private static SQLTransientConnectionException saturationTimeout() {
+        return new SQLTransientConnectionException(BORROW_SECRET);
     }
 
     /**

@@ -445,9 +445,14 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
      *       {@link ConnectionPoolSaturation#isSaturationTimeout(Throwable)};</li>
      *   <li>PostgreSQL answers a direct probe, {@link ConnectionPoolSaturation#databaseAnswers()}.</li>
      * </ul>
-     * Every other case, a read, a review, a pool that cannot create connections or a database that does
-     * not answer the probe, takes the catch-all path {@link #handleUnexpected} unchanged: 500
-     * {@code DEM9999} with an {@code errorId} and one ERROR line.
+     * A search or get does not fail here while the pool is merely saturated: the application's
+     * transaction manager, {@code config.BrokenConnectionTransactionManager}, borrows again for its
+     * read-only transaction, so it waits for a connection. A read reaches this handler only once that
+     * manager stopped waiting: the pool cannot create connections, the database does not answer the
+     * probe, or the thread was interrupted. Every other case, such a read, a review, a pool that cannot
+     * create connections or a database that does not answer the probe, takes the catch-all path
+     * {@link #handleUnexpected} unchanged: 500 {@code DEM9999} with an {@code errorId} and one ERROR
+     * line.
      *
      * @param ex the exception
      * @param request the current request

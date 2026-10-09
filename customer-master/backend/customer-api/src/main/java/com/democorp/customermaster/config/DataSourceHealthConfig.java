@@ -8,7 +8,8 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Registers the {@code db} health check, {@link BoundedDataSourceHealthIndicator}, in place of
  * Spring Boot's check, whose connection validation has no deadline, and the
- * {@link ConnectionPoolSaturation} checks that the health check and
+ * {@link ConnectionPoolSaturation} checks that the health check, the application's transaction manager
+ * ({@link BrokenConnectionTransactionManager}, registered by {@link TransactionManagerConfig}) and
  * {@code controller.ApiExceptionHandler} share.
  *
  * <p><b>Name.</b> The health check bean is named {@code dbHealthIndicator}. Boot's
@@ -16,8 +17,8 @@ import org.springframework.context.annotation.Configuration;
  * the health contributor takes the name {@code db} from it: the member that
  * {@code management.endpoint.health.group.readiness.include} lists and whose existence Boot verifies
  * at startup. Like Boot's check, the bean is skipped when {@code management.health.db.enabled} is
- * {@code false}. {@code connectionPoolSaturation} carries no condition, so the exception handler has
- * it whether or not the health check exists.
+ * {@code false}. {@code connectionPoolSaturation} carries no condition, so the transaction manager and
+ * the exception handler have it whether or not the health check exists.
  *
  * <p>The class carries no profile or condition: both beans exist in the web context and in the
  * {@code generator} profile, as Boot's check did. It is found by component scanning from
