@@ -17,13 +17,16 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The customer search list query: one keyset-paginated page of {@link CustomerSummary} rows, built
- * from fixed SQL fragments for the filters a {@link SearchCriteria} carries.
+ * The customer search list queries: one keyset-paginated page of {@link CustomerSummary} rows,
+ * built from fixed SQL fragments for the filters a {@link SearchCriteria} carries, and the count of
+ * the matching rows through a cursor's key that the row cap rests on
+ * ({@link #countThrough(SearchCriteria, int)}).
  *
  * <p><b>What it replaces.</b> PMTCUSTR's cursor {@code ItemCur}
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:208-223], with the host variables {@code ProcessSearchCriteria}
  * builds [5250_Subfile/PMTCUSTR.SQLRPGLE:625-665]. No cursor stays open between requests: each page
- * is one statement that restarts after the last row served.
+ * is one statement that restarts after the last row served. A request with a cursor first runs the
+ * bounded count, a separate statement that likewise holds nothing open between requests.
  *
  * <p><b>The statement.</b> Without a literal lead, one ordered {@code SELECT} from {@code custmast},
  * its predicates joined by {@code AND} and closed by {@code ORDER BY name, city, state, custid
@@ -87,15 +90,27 @@ import org.springframework.transaction.annotation.Transactional;
  *       {@code AB} and not {@code ABX}.</li>
  * </ol>
  *
+ * <p><b>The count through a cursor.</b> {@link #countThrough(SearchCriteria, int)} counts the rows
+ * that match the same filter predicates and sort at or before the cursor row,
+ * {@code (name, city, state, custid) <= (:kName, :kCity, :kState, :kId)}. For a cursor the service
+ * issued, the cursor row is the last row served, so the count equals the rows served so far; the
+ * service floors the cursor's client-held {@code served} with it, and the 9,999-row cap therefore
+ * rests on the stored rows rather than on a counter the client could lower. The counted subquery
+ * carries {@code LIMIT :limit}, so the count stops at the cap; a literal lead keeps the
+ * {@code MATERIALIZED} fence of the page, with the limit applied to the rows read from
+ * {@code candidates}, for the reason given above.
+ *
  * <p><b>Planning.</b> The patterns are bind parameters; pgjdbc switches to server-prepared
  * statements after repeated executions, and a cached generic plan cannot derive an index range from
- * an unknown pattern, so {@link #find(SearchCriteria, int)} forces custom plans for its transaction.
+ * an unknown pattern, so {@link #find(SearchCriteria, int)} and
+ * {@link #countThrough(SearchCriteria, int)} force custom plans for their transactions.
  *
  * <p><b>Division of work.</b> {@code service/CustomerSearchService} normalizes the filters, rejects
- * an invalid state filter (DEM0007), decodes the cursor, chooses {@code limit} ({@code size + 1})
- * and applies the 9,999-row cap; this class ignores {@code served} and {@code size}, raises no
- * user-facing error and reaches only {@code custmast}, unqualified, so the schema comes from the
- * connection ({@code DB_SCHEMA}).
+ * an invalid state filter (DEM0007), decodes the cursor, chooses {@code limit} ({@code size + 1}),
+ * floors the cursor's {@code served} with {@link #countThrough(SearchCriteria, int)} and applies the
+ * 9,999-row cap; this class never reads {@code served} or {@code size}, raises no user-facing error
+ * and reaches only {@code custmast}, unqualified, so the schema comes from the connection
+ * ({@code DB_SCHEMA}).
  *
  * <p>The class holds no mutable state and is thread-safe.
  */
@@ -136,14 +151,42 @@ public class CustomerSearchRepository {
     /** Active rows only, when F9 has not included the inactive ones. */
     private static final String ACTIVE_ONLY_PREDICATE = "active = 'Y'";
 
+    /** The sort keys as one row value, in the order of the {@code ORDER BY}. */
+    private static final String KEY_ROW = "(name, city, state, custid)";
+
+    /** The cursor's keys as one row value, in the order of {@link #KEY_ROW}. */
+    private static final String KEY_VALUES = "(:kName, :kCity, CAST(:kState AS char(2)), CAST(:kId AS char(4)))";
+
     /**
      * Keyset position after the last row served. The row comparison matches the ORDER BY. In the
-     * single statement it is one index condition on {@code custmast_search_keyset}, so a deep page
-     * costs what the first does; inside the candidate set of a literal lead it keeps only the lead's
+     * single statement it is one index condition on {@code custmast_search_keyset}, so the page
+     * statement of a deep page costs what the first page's does (the request also runs the bounded
+     * recount {@link #countThrough(SearchCriteria, int)}, whose work grows with the rows before the
+     * key, up to the cap); inside the candidate set of a literal lead it keeps only the lead's
      * matches after that row. The casts keep the binds typed as the {@code char} columns.
      */
-    private static final String KEYSET_PREDICATE = "(name, city, state, custid) > "
-            + "(:kName, :kCity, CAST(:kState AS char(2)), CAST(:kId AS char(4)))";
+    private static final String KEYSET_PREDICATE = KEY_ROW + " > " + KEY_VALUES;
+
+    /**
+     * The rows at or before the cursor row, the complement of {@link #KEYSET_PREDICATE}: for a cursor
+     * the service issued, every row already served, the cursor row being the last of them.
+     */
+    private static final String THROUGH_KEY_PREDICATE = KEY_ROW + " <= " + KEY_VALUES;
+
+    /** Opens the bounded count of the single statement; the counted {@code SELECT} follows. */
+    private static final String COUNT_OPEN = "SELECT count(*) FROM (";
+
+    /** The counted rows: only their number is read, so no column is selected. */
+    private static final String SELECT_ONE_FROM = "SELECT 1 FROM custmast";
+
+    /**
+     * Closes the candidate set of a literal lead and counts from it, under the same fence as the
+     * page; the bound follows.
+     */
+    private static final String COUNT_CANDIDATES_CLOSE = ") SELECT count(*) FROM (SELECT 1 FROM candidates";
+
+    /** Bounds the counted rows and closes the counted subquery. */
+    private static final String COUNT_LIMIT_CLOSE = " LIMIT :limit) AS through";
 
     private static final String AND = " AND ";
 
@@ -181,14 +224,17 @@ public class CustomerSearchRepository {
 
     private final NamedParameterJdbcTemplate namedJdbc;
 
-    /** Runs the page query so that it waits through a table lock until the holder commits. */
+    /**
+     * Runs the page query and the count so that each waits through a table lock until the holder
+     * commits.
+     */
     private final LockWaitingReads lockWaitingReads;
 
     /**
      * Creates the repository over the application's datasource.
      *
      * @param namedJdbc        the named-parameter template Spring Boot configures on that datasource
-     * @param lockWaitingReads runs the page query so that it waits through a table lock
+     * @param lockWaitingReads runs the page query and the count, each waiting through a table lock
      * @throws NullPointerException if {@code namedJdbc} or {@code lockWaitingReads} is {@code null}
      */
     public CustomerSearchRepository(NamedParameterJdbcTemplate namedJdbc, LockWaitingReads lockWaitingReads) {
@@ -260,8 +306,132 @@ public class CustomerSearchRepository {
         }
         List<String> predicates = new ArrayList<>(6);
         Map<String, Object> params = new LinkedHashMap<>();
-        boolean fenced = false;
+        boolean fenced = addFilterPredicates(c, predicates, params);
 
+        SearchCriteria.Cursor cursor = c.cursor();
+        if (cursor != null) {
+            predicates.add(KEYSET_PREDICATE);
+            putKeyParams(cursor, params);
+        }
+        params.put(PARAM_LIMIT, Integer.valueOf(limit));
+
+        StringBuilder sql = new StringBuilder();
+        if (fenced) {
+            sql.append(CANDIDATES_OPEN);
+        }
+        sql.append(SELECT_FROM);
+        if (!predicates.isEmpty()) {
+            sql.append(WHERE).append(String.join(AND, predicates));
+        }
+        if (fenced) {
+            sql.append(CANDIDATES_CLOSE);
+        }
+        sql.append(ORDER_AND_LIMIT);
+        return new SqlQuery(sql.toString(), params);
+    }
+
+    /**
+     * Counts the rows of the list for {@code c} that sort at or before the row of {@code c.cursor()},
+     * stopping at {@code limit}: the rows that match the filters {@link #find(SearchCriteria, int)}
+     * applies and whose {@code (name, city, state, custid)} is at most the cursor's keys. For a cursor
+     * the service issued, that is the number of rows served so far, because its keys are those of the
+     * last row served; rows added before that row since raise the count, and rows removed lower it.
+     *
+     * <p>Runs as {@code find} runs its page: in a read-only transaction (joining the caller's, if one
+     * is open) that first issues {@code SET LOCAL plan_cache_mode = force_custom_plan}, then through
+     * {@link LockWaitingReads#read(java.util.function.Supplier)}, so it waits through a table lock
+     * until the holder commits or rolls back. The connection returns to the pool when the transaction
+     * ends; no lock and no cursor outlive the call.
+     *
+     * @param c     the normalized criteria with the cursor to count through; {@code size} and
+     *              {@code cursor.served()} are not read
+     * @param limit the most rows to count, at least 1; the service passes the row cap
+     * @return the count, from 0 to {@code limit}
+     * @throws NullPointerException     if {@code c} is {@code null}
+     * @throws IllegalArgumentException if {@code limit} is less than 1 or {@code c.cursor()} is
+     *                                  {@code null}
+     * @throws org.springframework.transaction.IllegalTransactionStateException if called on an
+     *                                  instance that is not the Spring proxy, outside any transaction
+     * @throws org.springframework.dao.DataAccessException if the database rejects or fails the
+     *                                  statement; the API maps it to 500 DEM9999
+     */
+    @Transactional(readOnly = true)
+    public int countThrough(SearchCriteria c, int limit) {
+        SqlQuery q = buildCountQuery(c, limit);
+        namedJdbc.getJdbcOperations().execute("SET LOCAL plan_cache_mode = force_custom_plan");
+        Long counted = lockWaitingReads.read(() -> namedJdbc.queryForObject(q.sql(), q.params(), Long.class));
+        // count(*) answers exactly one non-null row, at most :limit, so the value fits an int.
+        int rows = Math.toIntExact(Objects.requireNonNull(counted, "count"));
+        if (LOG.isDebugEnabled()) {
+            // The SQL text holds only fixed fragments; parameter values (filters, cursor keys) are not logged.
+            LOG.debug("customer.search.count sql=[{}] limit={} rows={}", q.sql(), limit, rows);
+        }
+        return rows;
+    }
+
+    /**
+     * Builds the exact statement and parameters {@link #countThrough(SearchCriteria, int)} executes,
+     * without touching the database, so tests can {@code EXPLAIN} it as they do
+     * {@link #buildQuery(SearchCriteria, int)}.
+     *
+     * <p>The filter predicates are those of {@code buildQuery}, from the same fragments and in the
+     * same order (name, city, state, active), followed by
+     * {@code (name, city, state, custid) <= (:kName, :kCity, :kState, :kId)}. Without a literal lead
+     * the statement is {@code SELECT count(*) FROM (SELECT 1 FROM custmast WHERE ... LIMIT :limit) AS
+     * through}. When the name or city pattern has a literal lead, the counted rows come from the same
+     * materialized candidate set as the page, {@code WITH candidates AS MATERIALIZED (SELECT 1 FROM
+     * custmast WHERE ...) SELECT count(*) FROM (SELECT 1 FROM candidates LIMIT :limit) AS through}, so
+     * the planner cannot walk {@code custmast_search_keyset} from the start of the list to the lead
+     * (see "Why a literal lead is fenced" on the class). The {@code LIMIT} stops the count at the
+     * bound; there is no {@code OFFSET} and no optional branch.
+     *
+     * @param c     the normalized criteria; its cursor is required
+     * @param limit the most rows to count, at least 1
+     * @return the statement and its parameters in the order they were added, ending with
+     *         {@code limit}
+     * @throws NullPointerException     if {@code c} is {@code null}
+     * @throws IllegalArgumentException if {@code limit} is less than 1 or {@code c.cursor()} is
+     *                                  {@code null}
+     */
+    public SqlQuery buildCountQuery(SearchCriteria c, int limit) {
+        Objects.requireNonNull(c, "criteria");
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was " + limit);
+        }
+        SearchCriteria.Cursor cursor = c.cursor();
+        if (cursor == null) {
+            throw new IllegalArgumentException("a count through a cursor needs a cursor");
+        }
+        List<String> predicates = new ArrayList<>(6);
+        Map<String, Object> params = new LinkedHashMap<>();
+        boolean fenced = addFilterPredicates(c, predicates, params);
+        predicates.add(THROUGH_KEY_PREDICATE);
+        putKeyParams(cursor, params);
+        params.put(PARAM_LIMIT, Integer.valueOf(limit));
+
+        StringBuilder sql = new StringBuilder();
+        sql.append(fenced ? CANDIDATES_OPEN : COUNT_OPEN);
+        sql.append(SELECT_ONE_FROM).append(WHERE).append(String.join(AND, predicates));
+        if (fenced) {
+            sql.append(COUNT_CANDIDATES_CLOSE);
+        }
+        sql.append(COUNT_LIMIT_CLOSE);
+        return new SqlQuery(sql.toString(), params);
+    }
+
+    /**
+     * Adds the filter predicates and their parameters that the page and the count share, in the order
+     * name, city, state, active, each only when its input is present.
+     *
+     * @param c          the normalized criteria
+     * @param predicates the predicate list to append to
+     * @param params     the parameter map to put into
+     * @return {@code true} when the literal lead of the name or city pattern yields an index prefix,
+     *         so the statement fences its candidate set
+     */
+    private static boolean addFilterPredicates(
+            SearchCriteria c, List<String> predicates, Map<String, Object> params) {
+        boolean fenced = false;
         if (c.hasName()) {
             LikeParts name = likeParts(c.name());
             LikeColumn.NAME.addTo(name, predicates, params);
@@ -279,29 +449,20 @@ public class CustomerSearchRepository {
         if (!c.includeInactive()) {
             predicates.add(ACTIVE_ONLY_PREDICATE);
         }
-        SearchCriteria.Cursor cursor = c.cursor();
-        if (cursor != null) {
-            predicates.add(KEYSET_PREDICATE);
-            params.put(PARAM_KEY_NAME, cursor.name());
-            params.put(PARAM_KEY_CITY, cursor.city());
-            params.put(PARAM_KEY_STATE, cursor.state());
-            params.put(PARAM_KEY_ID, cursor.custid());
-        }
-        params.put(PARAM_LIMIT, Integer.valueOf(limit));
+        return fenced;
+    }
 
-        StringBuilder sql = new StringBuilder();
-        if (fenced) {
-            sql.append(CANDIDATES_OPEN);
-        }
-        sql.append(SELECT_FROM);
-        if (!predicates.isEmpty()) {
-            sql.append(WHERE).append(String.join(AND, predicates));
-        }
-        if (fenced) {
-            sql.append(CANDIDATES_CLOSE);
-        }
-        sql.append(ORDER_AND_LIMIT);
-        return new SqlQuery(sql.toString(), params);
+    /**
+     * Puts the four keys of a cursor under the parameter names of {@link #KEY_VALUES}.
+     *
+     * @param cursor the keyset position
+     * @param params the parameter map to put into
+     */
+    private static void putKeyParams(SearchCriteria.Cursor cursor, Map<String, Object> params) {
+        params.put(PARAM_KEY_NAME, cursor.name());
+        params.put(PARAM_KEY_CITY, cursor.city());
+        params.put(PARAM_KEY_STATE, cursor.state());
+        params.put(PARAM_KEY_ID, cursor.custid());
     }
 
     /**
@@ -366,7 +527,8 @@ public class CustomerSearchRepository {
     }
 
     /**
-     * The statement {@link #find(SearchCriteria, int)} runs and its named parameters.
+     * The statement {@link #find(SearchCriteria, int)} or {@link #countThrough(SearchCriteria, int)}
+     * runs and its named parameters.
      *
      * @param sql    the SQL text with {@code :name} placeholders, built only from fixed fragments
      * @param params the parameter values by placeholder name, in the order the predicates were added;

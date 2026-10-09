@@ -6,9 +6,14 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
 
@@ -50,9 +55,13 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
  * different answer without {@code rpad}, so they discriminate.
  *
  * <p><b>Independent oracle.</b> The pagination and cap walks compare the ids served with the list order
- * read by plain SQL ({@code EXPECTED_ORDER_SQL}), independently of the repository. The plan checks
- * {@code EXPLAIN} the exact statement {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}
- * produces, with the same bound parameters {@code find} uses.
+ * read by plain SQL ({@code EXPECTED_ORDER_SQL}), independently of the repository, and the forged-cursor
+ * check takes its keys from that order. The count check compares
+ * {@link CustomerSearchRepository#countThrough(SearchCriteria, int)} with the ids that hand-written
+ * predicates select, counted through the key's position in that order. The plan checks {@code EXPLAIN}
+ * the exact statement {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)} or
+ * {@link CustomerSearchRepository#buildCountQuery(SearchCriteria, int)} produces, with the same bound
+ * parameters {@code find} and {@code countThrough} use.
  *
  * <p><b>Fixtures.</b> Test databases hold no seed rows and the base class empties {@code custmast}
  * before every test, so each test writes its own rows: small fixtures with plain SQL and the explicit V3
@@ -128,6 +137,9 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
             new CszSource.CszRow(2108, "STANDARD", "BOSTON", "MA"));
 
     private static final String NAME_INDEX = "custmast_name";
+
+    /** The composite index of the list order, which serves the count through a key. */
+    private static final String KEYSET_INDEX = "custmast_search_keyset";
 
     private static final String RPAD = "rpad";
 
@@ -459,6 +471,114 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     }
 
     /**
+     * A cursor whose only change is a lowered {@code served} cannot lift the cap. Over the cap fixture
+     * of {@link #searchStopsAtRowCapWithDem0006()}, with inactive rows included, the keys of row 9,999
+     * of the independent list order with {@code served} 0 give an empty page with {@code limitReached},
+     * DEM0006 and no next cursor, so nothing beyond the cap is served. The keys of row 9,950 give exactly
+     * rows 9,951 to 9,999 and the same end, with {@code served} 0 as with the honest 9,950.
+     */
+    @Test
+    void forgedServedCannotLiftRowCap() {
+        int maxRows = appProperties.search().maxRows();
+        loadGenerated(10_500);
+        List<KeyRow> expected = expectedKeyRows();
+        List<String> expectedIds = expected.stream().map(KeyRow::custId).toList();
+
+        SearchPage atCap = searchService.search("", "", "", true, MAX_PAGE_SIZE,
+                cursorAt(expected.get(maxRows - 1), 0));
+        assertThat(atCap.items()).as("rows after row %d with served 0", maxRows).isEmpty();
+        assertCapped(atCap);
+
+        int deep = 9_950;
+        for (int served : List.of(0, deep)) {
+            SearchPage page = searchService.search("", "", "", true, MAX_PAGE_SIZE,
+                    cursorAt(expected.get(deep - 1), served));
+            assertThat(page.items()).as("rows after row %d with served %d", deep, served)
+                    .extracting(row -> row.custId().value())
+                    .containsExactlyElementsOf(expectedIds.subList(deep, maxRows));
+            assertCapped(page);
+        }
+    }
+
+    /**
+     * {@link CustomerSearchRepository#countThrough(SearchCriteria, int)} equals an independent count over
+     * the cap fixture, for keys from the top to the bottom of the list and for two bounds, whatever the
+     * filters: none, inactive rows excluded and included, a name lead (fenced, plain and padded), a city
+     * lead (fenced), a state, and a pattern with no lead ({@code %A}, single statement). The independent
+     * count selects the matching ids with hand-written predicates that use no {@code rpad}, no row
+     * comparison and no repository fragment, then counts them through the key's position in the plain
+     * {@code ORDER BY} list. A key at the bottom with no filter reaches the bound, so the count stops
+     * there.
+     */
+    @Test
+    void countThroughEqualsIndependentCount() {
+        int maxRows = appProperties.search().maxRows();
+        loadGenerated(10_500);
+        jdbcTemplate.execute("ANALYZE custmast");
+        List<KeyRow> all = expectedKeyRows();
+        List<CountCase> cases = List.of(
+                new CountCase("no filter, inactive included", "", "", "", true, false, "TRUE"),
+                new CountCase("no filter, inactive excluded", "", "", "", false, false, "active = 'Y'"),
+                new CountCase("name lead B", "B", "", "", false, true, "left(name, 1) = 'B' AND active = 'Y'"),
+                new CountCase("padded name lead B_, inactive included", "B_", "", "", true, true,
+                        "left(name, 1) = 'B'"),
+                new CountCase("city lead B", "", "B", "", false, true, "left(city, 1) = 'B' AND active = 'Y'"),
+                new CountCase("state TX", "", "", "TX", false, false, "state = 'TX' AND active = 'Y'"),
+                new CountCase("no lead %A", "%A", "", "", false, false, "strpos(name, 'A') > 0 AND active = 'Y'"));
+        List<Integer> keyRows = List.of(0, 1_234, 5_000, maxRows - 1, all.size() - 1);
+
+        for (CountCase c : cases) {
+            Set<String> matching = new HashSet<>(jdbcTemplate.queryForList(
+                    "SELECT custid FROM custmast WHERE " + c.independentWhere(), String.class));
+            assertThat(matching).as("independent matches of %s", c.label()).isNotEmpty();
+            for (int keyRow : keyRows) {
+                SearchCriteria through = new SearchCriteria(c.name(), c.city(), c.state(), c.includeInactive(),
+                        FIXTURE_SIZE, position(all.get(keyRow), 0));
+                assertThat(searchRepository.buildCountQuery(through, maxRows).sql())
+                        .as("count statement of %s", c.label())
+                        .startsWith(c.fenced() ? "WITH candidates AS MATERIALIZED (" : "SELECT count(*) FROM (")
+                        .doesNotContain("OFFSET").doesNotContain("IS NULL");
+                long upToKey = all.subList(0, keyRow + 1).stream()
+                        .filter(row -> matching.contains(row.custId())).count();
+                for (int limit : List.of(maxRows, 100)) {
+                    assertThat(searchRepository.countThrough(through, limit))
+                            .as("count of %s through row %d, limit %d", c.label(), keyRow + 1, limit)
+                            .isEqualTo((int) Math.min(upToKey, limit));
+                }
+            }
+        }
+        SearchCriteria throughBottom =
+                new SearchCriteria("", "", "", true, FIXTURE_SIZE, position(all.getLast(), 0));
+        assertThat(searchRepository.countThrough(throughBottom, maxRows))
+                .as("the count through the last of %d rows stops at the cap", all.size()).isEqualTo(maxRows);
+    }
+
+    /**
+     * The count through a deep key with no filter, inactive rows included or not, reads the keyset
+     * index {@code custmast_search_keyset} with the row comparison as its index condition, and no plan
+     * holds a sequential scan of {@code custmast}.
+     */
+    @Test
+    void countThroughDeepKeyIsServedByKeysetIndex() {
+        int maxRows = appProperties.search().maxRows();
+        loadGenerated(10_500);
+        jdbcTemplate.execute("ANALYZE custmast");
+        SearchCriteria.Cursor key = position(expectedKeyRows().get(maxRows - 1), 0);
+        Predicate<PlanNode> keysetIndexCondition =
+                node -> KEYSET_INDEX.equals(node.indexName()) && node.indexCond() != null;
+
+        for (boolean includeInactive : List.of(true, false)) {
+            ExplainedPlan plan = explain(searchRepository.buildCountQuery(
+                    new SearchCriteria("", "", "", includeInactive, FIXTURE_SIZE, key), maxRows));
+
+            assertThat(plan.nodes()).as("includeInactive=%s: %s", includeInactive, plan.json())
+                    .anyMatch(keysetIndexCondition);
+            assertThat(plan.nodes()).as("includeInactive=%s: %s", includeInactive, plan.json())
+                    .noneMatch(PlanNode::isSeqScanOnCustmast);
+        }
+    }
+
+    /**
      * Writes the four-row filter fixture: three active customers in Illinois, California and Utah, and
      * the inactive {@code ACME HOLDINGS} in Texas.
      */
@@ -559,6 +679,55 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
     }
 
     /**
+     * Returns the keyset position of a row of the independent list order.
+     *
+     * @param row    the row whose stored keys the position carries
+     * @param served the rows served count the position claims
+     * @return the position
+     */
+    private static SearchCriteria.Cursor position(KeyRow row, int served) {
+        return new SearchCriteria.Cursor(row.name(), row.city(), row.state(), row.custId(), served);
+    }
+
+    /**
+     * Encodes a cursor as {@code CustomerSearchService} writes one: base64url without padding over the
+     * UTF-8 JSON object with exactly {@code name}, {@code city}, {@code state}, {@code custid} and
+     * {@code served}, in that order. Any {@code served} the service accepts can be written, so a test can
+     * forge one.
+     *
+     * @param row    the row whose stored keys the cursor carries
+     * @param served the rows served count the cursor claims
+     * @return the cursor text
+     * @throws AssertionError if the JSON cannot be written
+     */
+    private String cursorAt(KeyRow row, int served) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("name", row.name());
+        payload.put("city", row.city());
+        payload.put("state", row.state());
+        payload.put("custid", row.custId());
+        payload.put("served", served);
+        try {
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(objectMapper.writeValueAsBytes(payload));
+        } catch (JsonProcessingException e) {
+            throw new AssertionError("cursor JSON could not be written", e);
+        }
+    }
+
+    /**
+     * Asserts that a page ends the list at the cap: {@code limitReached}, no next cursor and DEM0006.
+     *
+     * @param page the page
+     */
+    private static void assertCapped(SearchPage page) {
+        assertThat(page.limitReached()).as("limitReached").isTrue();
+        assertThat(page.nextCursor()).as("nextCursor").isNull();
+        assertThat(page.notice()).as("notice").isNotNull();
+        assertThat(page.notice().code()).isEqualTo("DEM0006");
+        assertThat(page.notice().message()).isEqualTo("Too many records. Change the selection criteria.");
+    }
+
+    /**
      * Reads every row's sort keys in the list order, independently of the repository.
      *
      * @return the rows ordered by name, city, state and custid
@@ -580,10 +749,22 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
      * @throws AssertionError if the output is not a JSON plan
      */
     private ExplainedPlan explain(SearchCriteria criteria) {
+        return explain(searchRepository.buildQuery(criteria, PAGE_LIMIT));
+    }
+
+    /**
+     * Explains {@code query} with its bind parameters, under the settings of
+     * {@link #explain(SearchCriteria)}: sequential scans disabled and custom plans forced, in one
+     * transaction whose {@code SET LOCAL} settings end with it.
+     *
+     * @param query a statement the repository builds
+     * @return the JSON plan and its nodes, depth first
+     * @throws AssertionError if the output is not a JSON plan
+     */
+    private ExplainedPlan explain(SqlQuery query) {
         String json = transactionTemplate.execute(status -> {
             jdbcTemplate.execute("SET LOCAL enable_seqscan = off");
             jdbcTemplate.execute("SET LOCAL plan_cache_mode = force_custom_plan");
-            SqlQuery query = searchRepository.buildQuery(criteria, PAGE_LIMIT);
             return namedParameterJdbcTemplate.queryForObject(
                     "EXPLAIN (FORMAT JSON) " + query.sql(), query.params(), String.class);
         });
@@ -661,6 +842,22 @@ class CustomerSearchRepositoryIT extends AbstractPostgresIT {
      * @param nodes every node, depth first
      */
     private record ExplainedPlan(String json, List<PlanNode> nodes) {
+    }
+
+    /**
+     * One filter shape of the count check.
+     *
+     * @param label            the shape, as assertion messages name it
+     * @param name             the normalized name filter, {@code ""} for none
+     * @param city             the normalized city filter, {@code ""} for none
+     * @param state            the state filter, {@code ""} for none
+     * @param includeInactive  {@code true} to include inactive rows (F9)
+     * @param fenced           whether the count statement must fence a literal lead
+     * @param independentWhere a hand-written predicate selecting the same rows, using no repository
+     *                         fragment
+     */
+    private record CountCase(String label, String name, String city, String state, boolean includeInactive,
+            boolean fenced, String independentWhere) {
     }
 
     private record KeyRow(String custId, String name, String city, String state) {

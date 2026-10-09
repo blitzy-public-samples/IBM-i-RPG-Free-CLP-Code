@@ -100,7 +100,9 @@ public record SearchCriteria(
      * is the unique tiebreaker that makes the position exact. {@code served} counts
      * the rows returned on earlier pages, so the service can stop at 9,999 rows with
      * DEM0006 and {@code limitReached}, as the subfile cap did
-     * [5250_Subfile/PMTCUSTR.SQLRPGLE:180,287-292].
+     * [5250_Subfile/PMTCUSTR.SQLRPGLE:180,287-292]. It is the value the client sent
+     * back; the service floors it with the repository's count of the matching rows at
+     * or before these keys, so a lowered value cannot lift the cap.
      *
      * <p>Empty strings are legal key values, because they compare like any other
      * stored value. The service validates the decoded {@code custid} format and the

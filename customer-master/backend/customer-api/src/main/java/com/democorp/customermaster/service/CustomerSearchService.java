@@ -151,9 +151,18 @@ public class CustomerSearchService {
      * </ul>
      * Every APP0400 carries one fixed English reason that never echoes user input.
      *
-     * <p>It then fetches at most {@code min(size, maxRows - served) + 1} rows, the extra one being
-     * the look-ahead row {@code SflFillPage} read to decide whether more rows follow, and builds
-     * the page:
+     * <p>{@code served}, the rows served before this page, is 0 on the first page. With a cursor it
+     * is the larger of the cursor's own {@code served} and
+     * {@link CustomerSearchRepository#countThrough(SearchCriteria, int)}: the rows that match the
+     * same filters and sort at or before the cursor's key, counted up to the cap. The cursor is
+     * opaque but not signed; the recount means a client that lowers its {@code served} cannot lift
+     * the cap, and one that raises it only lowers its own allowance. When {@code served} reaches
+     * the cap, the page is empty, carries {@code limitReached} and notice DEM0006, has no next
+     * cursor, and no page query runs.
+     *
+     * <p>Otherwise it fetches at most {@code min(size, maxRows - served) + 1} rows, the extra one
+     * being the look-ahead row {@code SflFillPage} read to decide whether more rows follow, and
+     * builds the page:
      * <ul>
      *   <li>the rows served on this page, in {@code name, city, state, custid} order;</li>
      *   <li>{@code limitReached}, notice DEM0006 and no next cursor when this page brings the rows
@@ -182,8 +191,8 @@ public class CustomerSearchService {
      *                                        over-long filter, a filter containing U+0000 or a
      *                                        cursor that is malformed or outside the supported
      *                                        shape and value ranges
-     * @throws org.springframework.dao.DataAccessException if the query fails; the API answers it
-     *                                        with 500 DEM9999
+     * @throws org.springframework.dao.DataAccessException if the count or the page query fails;
+     *                                        the API answers it with 500 DEM9999
      */
     public SearchPage search(
             String name,
@@ -201,8 +210,22 @@ public class CustomerSearchService {
         String normalizedState = normalizeState(state);
         SearchCriteria.Cursor position = decodeCursor(cursor, maxRows);
 
-        // remaining >= 1: decodeCursor accepts only served < maxRows.
-        int served = position == null ? 0 : position.served();
+        int served = 0;
+        if (position != null) {
+            // The cursor's served is client-held, so the matching rows at or before its key floor
+            // it and a lowered value cannot lift the cap. The larger value wins, so a cursor this
+            // class issued keeps its own count when rows before its key were deleted since.
+            SearchCriteria through = new SearchCriteria(normalizedName, normalizedCity,
+                    normalizedState, includeInactive, pageSize, position);
+            served = Math.max(position.served(),
+                    customerSearchRepository.countThrough(through, maxRows));
+        }
+        if (served >= maxRows) {
+            // The rows before this page already reach the cap: the list ends, as on the page that
+            // reached it, and no page query runs.
+            return logged(position, served, 0,
+                    new SearchPage(List.of(), null, true, notice(TOO_MANY)));
+        }
         int remaining = maxRows - served;
         int pageLimit = Math.min(pageSize, remaining);
 
@@ -233,7 +256,20 @@ public class CustomerSearchService {
                     : null;
             page = new SearchPage(items, nextCursor, false, null);
         }
+        return logged(position, served, returned, page);
+    }
 
+    /**
+     * Logs the outcome of one search at DEBUG and returns its page.
+     *
+     * @param position the decoded cursor, or {@code null} for the first page
+     * @param served   the rows served before this page, after the floor of the recount
+     * @param returned the rows on this page
+     * @param page     the page
+     * @return {@code page}
+     */
+    private static SearchPage logged(
+            SearchCriteria.Cursor position, int served, int returned, SearchPage page) {
         if (LOG.isDebugEnabled()) {
             // Counts only: filters and cursor keys are user data and are never logged.
             LOG.debug("customer.search firstPage={} served={} returned={} more={} limitReached={}",
@@ -363,8 +399,9 @@ public class CustomerSearchService {
 
     /**
      * Decodes a cursor and checks it against the form {@link #encodeCursor(CustomerSummary, int)}
-     * writes. The cursor is not signed, so a well-formed payload a client builds itself is accepted
-     * like one this class issued.
+     * writes. The cursor is not signed, so the {@code served} decoded here is only the client's
+     * claim: {@link #search} floors it with the server-side recount of the rows at or before the
+     * cursor's key, so a lowered value cannot lift the 9,999-row cap.
      *
      * <p>Accepted only when every check holds: at most {@value #MAX_CURSOR_LENGTH} characters;
      * valid base64url; well-formed JSON with nothing after the object and no repeated property;

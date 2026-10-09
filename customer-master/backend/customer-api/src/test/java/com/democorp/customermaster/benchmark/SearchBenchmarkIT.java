@@ -2,6 +2,7 @@ package com.democorp.customermaster.benchmark;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.democorp.customermaster.config.AppProperties;
 import com.democorp.customermaster.domain.CustomerId;
 import com.democorp.customermaster.domain.SearchCriteria;
 import com.democorp.customermaster.generator.CszSource;
@@ -80,11 +81,15 @@ import org.testcontainers.DockerClientFactory;
  *       user {@code inq} (role {@code INQUIRY}) over HTTP Basic against the random-port server. A
  *       sample spans sending the request to reading the whole body, so it includes the security filter
  *       chain and its BCrypt check, the JSON rendering and the loopback transfer.</li>
- *   <li>Run {@code EXPLAIN (FORMAT JSON)} of the exact production statement
+ *   <li>Run {@code EXPLAIN (FORMAT JSON)} of the exact production statements: the page statement
  *       ({@link CustomerSearchRepository#buildQuery(SearchCriteria, int)}) for the no-filter first page,
- *       the page-{@value #DEEP_PAGE} keyset position and the three-letter name prefix, in a read-only
- *       transaction that first sets {@code plan_cache_mode = force_custom_plan}, as
- *       {@link CustomerSearchRepository#find(SearchCriteria, int)} does.</li>
+ *       the page-{@value #DEEP_PAGE} keyset position and the three-letter name prefix, and the count
+ *       statement ({@link CustomerSearchRepository#buildCountQuery(SearchCriteria, int)}) that the
+ *       page-{@value #DEEP_PAGE} request runs before its page, bounded by the row cap. Each runs in a
+ *       read-only transaction that first sets {@code plan_cache_mode = force_custom_plan}, as
+ *       {@link CustomerSearchRepository#find(SearchCriteria, int)} and
+ *       {@link CustomerSearchRepository#countThrough(SearchCriteria, int)} do, under the default
+ *       planner settings.</li>
  *   <li>Print the Markdown report and write it to {@value #REPORT_FILE} under {@code target}, then
  *       assert every threshold with {@link SoftAssertions}, so a failing run still reports every
  *       measured number and lists every violation.</li>
@@ -92,8 +97,8 @@ import org.testcontainers.DockerClientFactory;
  *
  * <p><b>Thresholds.</b> p95 (nearest rank) at most {@value #SEARCH_P95_MS} ms for each search
  * operation and at most {@value #GET_P95_MS} ms for get-by-id. Latency depends on the host, so the
- * plan check is the hardware-independent evidence: none of the three plans may contain a
- * {@code Seq Scan} on {@code custmast}.
+ * plan check is the hardware-independent evidence: none of the four plans, the deep page's page and
+ * count statements among them, may contain a {@code Seq Scan} on {@code custmast}.
  *
  * <p><b>Running.</b> The class carries JUnit tag {@code benchmark}, which the default Failsafe run
  * excludes; {@code ./mvnw -B verify -Pbenchmark} runs this class and no other IT. The report feeds
@@ -177,6 +182,13 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     @Autowired
     private NamedParameterJdbcTemplate namedJdbc;
 
+    /**
+     * The search settings the service runs with; their row cap ({@code customer-master.search.max-rows},
+     * 9,999) is the bound the service passes to the count through a cursor.
+     */
+    @Autowired
+    private AppProperties appProperties;
+
     @Autowired
     private Clock clock;
 
@@ -196,9 +208,11 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
             results.add(measure(client, operation));
         }
 
+        SearchCriteria deepPageCriteria = new SearchCriteria("", "", "", false, PAGE_SIZE, deepPage.keyset());
         List<PlanCheck> plans = List.of(
                 explain("first-page", new SearchCriteria("", "", "", false, PAGE_SIZE, null)),
-                explain("page-" + DEEP_PAGE, new SearchCriteria("", "", "", false, PAGE_SIZE, deepPage.keyset())),
+                explain("page-" + DEEP_PAGE, deepPageCriteria),
+                explainCount("page-" + DEEP_PAGE + "-count", deepPageCriteria),
                 explain("name-prefix-3", new SearchCriteria(filters.name3(), "", "", false, PAGE_SIZE, null)));
 
         // Report first, so a run that misses a threshold still prints and keeps every measured number.
@@ -637,23 +651,55 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
     }
 
     /**
-     * Explains the production statement for {@code criteria} and checks it for a sequential scan of
-     * {@code custmast}.
+     * Explains the production page statement for {@code criteria} and checks it for a sequential scan
+     * of {@code custmast}.
      *
      * <p>The statement and its parameters come from
      * {@link CustomerSearchRepository#buildQuery(SearchCriteria, int)} with the look-ahead limit the
-     * service passes, never from hand-written SQL. The {@code EXPLAIN} runs as
-     * {@link CustomerSearchRepository#find(SearchCriteria, int)} runs its query: in a read-only
-     * transaction that first issues {@code SET LOCAL plan_cache_mode = force_custom_plan}. Both
-     * templates share the application's datasource, so both statements run on the transaction's
-     * connection, and the parameters reach the planner as bound values.
+     * service passes, never from hand-written SQL, and are explained as
+     * {@link CustomerSearchRepository#find(SearchCriteria, int)} runs them
+     * ({@link #explain(String, CustomerSearchRepository.SqlQuery)}).
      *
      * @param label    the plan's name in the report
      * @param criteria the normalized criteria the service would pass
      * @return the plan excerpt and its violations
      */
     private PlanCheck explain(String label, SearchCriteria criteria) {
-        CustomerSearchRepository.SqlQuery query = searchRepository.buildQuery(criteria, LIMIT);
+        return explain(label, searchRepository.buildQuery(criteria, LIMIT));
+    }
+
+    /**
+     * Explains the production count statement for {@code criteria} and checks it for a sequential scan
+     * of {@code custmast}: the count of the matching rows at or before the cursor key that the service
+     * runs before the page of every request that carries a cursor.
+     *
+     * <p>The statement and its parameters come from
+     * {@link CustomerSearchRepository#buildCountQuery(SearchCriteria, int)} with the row cap the service
+     * passes as its bound, never from hand-written SQL, and are explained as
+     * {@link CustomerSearchRepository#countThrough(SearchCriteria, int)} runs them
+     * ({@link #explain(String, CustomerSearchRepository.SqlQuery)}).
+     *
+     * @param label    the plan's name in the report
+     * @param criteria the normalized criteria the service would pass, with the cursor's keyset
+     * @return the plan excerpt and its violations
+     */
+    private PlanCheck explainCount(String label, SearchCriteria criteria) {
+        return explain(label, searchRepository.buildCountQuery(criteria, appProperties.search().maxRows()));
+    }
+
+    /**
+     * Explains one production statement and checks its plan for a sequential scan of {@code custmast}.
+     *
+     * <p>The {@code EXPLAIN} runs as the repository runs the statement: in a read-only transaction that
+     * first issues {@code SET LOCAL plan_cache_mode = force_custom_plan}, with every other planner
+     * setting at its default. Both templates share the application's datasource, so both statements
+     * run on the transaction's connection, and the parameters reach the planner as bound values.
+     *
+     * @param label the plan's name in the report
+     * @param query the statement and parameters the repository builds
+     * @return the plan excerpt and its violations
+     */
+    private PlanCheck explain(String label, CustomerSearchRepository.SqlQuery query) {
         TransactionTemplate readOnly = new TransactionTemplate(transactionTemplate.getTransactionManager());
         readOnly.setReadOnly(true);
         String planJson = readOnly.execute(status -> {
@@ -831,9 +877,11 @@ class SearchBenchmarkIT extends AbstractPostgresIT {
         md.append(nl);
 
         md.append("## Plans").append(nl).append(nl);
-        md.append("EXPLAIN (FORMAT JSON) of the production statement, LIMIT ").append(LIMIT)
-                .append(", plan_cache_mode = force_custom_plan. PASS means no Seq Scan on custmast.")
-                .append(nl).append(nl);
+        md.append("EXPLAIN (FORMAT JSON) of the production statements, plan_cache_mode = force_custom_plan:")
+                .append(" the page statement, LIMIT ").append(LIMIT).append(", and, for page-").append(DEEP_PAGE)
+                .append("-count, the count through the cursor key that the page-").append(DEEP_PAGE)
+                .append(" request runs before its page, LIMIT ").append(appProperties.search().maxRows())
+                .append(" (the row cap). PASS means no Seq Scan on custmast.").append(nl).append(nl);
         for (PlanCheck plan : plans) {
             md.append("### ").append(plan.label()).append(": ").append(plan.passed() ? "PASS" : "FAIL").append(nl)
                     .append(nl).append("```").append(nl);
