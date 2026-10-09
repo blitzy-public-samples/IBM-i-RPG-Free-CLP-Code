@@ -80,7 +80,11 @@ import org.springframework.lang.Nullable;
  * and targets outside {@code /api/} that must keep nginx's page. Because {@code error_page} turns a
  * rejected request into a GET of its page, the {@code redacted} access-log format must log the method
  * from the request line ({@code $request_line_method}), never {@code $request_method}, and that map
- * must yield only a method-shaped first word or {@code -}, never other text of a malformed line.
+ * must yield only a method-shaped first word or {@code -}, never other text of a malformed line. The
+ * server's access log uses that format and, by its {@code if=$access_loggable} condition, skips only
+ * the Compose healthcheck's {@code GET /} from {@code 127.0.0.1} answered 200: that map is evaluated
+ * over the client address, the request line's method, the raw URI and the status, so a request from
+ * any other address, a failing probe, another path, a query or another method is logged.
  *
  * <p><b>Wiring.</b> {@code location /api/} must route nginx's 502 and 504 to those named locations,
  * and each must answer {@code application/problem+json}. The server block and {@code location /api/}
@@ -133,6 +137,18 @@ final class NginxGatewayProblemTest {
 
     /** The access-log format of the server. */
     private static final String ACCESS_LOG_FORMAT = "redacted";
+
+    /** {@code "0"} for the healthcheck request the server's access log skips, {@code "1"} otherwise. */
+    private static final String LOGGABLE_VARIABLE = "access_loggable";
+
+    /** The client address, as nginx received the connection. */
+    private static final String REMOTE_ADDRESS_VARIABLE = "remote_addr";
+
+    /** The raw request URI, its query included. */
+    private static final String RAW_URI_VARIABLE = "request_uri";
+
+    /** The status nginx sent. */
+    private static final String STATUS_VARIABLE = "status";
 
     /** The browser security headers the server block adds, each with a part its value must hold. */
     private static final Map<String, String> SECURITY_HEADERS = Map.of(
@@ -472,8 +488,54 @@ final class NginxGatewayProblemTest {
                 .contains(METHOD_VARIABLE)
                 .doesNotContain(REWRITTEN_METHOD_VARIABLE);
 
-        Directive accessLog = only(server().children(), d -> d.name().equals("access_log"), "access_log");
-        assertThat(accessLog.args()).as("the server's access_log").endsWith(ACCESS_LOG_FORMAT);
+        Directive accessLog = serverAccessLog();
+        assertThat(accessLog.args()).as("the server's access_log").hasSizeGreaterThan(1);
+        assertThat(accessLog.args().get(1)).as("the format of the server's access_log")
+                .isEqualTo(ACCESS_LOG_FORMAT);
+    }
+
+    /**
+     * Holds the server's access log to skipping the Compose healthcheck's second request and nothing
+     * else. Its only parameter is {@code if=$access_loggable}, and nginx skips a request whose condition
+     * is {@code "0"} or {@code ""}; the map, whose source may reference only the client address, the
+     * request line's method, the raw URI and the status, must yield such a value for a {@code GET /}
+     * from {@code 127.0.0.1} answered 200, in any protocol version, and a logged value for a browser
+     * through the published port (the Docker network's gateway), another container, a failing probe,
+     * another path, a query or another method.
+     *
+     * @param remoteAddress the client address
+     * @param requestLine the request line as sent
+     * @param status the status nginx sent
+     * @param logged whether the request must be logged
+     */
+    @ParameterizedTest(name = "{0} <{1}> answered {2} is logged: {3}")
+    @CsvSource({"127.0.0.1, 'GET / HTTP/1.1', 200, false", "127.0.0.1, 'GET / HTTP/1.0', 200, false",
+            "172.18.0.1, 'GET / HTTP/1.1', 200, true", "172.18.0.4, 'GET / HTTP/1.1', 200, true",
+            "127.0.0.10, 'GET / HTTP/1.1', 200, true", "127.0.0.1, 'GET / HTTP/1.1', 403, true",
+            "127.0.0.1, 'GET / HTTP/1.1', 500, true", "127.0.0.1, 'GET /customers HTTP/1.1', 200, true",
+            "127.0.0.1, 'GET /index.html HTTP/1.1', 200, true", "127.0.0.1, 'GET /?x=1 HTTP/1.1', 200, true",
+            "127.0.0.1, 'HEAD / HTTP/1.1', 200, true", "127.0.0.1, 'POST / HTTP/1.1', 200, true"})
+    @DisplayName("the access log skips only the healthcheck's GET / from 127.0.0.1 answered 200")
+    void accessLogSkipsOnlyTheHealthcheckProbe(String remoteAddress, String requestLine, int status,
+            boolean logged) {
+        Directive accessLog = serverAccessLog();
+        assertThat(accessLog.args()).as("the server's access_log").hasSizeGreaterThan(1);
+        assertThat(accessLog.args().subList(2, accessLog.args().size()))
+                .as("parameters of the server's access_log")
+                .containsExactly("if=$" + LOGGABLE_VARIABLE);
+
+        Directive map = only(config, d -> d.isBlock("map") && d.args().size() == 2
+                && d.args().get(1).equals("$" + LOGGABLE_VARIABLE), "map to $" + LOGGABLE_VARIABLE);
+        String source = expand(map.args().get(0), Map.of(
+                REMOTE_ADDRESS_VARIABLE, remoteAddress,
+                METHOD_VARIABLE, methodMap.valueFor(requestLine),
+                RAW_URI_VARIABLE, requestLine.split(" ")[1],
+                STATUS_VARIABLE, String.valueOf(status)));
+        String condition = NginxMap.of(map).valueFor(source);
+        assertThat(!condition.isEmpty() && !condition.equals("0"))
+                .as("%s <%s> answered %d is logged ($%s is \"%s\")", remoteAddress, requestLine, status,
+                        LOGGABLE_VARIABLE, condition)
+                .isEqualTo(logged);
     }
 
     @ParameterizedTest(name = "<{0}> logs {1}")
@@ -670,6 +732,15 @@ final class NginxGatewayProblemTest {
      */
     private static Directive server() {
         return only(config, d -> d.isBlock("server"), "server");
+    }
+
+    /**
+     * Returns the server's {@code access_log}, which every location but {@code /healthz} inherits.
+     *
+     * @return the {@code access_log} directive
+     */
+    private static Directive serverAccessLog() {
+        return only(server().children(), d -> d.name().equals("access_log"), "access_log");
     }
 
     /**

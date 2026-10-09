@@ -124,6 +124,8 @@ No manual step is needed. The services start in health order:
 2. `app`: `customer-api`. On boot Flyway creates schema `customer_master` and applies V1–V4, then the V5 seed of 300 customers. A second `up` finds nothing to apply.
 3. `frontend`: nginx serving the built SPA and proxying `/api` to `app`.
 
+`db`, `app` and `frontend` restart automatically after a crash, up to three times per container, while a misconfiguration still stops startup: `app` exits and `up --wait` fails.
+
 | What | URL |
 |------|-----|
 | UI | `http://localhost:8080` |
@@ -141,7 +143,7 @@ If another program already holds one of them, `up` cannot bind it and Docker rep
 | `inquiry` | `inquiry-demo` | `INQUIRY` |
 | `sales` | `sales-demo` | `MAINTENANCE` |
 
-These are demo-only defaults supplied by `docker-compose.yml` so the stack starts with one command. Override them in `.env` with `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD`. Usernames must be 1–18 characters of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`, and must not be `*SYSTEM*`; passwords must be at most 72 bytes in UTF-8, where a non-ASCII character counts for two to four.
+These are demo-only defaults supplied by `docker-compose.yml` so the stack starts with one command. Override them in `.env` with `CM_INQUIRY_USER`, `CM_INQUIRY_PASSWORD`, `CM_MAINTENANCE_USER` and `CM_MAINTENANCE_PASSWORD`. Usernames must be 1–18 characters of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`, and must not be `*SYSTEM*`; passwords must be at most 72 bytes in UTF-8, where a non-ASCII character counts for two to four. Only a non-blank value that breaks these rules stops the API from starting: Compose treats a blank or missing `CM_*` line in `.env` as unset and keeps its demo default, so give every override a non-empty value.
 
 ### Configuration
 
@@ -149,7 +151,7 @@ These are demo-only defaults supplied by `docker-compose.yml` so the stack start
 cp .env.example .env
 ```
 
-Every variable is documented in [`.env.example`](.env.example), and an unedited copy changes nothing. `.env` is git-ignored. No credentials are kept in source: the USPS user id and password have no default anywhere, and `DB_NAME`, `DB_USER` and `DB_PASSWORD`, which initialise the PostgreSQL cluster, take effect only on an empty `pgdata` volume, while `DB_HOST`, `DB_PORT`, `DB_SCHEMA` and `DB_LOCK_TIMEOUT` are read on every start.
+Every variable is documented in [`.env.example`](.env.example), and an unedited copy changes nothing. A blank or deleted line also takes the `docker-compose.yml` default, which for `DB_PASSWORD` and the `CM_*` users is the publicly known demo credential, so an override needs a non-empty value. `.env` is git-ignored. No credentials are kept in source: the USPS user id and password have no default anywhere, and `DB_NAME`, `DB_USER` and `DB_PASSWORD`, which initialise the PostgreSQL cluster, take effect only on an empty `pgdata` volume, while `DB_HOST`, `DB_PORT`, `DB_SCHEMA` and `DB_LOCK_TIMEOUT` are read on every start.
 
 ### Quick API check
 
@@ -290,7 +292,7 @@ After a 1,000,000-row load:
 docker compose --profile perf run --rm k6
 ```
 
-k6 calls the API directly at a constant 20 requests per second for 2 minutes, with thresholds of p95 below 300 ms and a failure rate below 1%. The summary is written to `perf/results/search-1m-summary.json` (git-ignored), and the results are recorded in [`docs/performance/search-benchmark.md`](docs/performance/search-benchmark.md). The source readme's 1,000,000-row claim was never measured; this load test and `SearchBenchmarkIT` measure the target instead, and only measured numbers are recorded.
+k6 calls the API directly, signed in as the inquiry user from `CM_INQUIRY_USER` and `CM_INQUIRY_PASSWORD` unless `K6_USER` and `K6_PASSWORD` are set, at a constant 20 requests per second for 2 minutes, with thresholds of p95 below 300 ms and a failure rate below 1%. The summary is written to `perf/results/search-1m-summary.json` (git-ignored), and the results are recorded in [`docs/performance/search-benchmark.md`](docs/performance/search-benchmark.md). The source readme's 1,000,000-row claim was never measured; this load test and `SearchBenchmarkIT` measure the target instead, and only measured numbers are recorded.
 
 ### Full acceptance run
 
