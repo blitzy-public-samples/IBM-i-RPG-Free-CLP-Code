@@ -240,6 +240,35 @@ describe('ConflictCompareDialog', () => {
     });
   });
 
+  describe('window frame', () => {
+    it('keeps Refresh, Re-apply my changes and F12=Cancel in the fixed footer, and the DEM1002 text and the comparison in the scrolling body', async () => {
+      const { dialog } = await openDialog();
+      const header = dialog.querySelector('header.screen-header');
+      const body = dialog.querySelector('.screen-body');
+      const footer = dialog.querySelector('footer.screen-footer');
+      if (!(header instanceof HTMLElement) || !(body instanceof HTMLElement) || !(footer instanceof HTMLElement)) {
+        throw new Error('The window renders no header, body or footer');
+      }
+      // Header, body and footer in that order, as siblings: only the body scrolls.
+      expect(header.nextElementSibling).toBe(body);
+      expect(body.nextElementSibling).toBe(footer);
+
+      for (const name of ['Refresh', 'Re-apply my changes', 'F12=Cancel']) {
+        const button = within(dialog).getByRole('button', { name });
+        expect(footer).toContainElement(button);
+        expect(body).not.toContainElement(button);
+      }
+      const table = within(dialog).getByRole('table', { name: TABLE_NAME });
+      expect(body).toContainElement(within(dialog).getByText(messageText('DEM1002')));
+      expect(body).toContainElement(table);
+      expect(footer).not.toContainElement(table);
+
+      // The focus Refresh takes on opening lands outside the body, which stays at its top.
+      expect(within(footer).getByRole('button', { name: 'Refresh' })).toHaveFocus();
+      expect(body.scrollTop).toBe(0);
+    });
+  });
+
   describe('field comparison', () => {
     it('has one row per customer field in screen order, with the user value, the current value and "Changed" where they differ', async () => {
       const { dialog } = await openDialog();

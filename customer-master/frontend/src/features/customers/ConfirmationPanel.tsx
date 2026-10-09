@@ -89,9 +89,12 @@ export function ConfirmationPanel({
   stamp,
 }: ConfirmationPanelProps) {
   // Focus the panel so Tab starts there. Moves focus only and sets no state;
-  // re-runs only if the dialog hands over a different ref object.
+  // re-runs only if the dialog hands over a different ref object. No focus
+  // scroll: the dialog mounts the panel in a new scroll body that opens at
+  // its top, and the focus scroll of a panel taller than that body would
+  // scroll the body off its top.
   useEffect(() => {
-    containerRef.current?.focus();
+    containerRef.current?.focus({ preventScroll: true });
   }, [containerRef]);
 
   const standardizedId = `${idPrefix}-standardized`;

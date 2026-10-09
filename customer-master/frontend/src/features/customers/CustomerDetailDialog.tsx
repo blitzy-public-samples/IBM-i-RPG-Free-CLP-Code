@@ -25,6 +25,7 @@
  * `features/states/`, this folder, React, `react-dom` and react-query.
  */
 import { useEffect, useId, useRef, useState } from 'react';
+import type { MouseEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { CUSTOMER_FIELD_NAMES, customersApi } from '../../api/customers';
@@ -77,6 +78,8 @@ export interface CustomerDetailDialogProps {
    *   (F3, PageUp, PageDown, …) shows DEM0003 and the window stays;
    * - F12 or Escape on the edit or add form, or while the stored customer is
    *   still being read (at a confirmation they re-read or clear instead);
+   * - an opening read that failed other than with 404 DEM0599, once its
+   *   alert is shown (a missing row opens the window on blank fields);
    * - a successful commit, with its {@link DetailCloseResult}.
    * Called without an argument unless a commit succeeded. The caller closes
    * the window by setting `open` to false.
@@ -112,13 +115,67 @@ const FUNCTION_TEXT: Readonly<Record<DetailMode, string>> = {
   add: 'Add Customer',
 };
 
+/**
+ * What the window is waiting for: a read of the stored customer (the opening
+ * read, F5, and F12 or F5 at the edit confirmation), a review (Enter on the
+ * form, and Re-apply my changes), or a save (PUT or POST at the confirmation).
+ */
+type PendingKind = 'load' | 'review' | 'save';
+
+/** One pending request. Each request gets an object of its own, so its progress waits {@link PROGRESS_DELAY_MS} anew. */
+interface PendingRequest {
+  kind: PendingKind;
+}
+
+/** The busy line of each kind of pending request, written as the search list's "Searching...". */
+const PENDING_TEXT: Readonly<Record<PendingKind, string>> = {
+  load: 'Loading customer...',
+  review: 'Checking...',
+  save: 'Saving...',
+};
+
+/**
+ * How long a request runs before its progress shows. An answer that comes
+ * sooner, as most do on a fast network, replaces the screen first, so no
+ * progress text flashes for a frame and no live region announces it.
+ */
+const PROGRESS_DELAY_MS = 300;
+
+/**
+ * `request` once it has stayed pending for {@link PROGRESS_DELAY_MS}, else
+ * null. Null (nothing pending) hides the progress in the same render; a new
+ * request object starts the wait again.
+ */
+function useShownProgress(request: PendingRequest | null): PendingRequest | null {
+  const [shown, setShown] = useState<PendingRequest | null>(null);
+  useEffect(() => {
+    if (request === null) {
+      return;
+    }
+    const timer = window.setTimeout(() => setShown(request), PROGRESS_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [request]);
+  return request !== null && shown === request ? request : null;
+}
+
+/**
+ * A press on the opening read's shell or scrim keeps focus where it is, as a
+ * press on a window's backdrop does: on the field or button that asked for
+ * the window, which the window then returns focus to when it closes.
+ */
+function keepFocus(event: MouseEvent<HTMLDivElement>): void {
+  event.preventDefault();
+}
+
 /** The review purpose of each changing function: DEM0000 follows EDIT, DEM0009 follows ADD. */
 const REVIEW_PURPOSE: Readonly<Record<'edit' | 'add', ReviewPurpose>> = {
   edit: 'EDIT',
   add: 'ADD',
 };
 
-/** Every field blank: a customer that could not be read, or a row that vanished on F5. */
+/** Every field blank: a customer whose opening read found no row, or a row that vanished on F5. */
 const BLANK: Readonly<CustomerFields> = Object.freeze({
   active: '',
   name: '',
@@ -147,6 +204,11 @@ function hasId(id: string | undefined): id is string {
   return id !== undefined && id !== '';
 }
 
+/** A 404 DEM0599: the customer read or updated no longer exists. */
+function isMissingRow(error: unknown): boolean {
+  return isApiError(error) && error.status === STATUS_NOT_FOUND;
+}
+
 /** Exactly the nine customer data fields of a stored customer, never its id, stamp or version. */
 function fieldsOf(source: CustomerResponse): CustomerFields {
   const fields: CustomerFields = {};
@@ -171,7 +233,7 @@ function errorsByField(errors: readonly FieldError[]): Partial<Record<CustomerFi
   return byField;
 }
 
-/** The fields the form opens with: the stored record, the cleared add form, or blanks when nothing could be read. */
+/** The fields the form opens with: the stored record, the cleared add form, or blanks when no row was found. */
 function initialDraft(mode: DetailMode, record: CustomerResponse | null): CustomerFields {
   if (mode === 'add') {
     return { ...EMPTY_ADD };
@@ -192,7 +254,7 @@ interface SessionProps {
 /**
  * One opening of the window. Add starts at once from the cleared form; edit
  * and display read the stored customer first. Without an id there is nothing
- * to read, so the window opens on blank fields, as after a failed read.
+ * to read, so the window opens on blank fields, as after a read that finds no row.
  */
 function DetailSession({ mode, custId, onClose }: SessionProps) {
   if (mode === 'add' || !hasId(custId)) {
@@ -207,10 +269,13 @@ function DetailSession({ mode, custId, onClose }: SessionProps) {
  *
  * The window body takes the result as the initial value of its own state
  * (useState initializers) and is mounted only once the read has settled, so
- * query data is never copied into state from an effect. A failed read shows
- * its problem (404 → DEM0599 "Customer deleted. Exit & redo search.") and
- * still opens the window, on blank fields: editable in edit mode, protected
- * in display mode. The read is not repeated behind the user's back: no
+ * query data is never copied into state from an effect. A read that finds no
+ * row (404 DEM0599 "Customer deleted. Exit & redo search.") shows its message
+ * and still opens the window, on blank fields: editable in edit mode,
+ * protected in display mode. Any other failure (500 DEM9999, 502, a lost
+ * connection's synthetic DEM9999, 400, 401, 403) shows its alert and closes
+ * the window with `onClose()` without ever mounting it, so blank fields
+ * never pass for a stored customer. The read is not repeated behind the user's back: no
  * retry, no refetch on focus or reconnect, and nothing kept once the window
  * closes; F5 in edit mode is the one way to read again.
  *
@@ -223,11 +288,12 @@ function DetailSession({ mode, custId, onClose }: SessionProps) {
  * still answer. Under React StrictMode in development the simulated unmount
  * aborts the first read and the remount sends one more; production builds
  * send one read per opening. The abort's own rejection, and any read that
- * settles after its window closed, presents nothing, so no late DEM0599 or
- * other alert reaches the screen now displayed; it still rejects, so the
- * query settles and is then dropped. An answer that did arrive while the
- * window is open is still presented, even when handling it aborted the
- * read: a 401 whose sign-out cancelled the query shows APP0401.
+ * settles after its window closed, presents nothing and closes nothing, so
+ * no late DEM0599 or other alert reaches the screen now displayed and
+ * `onClose` is not called again; it still rejects, so the query settles and
+ * is then dropped. An answer that did arrive while the window is open is
+ * still presented, even when handling it aborted the read: a 401 whose
+ * sign-out cancelled the query shows APP0401, and closes the window.
  */
 function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId: string }) {
   const { present } = useProblemPresenter();
@@ -241,20 +307,32 @@ function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId
       mounted.current = false;
     };
   }, []);
+  // The latest presenter and onClose, for the query function, which settles
+  // long after the render that started it: a presenter from that render
+  // would format a problem without a detail (a lost connection's synthetic
+  // DEM9999) with the catalog as it was then, possibly not loaded yet.
+  // Written after each commit, read only in the query function.
+  const latest = useRef({ present, onClose });
+  useEffect(() => {
+    latest.current = { present, onClose };
+  });
   const query = useQuery({
     queryKey: ['customers', 'detail', custId, opening],
     queryFn: async ({ signal }): Promise<CustomerResponse> => {
       try {
         return await customersApi.get(custId, signal);
       } catch (error) {
-        // Shown only while this opening is mounted, and never when the
-        // rejection is the abort's own: after a close the screen now
-        // displayed did not ask for it, and StrictMode's aborted first read
-        // is followed by the remount's. An answer that did arrive, such as a
-        // 401 whose sign-out cancelled this query, is still shown.
+        // Shown, and the window closed, only while this opening is mounted,
+        // and never when the rejection is the abort's own: after a close the
+        // screen now displayed did not ask for it, and StrictMode's aborted
+        // first read is followed by the remount's. An answer that did arrive,
+        // such as a 401 whose sign-out cancelled this query, is still shown.
         const abandoned = signal.aborted && error === signal.reason;
         if (mounted.current && !abandoned) {
-          present(error);
+          latest.current.present(error);
+          if (!isMissingRow(error)) {
+            latest.current.onClose();
+          }
         }
         throw error;
       }
@@ -267,32 +345,53 @@ function StoredCustomerLoader({ mode, custId, onClose }: SessionProps & { custId
   });
 
   if (query.isPending) {
-    return <PendingScope onClose={onClose} />;
+    return <PendingScope mode={mode} onClose={onClose} />;
   }
-  // Mounted once per opening: a successful and a failed read lead to the
-  // same element, so the seeded state is never replaced while the window
+  // A failure other than a missing row has already been shown and has asked
+  // the caller to close: nothing is displayed until it does.
+  if (query.isError && !isMissingRow(query.error)) {
+    return null;
+  }
+  // Mounted once per opening: a successful read and a missing row lead to
+  // the same element, so the seeded state is never replaced while the window
   // stays open.
   return <DetailWindow key="settled" mode={mode} custId={custId} initialRecord={query.data ?? null} onClose={onClose} />;
 }
 
 /**
- * The key scope while the stored customer is being read and no window is
- * shown yet. It is the topmost scope from the moment the user asked for the
+ * What stands in for the window while the stored customer is being read: its
+ * key scope, and a loading shell over the screen beneath.
+ *
+ * Keys. The scope is the topmost from the moment the user asked for the
  * window, so no command key the scope contract dispatches (F1–F24, Escape,
  * PageUp, PageDown, and Enter in a text or option field) reaches the search
  * list's scope. F12 and Escape close; Enter, PageUp, PageDown and every other
  * function key are ignored, because nothing is displayed for them to act on,
  * and prevented, so paging never scrolls the screen beneath either. Keys the
  * contract leaves native (Enter or Space on a focused button, Tab, printable
- * characters, modifier chords) and mouse clicks still act on the screen
- * beneath, which is not inert until the window opens. A row action button
- * pressed then is its option plus Enter, as at any time: a new search when
- * the criteria changed, else a fresh option walk over every option still
- * typed, which keeps this window, and its read, only when the walk's first
- * option is this customer in this mode. Removed as soon as the read settles
- * and the window takes over with its own scope.
+ * characters, modifier chords) still act on the screen beneath, which is not
+ * inert until the window opens. A row action button pressed then is its
+ * option plus Enter, as at any time: a new search when the criteria changed,
+ * else a fresh option walk over every option still typed, which keeps this
+ * window, and its read, only when the walk's first option is this customer
+ * in this mode.
+ *
+ * Shell. The window's scrim at once, then, once the read has taken
+ * {@link PROGRESS_DELAY_MS}, the window's frame with its header (this
+ * function and the signed-in user) and the busy line "Loading customer...";
+ * until then the frame is laid out but transparent, so a quick read flashes
+ * nothing. The shell is not a modal window: no `<dialog>`, no role, no ids
+ * and no focus move, so focus stays on the field or button that asked for
+ * the window, which the window captures when it opens and returns focus to
+ * when it closes. A press on the scrim or the frame keeps that focus and
+ * reaches nothing beneath. The header is `aria-busy`; the busy line, outside
+ * it, is a polite live region (not role="status", which is the toast
+ * host's) rendered empty first and given its text later, so it is announced.
+ * Removed as soon as the read settles and the window takes over with its own
+ * scope.
  */
-function PendingScope({ onClose }: Pick<SessionProps, 'onClose'>) {
+function PendingScope({ mode, onClose }: Pick<SessionProps, 'mode' | 'onClose'>) {
+  const { username } = useAuth();
   useFunctionKeys(
     {
       Enter: ignoreKey,
@@ -302,7 +401,24 @@ function PendingScope({ onClose }: Pick<SessionProps, 'onClose'>) {
     },
     { onUnbound: ignoreKey },
   );
-  return null;
+  const [reading] = useState<PendingRequest>(() => ({ kind: 'load' }));
+  const shown = useShownProgress(reading) !== null;
+  return (
+    <>
+      <div className="dialog__backdrop dialog__backdrop--loading" aria-hidden="true" onMouseDown={keepFocus} />
+      <div
+        className={shown ? 'dialog dialog--detail dialog--loading' : 'dialog dialog--detail dialog--loading dialog--concealed'}
+        onMouseDown={keepFocus}
+      >
+        <div aria-busy="true">
+          <ScreenHeader functionText={FUNCTION_TEXT[mode]} user={username ?? undefined} />
+        </div>
+        <p className="busy-line" aria-live="polite" aria-atomic="true">
+          {shown ? PENDING_TEXT[reading.kind] : null}
+        </p>
+      </div>
+    </>
+  );
 }
 
 function ignoreKey(): void {
@@ -347,7 +463,8 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const { present } = useProblemPresenter();
 
   // The stored record the stamp and the conflict comparison refer to; null in
-  // add mode, after a failed read and after a vanished-row clear.
+  // add mode, after an opening read that found no row and after a
+  // vanished-row clear.
   const [record, setRecord] = useState<CustomerResponse | null>(initialRecord);
   // The version the next PUT is conditional on. It survives a vanished-row
   // clear, so a later save gets the server's 404 DEM0599 rather than a 400.
@@ -362,13 +479,17 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
-  // A review, reload or write is pending: the rendered side of `inFlight`.
-  // It sets the editable form's inputs read-only (CustomerForm `pending`,
-  // which keeps their element and editable look, so focus stays and nothing
-  // flashes) and disables every key-bar entry whose handler ignores a press
-  // meanwhile, so nothing is typed or pressed that the response would
-  // silently replace or swallow.
-  const [busy, setBusy] = useState(false);
+  // The review, reload or write that is pending, if any: the rendered side
+  // of `inFlight`. While one is (`busy`) the editable form's inputs are
+  // read-only (CustomerForm `pending`, which keeps their element and editable
+  // look, so focus stays and nothing flashes) and every key-bar entry whose
+  // handler ignores a press meanwhile is disabled, so nothing is typed or
+  // pressed that the response would silently replace or swallow; once it has
+  // taken noticeably long (`progress`), the busy line says what the window is
+  // waiting for.
+  const [pending, setPending] = useState<PendingRequest | null>(null);
+  const busy = pending !== null;
+  const progress = useShownProgress(pending);
   // Bumped whenever the form is reloaded, cleared or shown again after the
   // confirmation; as the form's key it remounts the form, which re-applies
   // its initial focus (DSPATR(PC)).
@@ -377,8 +498,9 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // Refs: written by callback refs, effects and handlers; never read during render.
   const inputs = useRef<Partial<Record<CustomerFieldName, FormFieldElement | null>>>({});
   const nameRef = useRef<FormFieldElement | null>(null);
-  // The window body: the key container outside the confirmation, and the
-  // Display window's initial focus.
+  // The window's content, which wraps its header, scrolling body and footer:
+  // the key container outside the confirmation, and the Display window's
+  // initial focus.
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLDivElement | null>(null);
   // A request is in flight. Read by the key handlers and by `changeField`,
@@ -440,12 +562,13 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
-  function begin(): boolean {
+  /** Marks a request of `kind` as started, unless one is already in flight (then false: send nothing). */
+  function begin(kind: PendingKind): boolean {
     if (inFlight.current) {
       return false;
     }
     inFlight.current = true;
-    setBusy(true);
+    setPending({ kind });
     return true;
   }
 
@@ -457,7 +580,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   function finish(): void {
     inFlight.current = false;
     if (alive.current) {
-      setBusy(false);
+      setPending(null);
     }
   }
 
@@ -497,7 +620,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
    * and the entries stay, back on the form, so F5 can simply be pressed again.
    */
   async function reloadStored(): Promise<void> {
-    if (!hasId(custId) || !begin()) {
+    if (!hasId(custId) || !begin('load')) {
       return;
     }
     try {
@@ -537,7 +660,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
    *   Edit_SD_STATE had already moved the State into the program field.
    */
   async function runReview(fields: CustomerFields): Promise<void> {
-    if (mode === 'display' || !begin()) {
+    if (mode === 'display' || !begin('review')) {
       return;
     }
     // Each screen cycle starts without the previous cycle's highlights, as
@@ -579,7 +702,8 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
    * Enter at the confirmation: UpdateRecd (edit) or AddRecd (add) with
    * exactly the reviewed values.
    *
-   * An edit whose opening read failed has no version to make the update
+   * An edit whose opening read found no row (404, the one failed read after
+   * which the window still opens) has no version to make the update
    * conditional on, so it re-reads the record instead of sending a PUT: an
    * update is never sent for a record whose stored state the user has not
    * seen.
@@ -605,7 +729,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   }
 
   async function save(write: () => Promise<DetailCloseResult>, values: CustomerFields): Promise<void> {
-    if (!begin()) {
+    if (!begin('save')) {
       return;
     }
     try {
@@ -803,7 +927,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // comparison push their own scopes on top while open, which suspends this
   // one until they close (search → detail → picker). Enter is a command on
   // the text inputs and on the container: the confirmation panel while
-  // confirming (it takes focus on mount), the window body otherwise (a
+  // confirming (it takes focus on mount), the window's content otherwise (a
   // Display window opens with focus there). On a protected value's read-only
   // textarea Enter keeps its native action.
   useFunctionKeys(keys, {
@@ -859,7 +983,7 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
       open
       labelledBy={LABELLED_BY}
       initialFocusRef={editable ? nameRef : bodyRef}
-      className="dialog dialog--detail"
+      className={busy ? 'dialog dialog--detail dialog--busy' : 'dialog dialog--detail'}
     >
       <div
         ref={bodyRef}
@@ -868,34 +992,54 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
         aria-busy={busy || undefined}
       >
         <ScreenHeader id={HEADER_ID} functionText={FUNCTION_TEXT[mode]} user={username ?? undefined} />
-        {confirming ? (
-          <ConfirmationPanel
-            idPrefix={CONFIRM_ID_PREFIX}
-            custId={custId ?? ''}
-            values={reviewed}
-            standardized={standardized}
-            containerRef={confirmRef}
-            stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
-          />
-        ) : (
-          <CustomerForm
-            key={formKey}
-            idPrefix={FORM_ID_PREFIX}
-            custId={record?.custId ?? custId ?? ''}
-            values={draft}
-            onChange={editable ? changeField : keepDisplayedValue}
-            readOnly={!editable}
-            pending={busy}
-            errors={errors}
-            inputRef={bindInput}
-            initialFocusField={editable ? (firstErrorField ?? 'name') : undefined}
-            stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
-          />
-        )}
+        {/*
+          The window's scrolling part, between the fixed header and footer.
+          Keyed by phase, so the confirmation and the form each open in a new
+          body scrolled to its top, never at the offset the other phase left.
+        */}
+        <div className="screen-body" key={confirming ? 'confirm' : 'form'}>
+          {confirming ? (
+            <ConfirmationPanel
+              idPrefix={CONFIRM_ID_PREFIX}
+              custId={custId ?? ''}
+              values={reviewed}
+              standardized={standardized}
+              containerRef={confirmRef}
+              stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
+            />
+          ) : (
+            <CustomerForm
+              key={formKey}
+              idPrefix={FORM_ID_PREFIX}
+              custId={record?.custId ?? custId ?? ''}
+              values={draft}
+              onChange={editable ? changeField : keepDisplayedValue}
+              readOnly={!editable}
+              pending={busy}
+              errors={errors}
+              inputRef={bindInput}
+              initialFocusField={editable ? (firstErrorField ?? 'name') : undefined}
+              stamp={record !== null ? { chgTime: record.chgTime, chgUser: record.chgUser } : null}
+            />
+          )}
+        </div>
         {/* MTNCUSTD SFT_FKEY: the underlined brand on row 14, the key legend on row 15. */}
-        <p className="footer-brand">Demo Corp of America</p>
-        <FunctionKeyBar keys={keyBar} />
+        <footer className="screen-footer">
+          <p className="footer-brand">Demo Corp of America</p>
+          <FunctionKeyBar keys={keyBar} />
+        </footer>
       </div>
+      {/*
+        The busy line, the window's bottom status line: what a pending request
+        waits for, once it has taken PROGRESS_DELAY_MS, and empty otherwise.
+        Always rendered with its line reserved, so the window keeps its size
+        and place, and registered before any text arrives, so each text is
+        announced. A polite live region (not role="status", which is the toast
+        host's), outside the aria-busy body, which would hold back its news.
+      */}
+      <p className="busy-line" aria-live="polite" aria-atomic="true">
+        {progress !== null ? PENDING_TEXT[progress.kind] : null}
+      </p>
       <StatePicker open={pickerOpen} onSelect={stateSelected} onCancel={stateCancelled} />
       {conflict !== null ? (
         <ConflictCompareDialog

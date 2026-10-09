@@ -425,6 +425,30 @@ describe('StatePicker', () => {
       expect(within(dialog).getByRole('heading', { name: DIALOG_NAME })).toBeInTheDocument();
       expect(within(dialog).getByText('Sorted by: Name')).toBeInTheDocument();
       expect(within(dialog).getByText('1=Select')).toBeInTheDocument();
+      // PMTSTATED row 4: the option legend and the order share one line.
+      const legend = within(dialog).getByText('1=Select').parentElement;
+      expect(legend).toHaveClass('state-picker__legend');
+      expect(within(dialog).getByText('Sorted by: Name').parentElement).toBe(legend);
+      // The list box reserves the six SFLPAG rows; the columns come from the colgroup.
+      expect(table.parentElement).toHaveClass('scroll-region', 'state-picker__list');
+      expect(table).toHaveClass('results-table--fixed', 'results-table--states');
+      expect(Array.from(table.querySelectorAll('colgroup > col')).map((column) => column.getAttribute('class'))).toEqual([
+        'col--opt',
+        'col--code',
+        null,
+        'col--actions',
+      ]);
+      // Code and Name stay on one line (SF_NAME 30A at PMTSTATED row 6), so every row keeps one height.
+      const [, ...bodyRows] = within(table).getAllByRole('row');
+      expect(bodyRows).toHaveLength(PAGE_SIZE);
+      for (const row of bodyRows) {
+        expect(within(row).getAllByRole('cell').map((cell) => cell.className)).toEqual([
+          '',
+          'cell--nowrap',
+          'cell--nowrap',
+          'cell--actions',
+        ]);
+      }
       expect(within(dialog).getByText('Demo Corp of America')).toBeInTheDocument();
       expect(within(dialog).getByText('More...')).toBeInTheDocument();
       expect(within(dialog).getByRole('button', { name: 'F7=By Code' })).toBeInTheDocument();
@@ -969,6 +993,99 @@ describe('StatePicker', () => {
         { nameContains: 'CAR', sort: 'code' },
         { nameContains: 'YORK', sort: 'code' },
       ]);
+    });
+
+    it('keeps one status line in every state, the same element throughout', async () => {
+      const { user, dialog, filter } = await openPicker();
+      const status = statusLine(dialog);
+      expect(status).toHaveClass('list-status');
+
+      await user.keyboard('{F5}');
+      expect(statusLine(dialog)).toBe(status);
+      expect(status).toHaveClass('list-status');
+      expect(status).toBeEmptyDOMElement();
+
+      await user.type(filter, 'zzz');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(within(status).getByText(NO_MATCH_LABEL)).toBeInTheDocument());
+      expect(statusLine(dialog)).toBe(status);
+    });
+
+    it('a changed filter keeps the page on screen, inert and busy, until it answers; nothing acts on those rows meanwhile', async () => {
+      const firstPage = (await serverRows('', 'name')).slice(0, PAGE_SIZE);
+      const news = await serverRows('NEW', 'name');
+
+      const { user, dialog, table, filter, onSelect } = await openPicker();
+      const held = holdStatesAnswer(() => HttpResponse.json(news));
+      const body = table.querySelector('tbody');
+
+      await user.type(filter, 'new');
+      await user.keyboard('{Enter}');
+
+      const status = statusLine(dialog);
+      expect(within(status).getByText(LOADING_LABEL)).toHaveClass('paging-indicator');
+      expect(table).toHaveAttribute('aria-busy', 'true');
+      expect(dataRows(table)).toEqual(firstPage);
+      expect(body).toHaveAttribute('inert');
+      expect(filter).toHaveFocus();
+
+      // The held rows' Select, option field and option 1 with Enter do nothing.
+      const first = rowAt(firstPage, 0);
+      fireEvent.click(within(table).getByRole('button', { name: `Select ${first.name}` }));
+      const option = within(table).getByRole('textbox', { name: `Option for ${first.name}` });
+      fireEvent.change(option, { target: { value: '1' } });
+      expect(option).toHaveValue('');
+      await user.keyboard('{Enter}');
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(stateRequests).toHaveLength(2);
+
+      await act(async () => {
+        held.release();
+        await held.settled();
+      });
+
+      await waitFor(() => expect(dataRows(table)).toEqual(news));
+      expect(body).not.toHaveAttribute('inert');
+      expect(table).toHaveAttribute('aria-busy', 'false');
+      expect(within(status).getByText('Showing 1 to 4 of 4 states, sorted by Name.')).toBeInTheDocument();
+      expect(requestedQueries()).toEqual([
+        { nameContains: '', sort: 'name' },
+        { nameContains: 'NEW', sort: 'name' },
+      ]);
+    });
+
+    it('F7 keeps the page on screen, inert, until the new order answers; F5 meanwhile empties the list at once', async () => {
+      const byName = await serverRows('', 'name');
+      const byCode = await serverRows('', 'code');
+      const secondPage = byName.slice(PAGE_SIZE, 2 * PAGE_SIZE);
+
+      const { user, dialog, table } = await openPicker();
+      await user.keyboard('{PageDown}');
+      expect(dataRows(table)).toEqual(secondPage);
+      const held = holdStatesAnswer(() => HttpResponse.json(byCode));
+
+      await user.keyboard('{F7}');
+
+      expect(within(statusLine(dialog)).getByText(LOADING_LABEL)).toBeInTheDocument();
+      expect(dataRows(table)).toEqual(secondPage);
+      expect(table.querySelector('tbody')).toHaveAttribute('inert');
+      expect(within(dialog).getByText('Sorted by: Code')).toBeInTheDocument();
+
+      await user.keyboard('{F5}');
+
+      // No stale rows: F5's list is empty at once, and so is its status line.
+      expect(dataRows(table)).toEqual([]);
+      expect(statusLine(dialog)).toBeEmptyDOMElement();
+      expect(table.querySelector('tbody')).not.toHaveAttribute('inert');
+      expect(table).toHaveAttribute('aria-busy', 'false');
+
+      await act(async () => {
+        held.release();
+        await held.settled();
+      });
+
+      expect(dataRows(table)).toEqual([]);
+      expect(statusLine(dialog)).toBeEmptyDOMElement();
     });
   });
 

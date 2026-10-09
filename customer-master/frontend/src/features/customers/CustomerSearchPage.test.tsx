@@ -1733,8 +1733,10 @@ describe('CustomerSearchPanel list status and option errors', () => {
     const held = heldAnswer();
     holdSearches((query) => query.cursor === null, held);
     const user = await renderSearchPage('MAINTENANCE');
-    // The empty region stands for ERASE(SFL): no list has been loaded.
+    // The empty region stands for ERASE(SFL): no list has been loaded. Its
+    // class still reserves the line a label takes, so nothing below moves.
     expect(listStatus()).toHaveAttribute('aria-atomic', 'true');
+    expect(listStatus()).toHaveClass('list-status');
     expect(listStatus()).toBeEmptyDOMElement();
     expect(resultsTable()).not.toHaveAttribute('aria-busy');
 
@@ -1779,6 +1781,8 @@ describe('CustomerSearchPanel list status and option errors', () => {
     expect(resultsTable()).toHaveAttribute('aria-busy', 'true');
     expect(shownNames()).toEqual(pageNames(ACTIVE_ROWS, 0));
     expect(pagingIndicator()).toHaveTextContent('More...');
+    // One line: the pending label comes first, then the indicator it shares the line with.
+    expect(Array.from(listStatus().children)).toEqual([pending, pagingIndicator()]);
     expect(statusRegion()).toBeEmptyDOMElement();
 
     await held.release();

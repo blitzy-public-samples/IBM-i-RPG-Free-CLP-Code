@@ -130,45 +130,55 @@ function ConflictCompareBody({ original, mine, current, onRefresh, onReapply }: 
     >
       <div ref={bodyRef}>
         <ScreenHeader id={HEADER_ID} functionText="Record Changed" user={username ?? undefined} />
-        <p id={MESSAGE_ID} className="conflict-message">
-          {format('DEM1002')}
-        </p>
-        <table className="results-table">
-          <caption>Your changes compared with the current record</caption>
-          <thead>
-            <tr>
-              <th scope="col">Field</th>
-              <th scope="col">Your values</th>
-              <th scope="col">Current record</th>
-              <th scope="col">Differs</th>
-            </tr>
-          </thead>
-          <tbody>
-            {CUSTOMER_FORM_FIELDS.map(({ field, label }) => {
-              const yours = fieldText(mine, field);
-              const stored = fieldText(current, field);
-              const differs = yours !== stored;
-              return (
-                <tr key={field} className={differs ? 'conflict-row--differs' : undefined}>
-                  <th scope="row">{label}</th>
-                  <td>{yours}</td>
-                  <td>{stored}</td>
-                  <td>{differs ? 'Changed' : ''}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <div className="conflict-actions">
-          {/* onRefresh is called with no arguments, as the F12 binding calls it, never with the click event. */}
-          <button type="button" ref={refreshButtonRef} aria-describedby={MESSAGE_ID} onClick={() => onRefresh()}>
-            Refresh
-          </button>
-          <button type="button" onClick={reapply}>
-            Re-apply my changes
-          </button>
+        {/* The window's scrolling part, between the fixed header and footer. */}
+        <div className="screen-body">
+          <p id={MESSAGE_ID} className="conflict-message">
+            {format('DEM1002')}
+          </p>
+          <table className="results-table">
+            <caption>Your changes compared with the current record</caption>
+            <thead>
+              <tr>
+                <th scope="col">Field</th>
+                <th scope="col">Your values</th>
+                <th scope="col">Current record</th>
+                <th scope="col">Differs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {CUSTOMER_FORM_FIELDS.map(({ field, label }) => {
+                const yours = fieldText(mine, field);
+                const stored = fieldText(current, field);
+                const differs = yours !== stored;
+                return (
+                  <tr key={field} className={differs ? 'conflict-row--differs' : undefined}>
+                    <th scope="row">{label}</th>
+                    <td>{yours}</td>
+                    <td>{stored}</td>
+                    <td>{differs ? 'Changed' : ''}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-        <FunctionKeyBar keys={[{ key: 'F12', label: 'F12=Cancel', onPress: onRefresh }]} />
+        {/*
+          The actions sit in the fixed footer with the key legend, so focusing
+          Refresh on open never scrolls the DEM1002 text out of view, and both
+          actions stay visible however far the comparison scrolls.
+        */}
+        <footer className="screen-footer">
+          <div className="conflict-actions">
+            {/* onRefresh is called with no arguments, as the F12 binding calls it, never with the click event. */}
+            <button type="button" ref={refreshButtonRef} aria-describedby={MESSAGE_ID} onClick={() => onRefresh()}>
+              Refresh
+            </button>
+            <button type="button" onClick={reapply}>
+              Re-apply my changes
+            </button>
+          </div>
+          <FunctionKeyBar keys={[{ key: 'F12', label: 'F12=Cancel', onPress: onRefresh }]} />
+        </footer>
       </div>
     </Dialog>
   );

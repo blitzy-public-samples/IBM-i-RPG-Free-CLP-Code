@@ -77,15 +77,29 @@
    * Height of the toast band, the strip above the bottom --space-4 margin
    * where messages show. Every screen and window keeps it clear at all times,
    * so a message that fits in the band never hides a focused control, even
-   * one focused just before the message renders. A catalog message (at most
-   * 48 characters) wraps to two lines at a 320px viewport, about 66px tall:
-   * 10rem holds a status and an alert together, and 30vh keeps most of a
-   * short viewport usable while still holding one message from 256px tall
-   * and two from about 467px. A message longer than the band continues below
-   * it and comes into view as the page scrolls to its end; while the page is
-   * scrolled there, the message reaches above the band, over an open window
-   * and any control focused in it, by as much as it is longer than the band
-   * (toast clearance in global.css).
+   * one focused just before the message renders. A one-line toast is about
+   * 42px tall (a 24px line plus its padding and borders), each further line
+   * adds 24px, and two messages (a status and an alert, or two alerts) show
+   * 8px apart; an empty live region adds no space (.toast-region in
+   * global.css). A catalog message (at most 48 characters) wraps to two
+   * lines at a 320px viewport, about 66px tall: 10rem holds two of them,
+   * and 30vh keeps most of a short viewport usable while still holding one
+   * message from 220px tall and two from about 467px. From 40rem wide
+   * (below) every catalog message fits on one line, so two need
+   * 2 x 42px + 8px = 92px: 6rem holds two and leaves the windows and the
+   * framed search page the rest of the height. Messages longer than the
+   * band together (from 40rem wide, any third message; at any width, one
+   * message longer than the band) continue below it and come into view as
+   * the page scrolls to its end; while it is scrolled there, they reach
+   * above the band, over an open window and any control focused in it, by
+   * as much as they are longer than the band (toast clearance in global.css).
    */
   --toast-band-block-size: min(10rem, 30vh);
+}
+
+/* The 40rem breakpoint is literal: a media query cannot read a custom property. */
+@media (min-width: 40rem) {
+  :root {
+    --toast-band-block-size: min(6rem, 30vh);
+  }
 }

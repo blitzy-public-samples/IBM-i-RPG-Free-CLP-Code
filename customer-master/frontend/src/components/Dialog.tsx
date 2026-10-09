@@ -38,7 +38,9 @@ export type DialogProps = {
   /**
    * Id, or space-separated ids, of the element(s) that name the window,
    * normally the ScreenHeader title and function text, for example
-   * `"customer-detail-title customer-detail-function"`.
+   * `"customer-detail-title customer-detail-function"`. While a window nested
+   * in this one is open, these elements stay live (never `inert`), so this
+   * window keeps its accessible name; they hold text, not controls.
    */
   labelledBy: string;
   /**
@@ -526,15 +528,24 @@ type OpenWindow = {
 /**
  * Everything beneath the topmost window that isolating it touches:
  * `background`, made inert; `liveRegions`, kept live because inert content
- * is not announced; and `walked`, the containers around those live regions,
- * kept live so the live regions inside them stay live while their other
- * content becomes background.
+ * is not announced; `labels`, the elements that name the windows it is nested
+ * in ({@link enclosingWindowLabels}), kept live because inert content drops
+ * out of the accessibility tree and would take those windows' accessible
+ * names with it; and `walked`, the containers around those live regions and
+ * labels, kept live so what they hold stays live while their other content
+ * becomes background.
  */
 type Isolation = {
   background: Set<Element>;
   liveRegions: Set<Element>;
+  labels: Set<Element>;
   walked: Set<Element>;
 };
+
+/** An isolation that touches nothing, for when no window is open. */
+function emptyIsolation(): Isolation {
+  return { background: new Set(), liveRegions: new Set(), labels: new Set(), walked: new Set() };
+}
 
 /**
  * Modality registry, shared by every window on the page: the open windows in
@@ -553,12 +564,12 @@ let backgroundObserver: MutationObserver | null = null;
 
 /**
  * Capture-phase click listener on everything beneath the topmost window:
- * the background, and the live regions and walked containers that stay
- * live. `inert` keeps pointer presses and focus out of the background, but
- * browsers still run the access key of an inert element, script can still
- * call `click()` on one, and nothing at all stops either inside an element
- * that stays live; each dispatches a click, which this stops before it
- * reaches the element's handlers or its default action. A capture listener
+ * the background, and the live regions, labels and walked containers that
+ * stay live. `inert` keeps pointer presses and focus out of the background,
+ * but browsers still run the access key of an inert element, script can
+ * still call `click()` on one, and nothing at all stops either inside an
+ * element that stays live; each dispatches a click, which this stops before
+ * it reaches the element's handlers or its default action. A capture listener
  * on `document`, such as the toast host's clear-on-click, runs before this
  * one and still sees the click.
  */
@@ -571,10 +582,10 @@ function blockActivation(event: Event): void {
  * Capture-phase `focusin` listener on the elements beneath the topmost
  * window that can still take focus because they are never made inert: its
  * ancestors (an enclosing lower `<dialog>`, a focusable wrapper), live
- * regions and the containers walked around them. Focus that lands inside
- * the topmost window is remembered there; focus that lands anywhere else,
- * by script or by an access key, is moved back into it
- * ({@link recoverFocus}).
+ * regions, the labels of enclosing windows and the containers walked around
+ * them. Focus that lands inside the topmost window is remembered there;
+ * focus that lands anywhere else, by script or by an access key, is moved
+ * back into it ({@link recoverFocus}).
  */
 function containFocus(event: Event): void {
   const top = isolatedWindow;
@@ -648,27 +659,61 @@ function topmostWindow(): OpenWindow | undefined {
 }
 
 /**
- * Adds `element` to the background of `isolation` unless it never renders
- * or is a live region, which is kept live instead. An element that contains
- * a live region is not taken whole: it is kept live as a walked container,
- * and its children are considered one by one, so everything around the live
- * region still becomes inert.
+ * The elements that name the windows `top` is nested in: every element an
+ * `aria-labelledby` id of an open window around `top` resolves to (the
+ * detail window's ScreenHeader title and function line around a nested State
+ * picker). The `<dialog>` of such a window stays live, but a browser leaves
+ * inert content out of the accessibility tree, name computation included, so
+ * these elements must stay live too or that window loses its name while `top`
+ * is open. An element that contains `top` or lies inside it is never beneath
+ * `top` and is left out.
  */
-function collectBackground(element: Element, isolation: Isolation): void {
+function enclosingWindowLabels(top: OpenWindow): Set<Element> {
+  const labels = new Set<Element>();
+  const doc = top.dialog.ownerDocument;
+  for (const entry of openWindows) {
+    if (entry === top || !entry.dialog.isConnected || !entry.dialog.contains(top.dialog)) {
+      continue;
+    }
+    const ids = (entry.dialog.getAttribute('aria-labelledby') ?? '').split(/\s+/);
+    for (const id of ids) {
+      const label = id === '' ? null : doc.getElementById(id);
+      if (label !== null && !label.contains(top.dialog) && !top.dialog.contains(label)) {
+        labels.add(label);
+      }
+    }
+  }
+  return labels;
+}
+
+/**
+ * Adds `element` to the background of `isolation` unless it never renders,
+ * is one of `labels` ({@link enclosingWindowLabels}) or is a live region;
+ * a label or live region is kept live instead. An element that contains a
+ * label or a live region is not taken whole: it is kept live as a walked
+ * container, and its children are considered one by one, so everything
+ * around the label or live region still becomes inert.
+ */
+function collectBackground(element: Element, isolation: Isolation, labels: ReadonlySet<Element>): void {
   if (NOT_RENDERED.has(element.localName)) {
+    return;
+  }
+  if (labels.has(element)) {
+    isolation.labels.add(element);
     return;
   }
   if (element.matches(LIVE_REGION_SELECTOR)) {
     isolation.liveRegions.add(element);
     return;
   }
-  if (element.querySelector(LIVE_REGION_SELECTOR) === null) {
+  const holdsLabel = Array.from(labels).some((label) => element.contains(label));
+  if (!holdsLabel && element.querySelector(LIVE_REGION_SELECTOR) === null) {
     isolation.background.add(element);
     return;
   }
   isolation.walked.add(element);
   for (const child of Array.from(element.children)) {
-    collectBackground(child, isolation);
+    collectBackground(child, isolation, labels);
   }
 }
 
@@ -676,18 +721,20 @@ function collectBackground(element: Element, isolation: Isolation): void {
  * Everything beneath `top`: the elements beside its `<dialog>`, and beside
  * each ancestor of it up to the children of `<body>`, except its own
  * backdrop. No ancestor of the window is ever part of it, so for a window
- * nested in another the outer `<dialog>` stays live while the outer window's
- * other content, its backdrop included, becomes background.
+ * nested in another the outer `<dialog>` stays live, together with the
+ * elements that name it, while the outer window's other content, its
+ * backdrop included, becomes background.
  */
 function isolationOf(top: OpenWindow): Isolation {
-  const isolation: Isolation = { background: new Set(), liveRegions: new Set(), walked: new Set() };
+  const isolation = emptyIsolation();
+  const labels = enclosingWindowLabels(top);
   const body = top.dialog.ownerDocument.body;
   let node: Element = top.dialog;
   let parent = node.parentElement;
   while (node !== body && parent !== null) {
     for (const sibling of Array.from(parent.children)) {
       if (sibling !== node && sibling !== top.backdrop) {
-        collectBackground(sibling, isolation);
+        collectBackground(sibling, isolation, labels);
       }
     }
     node = parent;
@@ -701,14 +748,19 @@ function isolationOf(top: OpenWindow): Isolation {
  * outermost ancestor of its `<dialog>` below `<body>`, which covers every
  * other ancestor, the window itself and whatever else lies inside it;
  * `<body>` when it can take focus itself; the `<dialog>` when no ancestor
- * covers it; and each live region or walked container that none of these
- * contains. `focusin` bubbles, so an element inside another one listening
- * needs no listener of its own, and inert elements cannot take focus at
- * all.
+ * covers it; and each live region, label or walked container that none of
+ * these contains. `focusin` bubbles, so an element inside another one
+ * listening needs no listener of its own, and inert elements cannot take
+ * focus at all.
  */
 function focusHostsOf(top: OpenWindow, isolation: Isolation): Set<Element> {
   const body = top.dialog.ownerDocument.body;
-  const hosts: Element[] = [top.dialog, ...isolation.liveRegions, ...isolation.walked];
+  const hosts: Element[] = [
+    top.dialog,
+    ...isolation.liveRegions,
+    ...isolation.labels,
+    ...isolation.walked,
+  ];
   let outermost: Element | null = null;
   for (let node = top.dialog.parentElement; node !== null && node !== body; node = node.parentElement) {
     outermost = node;
@@ -724,7 +776,7 @@ function focusHostsOf(top: OpenWindow, isolation: Isolation): Set<Element> {
 
 /**
  * Makes everything beneath the topmost window inert, guards it and the live
- * regions and walked containers beneath against clicks
+ * regions, labels and walked containers beneath against clicks
  * ({@link blockActivation}), sends focus that reaches anything beneath back
  * into the window ({@link containFocus}), and releases whatever no longer is
  * beneath it. Runs whenever a window registers or unregisters, and whenever
@@ -739,11 +791,8 @@ function isolateTopmostWindow(): void {
 
   const top = topmostWindow();
   isolatedWindow = top;
-  const isolation: Isolation =
-    top === undefined
-      ? { background: new Set(), liveRegions: new Set(), walked: new Set() }
-      : isolationOf(top);
-  const { background, liveRegions, walked } = isolation;
+  const isolation = top === undefined ? emptyIsolation() : isolationOf(top);
+  const { background, liveRegions, labels, walked } = isolation;
   for (const element of Array.from(madeInert)) {
     if (!background.has(element)) {
       element.removeAttribute('inert');
@@ -756,7 +805,12 @@ function isolateTopmostWindow(): void {
       madeInert.add(element);
     }
   }
-  moveListener(guarded, new Set([...background, ...liveRegions, ...walked]), 'click', blockActivation);
+  moveListener(
+    guarded,
+    new Set([...background, ...liveRegions, ...labels, ...walked]),
+    'click',
+    blockActivation,
+  );
   moveListener(
     watched,
     top === undefined ? new Set() : focusHostsOf(top, isolation),
@@ -803,16 +857,20 @@ function registerWindow(entry: OpenWindow): () => void {
  * beneath, focus in on open, Tab trap while open, focus return on close.
  *
  * While a window is the topmost one open, everything beneath it is `inert`
- * except its own backdrop, the windows it is nested in (the detail window
- * around a nested State picker) and live regions (the shared toast host's
- * among them), which must keep announcing. Clicks that still reach beneath
- * (access keys, `click()`) are stopped, and focus that lands beneath is moved
- * back to the element last focused in the window, or to where the window
- * would put it on opening. An element added beneath while the window is open
- * is covered too. When the window closes or unmounts, in whatever order
- * windows close, only the `inert`, guards and listeners it added are removed,
- * and modality passes to the window beneath, if any, before focus returns to
- * the invoker.
+ * except its own backdrop; the `<dialog>` elements of the windows it is
+ * nested in (the detail window around a nested State picker) and the
+ * elements that name them (their `labelledBy` targets), so each of those
+ * windows keeps its accessible name; and live regions (the shared toast
+ * host's among them), which must keep announcing. A container that holds a
+ * label or a live region stays live while its other content becomes inert,
+ * so an enclosing window's fields and keys are inert like the rest of the
+ * page. Clicks that still reach beneath (access keys, `click()`) are stopped,
+ * and focus that lands beneath is moved back to the element last focused in
+ * the window, or to where the window would put it on opening. An element
+ * added beneath while the window is open is covered too. When the window
+ * closes or unmounts, in whatever order windows close, only the `inert`,
+ * guards and listeners it added are removed, and modality passes to the
+ * window beneath, if any, before focus returns to the invoker.
  *
  * Initial focus is owned here. The element that had focus when the window
  * opened (the invoking option field, button or State field) is captured while

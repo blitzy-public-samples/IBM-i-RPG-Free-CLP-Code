@@ -21,10 +21,18 @@
 /*
  * The root font size stays at the browser default (tokens are rem-based), so
  * user zoom and font-size preferences keep scaling the whole UI.
+ * The root always keeps its vertical scrollbar, so a list that grows the page
+ * past the viewport never adds one and re-centres the screen and its columns,
+ * while overlay scrollbars take no space. The property is the physical
+ * overflow-y because Chromium and WebKit do not implement overflow-block.
+ * Where the list scrolls inside a frame instead (the framed search page and
+ * the Customer picker), the frame's body keeps its own scrollbar's space
+ * (frames, after the .screen rule).
  */
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  overflow-y: scroll;
 }
 
 body {
@@ -263,14 +271,20 @@ a:active {
  *   picker's fixed backdrop and dialog, trapping them inside its box.
  * - Every window, a State picker nested in the detail dialog included, keeps
  *   the toast band clear at all times (toast clearance, after the
- *   .toast-region rules): its end inset is raised past the band, so it
- *   centres in the viewport area above the band and never moves or shrinks
- *   when a message appears, and a taller window scrolls inside itself.
+ *   .toast-region rules): its end inset is raised past the band and the
+ *   --space-4 margin below it, so it centres in the viewport area above the
+ *   band and never moves or shrinks when a message appears. Its height limit
+ *   is a further --space-4 short of that area, so a window at its limit keeps
+ *   a --space-2 margin above it and below it. A window whose content is
+ *   taller keeps its header and its footer in view and scrolls only its body
+ *   (frames, after the .screen rule). Its own overflow: auto takes over only
+ *   where the header and footer alone are taller than the window.
  * - Painted one layer above its own backdrop (calc(--z-dialog + 1)), so the
  *   order in the DOM does not matter. A State picker nested inside the detail
  *   dialog paints within the detail dialog's stacking context, above it.
- * - `display` is deliberately not set, so the user-agent rule
- *   dialog:not([open]) { display: none } keeps closed dialogs hidden.
+ * - `display` is set only on an open window (.dialog[open], in the frames),
+ *   so the user-agent rule dialog:not([open]) { display: none } keeps closed
+ *   dialogs hidden.
  */
 dialog,
 .dialog {
@@ -281,7 +295,7 @@ dialog,
   inline-size: fit-content;
   block-size: fit-content;
   max-inline-size: calc(100vw - 2 * var(--space-4));
-  max-block-size: calc(100vh - var(--toast-band-block-size) - 3 * var(--space-4));
+  max-block-size: calc(100vh - var(--toast-band-block-size) - 2 * var(--space-4));
   margin: auto;
   padding: var(--space-4);
   overflow: auto;
@@ -321,6 +335,179 @@ dialog::backdrop {
 }
 
 /*
+ * Frames: a window, and the search page on a large enough viewport, keep
+ * their header and their function-key legend on screen however long the
+ * form or list between them is. Every function key is also a button, the
+ * only way to press F3, F5, F6 or F12 in a browser that keeps those keys,
+ * so no key button may lie outside the visible area.
+ * - A frame is a flex column of .screen-header (ScreenHeader), .screen-body
+ *   (the fields, list or comparison) and .screen-footer (the "Demo Corp of
+ *   America" line and the FunctionKeyBar, and the conflict window's action
+ *   buttons). The header and the footer keep their natural height; the body
+ *   takes what is left and scrolls by itself. Its two-line minimum height
+ *   keeps it from collapsing; should the header and the footer alone outgrow
+ *   a window, the window scrolls as a whole (dialog, .dialog).
+ * - A window's frame is its content wrapper, the <dialog>'s in-flow child
+ *   that flexes. A nested window and its .dialog__backdrop are fixed and stay
+ *   out of the flow. The detail window's busy line (.busy-line) follows the
+ *   frame in the flow but is no frame: it keeps its one reserved line and
+ *   never grows or shrinks, so the frame alone gives way to the window's
+ *   height limit. The <dialog> is a flex column only with [open]: this author
+ *   display outranks the user-agent rule dialog:not([open]) { display: none },
+ *   so it is never set on a closed one.
+ * - The search page's frame is its .search-panel in main.screen--framed, on a
+ *   viewport at least 40rem wide and 30rem tall. main stops above the toast
+ *   band, which is --toast-band-block-size plus two --space-4 margins tall
+ *   and follows main in the app root's flex column (toast clearance), so the
+ *   two fit the viewport together, the page itself never scrolls and the
+ *   band never lies over the function-key bar. On a smaller viewport a frame
+ *   would leave the list a body about 200px tall (375x667), so there the
+ *   page scrolls as a whole, as every other page does. The breakpoints are
+ *   literal: a media query cannot read a custom property.
+ * - The body's negative margin and equal padding leave every part where it
+ *   would be without them, while the focus ring (--focus-ring-width plus its
+ *   2px offset) of a control at the body's edge stays inside the body's clip;
+ *   scroll-padding-block stops focus scrolling and scrollIntoView that same
+ *   gap from the edges.
+ * - A list frame's body, the .screen-body of a .search-panel (the framed
+ *   search page and the Customer picker), keeps the space of a vertical
+ *   scrollbar that takes layout space whether its list overflows or not
+ *   (scrollbar-gutter: stable), so the fixed columns of
+ *   .results-table--customers stay where they are as a search fills, pages
+ *   or empties the list; overlay scrollbars take no space. A gutter on the
+ *   root would leave an empty strip beside the fixed backdrops, which stop
+ *   at the viewport's edge, so the root keeps a scrollbar there instead
+ *   (html); this one lies inside the viewport, under any backdrop opened
+ *   over the list, and paints no scrollbar track while the list fits. On an
+ *   unframed page the body is no scroll container and reserves nothing. The
+ *   other windows' bodies reserve no gutter: the State picker's six-row
+ *   reservation gives its body the same overflow on every page, and the
+ *   detail and conflict windows hold no paged list.
+ * - As a scroll container the body is a block formatting context, so the
+ *   outer block margins of its content no longer collapse with the header's
+ *   end margin or the footer brand's start margin and would add to them. Its
+ *   first and last child, and their own first and last child, drop those
+ *   outer margins, so the gaps from the header to the first field and from
+ *   the last field to the footer stay what they are without a frame. In a
+ *   window that grandchild can be a shared row (.form-row, from
+ *   CustomerFormRows: the detail form and its confirmation; the search page
+ *   has none). Below 60rem the row is a plain block that passes its first
+ *   field's start margin, and its last field's end margin, through to the
+ *   body's edge, so those fields drop them too; from 60rem the row is a grid
+ *   whose fields (display: contents) take no margin, and the row's own
+ *   margin is the one dropped.
+ * - position: relative makes the body the containing block of the
+ *   .visually-hidden texts in it (absolutely positioned), so they scroll and
+ *   clip with the list. Placed against the window or the page instead, a
+ *   hidden summary below the visible rows would stretch the window's or the
+ *   page's own scrolling area past the body. The header and the footer are
+ *   positioned as well, so the three paint in document order: a positioned
+ *   body would otherwise paint over a plain footer, and its negative end
+ *   margin and scroll cue would cover the top of the focus ring of a control
+ *   at the footer's top edge, such as the conflict window's Refresh.
+ * - Scroll cue: an edge with more content beyond it shows a shadow in
+ *   --color-backdrop. The shadows stay with the body's box (scroll); covers
+ *   in the frame's own background colour (--color-bg on the page,
+ *   --color-surface in a window) move with the content (local) and hide each
+ *   shadow while that end of the content is in view, so a body that fits
+ *   shows none. Their positions are physical, top and bottom:
+ *   background-position has no logical keywords that browsers support.
+ */
+@media (min-width: 40rem) and (min-height: 30rem) {
+  .screen--framed {
+    display: flex;
+    flex-direction: column;
+    max-block-size: calc(100vh - var(--toast-band-block-size) - 2 * var(--space-4));
+  }
+
+  .screen--framed > .search-panel {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-block-size: 0;
+  }
+
+  .screen--framed > .search-panel > :where(.screen-header, .screen-footer) {
+    position: relative;
+    flex: none;
+  }
+
+  .screen--framed > .search-panel > .screen-body {
+    position: relative;
+    flex: 1 1 auto;
+    min-block-size: calc(2 * var(--line-height) * 1rem);
+    margin: calc(-1 * var(--space-2));
+    padding: var(--space-2);
+    overflow: auto;
+    scroll-padding-block: var(--space-2);
+    background:
+      linear-gradient(var(--color-bg) 30%, transparent) top / 100% var(--space-6) no-repeat local,
+      linear-gradient(transparent, var(--color-bg) 70%) bottom / 100% var(--space-6) no-repeat local,
+      radial-gradient(farthest-side at 50% 0, var(--color-backdrop), transparent) top / 100% var(--space-3) no-repeat scroll,
+      radial-gradient(farthest-side at 50% 100%, var(--color-backdrop), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+  }
+
+  .screen--framed > .search-panel > .screen-body > :first-child,
+  .screen--framed > .search-panel > .screen-body > :first-child > :first-child {
+    margin-block-start: 0;
+  }
+
+  .screen--framed > .search-panel > .screen-body > :last-child,
+  .screen--framed > .search-panel > .screen-body > :last-child > :last-child {
+    margin-block-end: 0;
+  }
+}
+
+.dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-block-size: 0;
+}
+
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > :where(.screen-header, .screen-footer) {
+  position: relative;
+  flex: none;
+}
+
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-block-size: calc(2 * var(--line-height) * 1rem);
+  margin: calc(-1 * var(--space-2));
+  padding: var(--space-2);
+  overflow: auto;
+  scroll-padding-block: var(--space-2);
+  background:
+    linear-gradient(var(--color-surface) 30%, transparent) top / 100% var(--space-6) no-repeat local,
+    linear-gradient(transparent, var(--color-surface) 70%) bottom / 100% var(--space-6) no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--color-backdrop), transparent) top / 100% var(--space-3) no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--color-backdrop), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+}
+
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :first-child,
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :first-child > :first-child,
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :first-child > .form-row:first-child > :first-child {
+  margin-block-start: 0;
+}
+
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :last-child,
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :last-child > :last-child,
+.dialog > :where(:not(.dialog__backdrop, dialog, .busy-line)) > .screen-body > :last-child > .form-row:last-child > :last-child {
+  margin-block-end: 0;
+}
+
+/* A list frame's body keeps its scrollbar's space (frames, above). */
+.search-panel > .screen-body {
+  scrollbar-gutter: stable;
+}
+
+/*
  * Screen header (the SH_HDR record), with the user from the DDS USER keyword.
  * Children are placed by class, so DOM order does not matter; any extra child
  * (such as a sign-out button) auto-places into a free cell.
@@ -352,13 +539,29 @@ dialog::backdrop {
   text-align: center;
 }
 
+/*
+ * The user id (the DDS USER keyword at row 2) is one token, so it never
+ * wraps: its column's minimum is the whole id, and on a narrow screen the
+ * title column gives up the width instead.
+ */
 .screen-header__user {
   grid-area: user;
   justify-self: start;
   margin: 0;
   font-family: var(--font-mono);
   color: var(--color-muted);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+}
+
+/*
+ * The narrower column gap leaves each side column room for a user id at
+ * phone widths, so the title and function line, centred between the two
+ * equal side columns, stay centred on the header.
+ */
+@media (max-width: 30rem) {
+  .screen-header {
+    column-gap: var(--space-2);
+  }
 }
 
 /* The SFT_KEYS COLOR(BLU) function-key legend. */
@@ -424,16 +627,23 @@ dialog::backdrop {
  *   tall between --space-4 margins. On a long page it stays pinned to the
  *   viewport bottom; on a short one the flex column of its parent (toast
  *   clearance, below) pushes it there.
- * - Its height never changes, so a message never moves a screen or window.
- *   Toasts sit at the bottom of the band. A message too long for the band
- *   starts at its top and continues below it, adding that length to the end
- *   of the page, and scrolling the page to its end brings the rest into view:
- *   the mouse wheel or touch anywhere (over a toast it passes through to the
- *   page or window backdrop beneath), or End and the arrow keys from a control
- *   that does not use them itself, such as a window's function-key buttons,
- *   because a window that cannot scroll further passes the scroll on to the
- *   page. Nothing in the region takes focus, so the whole message stays
- *   reachable from inside a window's focus trap.
+ * - Its height follows the viewport width alone (tokens.css), never the
+ *   messages, so a message never moves a screen or window. Toasts sit at the
+ *   bottom of the band, --space-2 apart. Messages too long for the band
+ *   together (a third message at 40rem wide or more, or one message longer
+ *   than the band) start at its top and continue below it, adding that
+ *   length to the end of the page, and scrolling the page to its end brings
+ *   the rest into view: the mouse wheel or touch anywhere (over a toast it
+ *   passes through to the page or window backdrop beneath), or End and the
+ *   arrow keys from a control that does not use them itself, such as a
+ *   window's function-key buttons, because a window that cannot scroll
+ *   further passes the scroll on to the page. Nothing in the region takes
+ *   focus, so the whole message stays reachable from inside a window's focus
+ *   trap.
+ * - The region has no gap of its own: the two containers are --space-2 apart
+ *   only while both hold a message, so an empty container adds no height and
+ *   two messages, a status and an alert or two alerts, need the same room.
+ *   Each container keeps its own --space-2 gap between its toasts.
  * - The end padding of the alert container, the last child, is the --space-4
  *   margin, so it also stays below the last line of a long message.
  */
@@ -446,7 +656,6 @@ dialog::backdrop {
   flex-direction: column;
   justify-content: safe flex-end;
   align-items: center;
-  gap: var(--space-2);
   block-size: calc(var(--toast-band-block-size) + 2 * var(--space-4));
   margin-block-start: auto;
   padding-block: var(--space-4) 0;
@@ -460,6 +669,10 @@ dialog::backdrop {
   align-items: center;
   gap: var(--space-2);
   inline-size: 100%;
+}
+
+.toast-region > :not(:empty) ~ :not(:empty) {
+  margin-block-start: var(--space-2);
 }
 
 .toast-region > :last-child {
@@ -484,6 +697,10 @@ dialog::backdrop {
  *   last controls (the function-key bar, the footer) clear of it, and the
  *   region's auto start margin seats it at the viewport bottom on a short
  *   page. The other children keep the full width they would have as blocks.
+ *   On a large enough viewport the framed search page ends where the band
+ *   begins (frames, after the .screen rule), so the band never lies over its
+ *   function-key bar, which a toast would otherwise cover until the page was
+ *   scrolled to its end.
  * - Every window ends above the band through its own end inset and height
  *   limit (the dialog, .dialog rule). Windows are fixed and the band scrolls
  *   with the page, so while the page is scrolled to its end to read a long
@@ -536,9 +753,95 @@ dialog::backdrop {
   background: var(--color-backdrop);
 }
 
-/* PMTSTATED WDWBORDER((*COLOR BLU)): the State window keeps its blue border. */
+/*
+ * A request is pending: the detail window's loading shell and its scrim
+ * (CustomerDetailDialog, while the opening read runs), and a busy detail
+ * window. Buttons keep their own cursors.
+ */
+.dialog--loading,
+.dialog__backdrop--loading,
+.dialog--busy {
+  cursor: progress;
+}
+
+/*
+ * The loading shell's frame before its progress shows: laid out and kept in
+ * the accessibility tree (so its live region is registered before its text
+ * arrives), but not painted, so a quick read flashes nothing.
+ */
+.dialog--concealed {
+  opacity: 0;
+}
+
+/*
+ * PMTSTATED WDWBORDER((*COLOR BLU)) in a fixed WINDOW(*DFT 16 40): the State
+ * window keeps its blue border and one size whatever its list shows. Its
+ * inline size holds the function keys on one line; .state-picker__list
+ * reserves the six rows of SFLPAG(0006), so a short last page, an empty,
+ * cleared or failed list and a reload in flight leave the window, its filter
+ * and its keys where they are.
+ */
 .dialog.state-picker {
+  inline-size: 44rem;
   border-color: var(--color-accent);
+}
+
+/* PMTSTATED row 4: SC_OPTIONS at column 1 and 'Sorted by:' at column 26, on one line. */
+.state-picker__legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  column-gap: var(--space-4);
+  margin-block: var(--space-2);
+}
+
+.state-picker__legend > p {
+  margin-block: 0;
+}
+
+/*
+ * The heading row and six data rows, each one control high: the line, the
+ * cell padding and, in a data row, the Opt field's padding and border. The
+ * box's one grid row reserves that height inside its padding, and the table
+ * starts at the row's top rather than stretching its rows to fill it, so the
+ * box's padding and, while the list scrolls sideways, a scrollbar that takes
+ * layout space add the same height to a full page and a short or empty one.
+ */
+.state-picker__list {
+  --heading-block-size: calc(var(--font-size-md) * var(--line-height) + 2 * var(--space-1));
+  --row-block-size: calc(var(--font-size-md) * var(--line-height) + 4 * var(--space-1) + 2px);
+  display: grid;
+  grid-template-rows: minmax(calc(var(--heading-block-size) + 6 * var(--row-block-size)), auto);
+  align-items: start;
+}
+
+/*
+ * On a coarse pointer the Opt field and the Select button take the
+ * touch-target minimum (the touch-target block near the top of this file),
+ * so a data row is that minimum plus the cell padding, and the six reserved
+ * rows grow to match.
+ */
+@media (pointer: coarse) {
+  .state-picker__list {
+    --row-block-size: calc(var(--size-touch-target) + 2 * var(--space-1));
+  }
+}
+
+/*
+ * The Customer picker (PMTCUSTR in Selection mode) keeps one inline size
+ * whatever its list holds, wide enough for a 40-character name on one line
+ * beside the other columns of .results-table--customers, so the window and
+ * its columns never change width as a search fills or empties the list.
+ * 62rem holds those columns with a 40-character Name in a monospace font as
+ * wide as 0.6em per character; the further --space-4 holds the scrollbar
+ * gutter its list body always keeps (frames), 15 to 17px for a classic
+ * scrollbar. The dialog rule's maximum still bounds it by the viewport: on a
+ * viewport narrower than the window and its two --space-4 margins, Name,
+ * which takes the rest of the row, narrows and a long name wraps between
+ * words.
+ */
+.dialog.dialog--picker {
+  inline-size: calc(62rem + var(--space-4));
 }
 
 /*
@@ -716,23 +1019,25 @@ textarea[aria-invalid="true"] {
 }
 
 /*
- * Results subfile (customer list, state list, conflict comparison).
- * Cells use overflow-wrap: anywhere, which lowers the table's minimum
- * content width, so on a narrow viewport long names and cities wrap inside
- * their cells instead of pushing the whole page sideways. With room to
- * spare (any desktop width) the auto table layout gives every column its
- * full width and nothing wraps. The table keeps display: table, so its row
- * and column semantics stay intact for assistive technology.
+ * Results subfile (customer list, state list, conflict comparison). The
+ * table keeps display: table, so its row and column semantics stay intact
+ * for assistive technology. Text wraps only between words: a data value
+ * breaks inside a word only when that one word is longer than its whole
+ * column (a 40-character name with no blank), and a heading never does.
+ * --cell-padding-inline is the inline padding of every cell, which the
+ * column widths of the lists below include.
  */
 .results-table {
+  --cell-padding-inline: var(--space-2);
   inline-size: 100%;
 }
 
 /* COLOR(WHT) + DSPATR(UL) headings; the bold weight carries 'Opt' DSPATR(HI). */
 .results-table th {
   padding-block: var(--space-1);
-  padding-inline: var(--space-2);
-  overflow-wrap: anywhere;
+  padding-inline: var(--cell-padding-inline);
+  overflow-wrap: normal;
+  font-family: var(--font-sans);
   font-weight: 600;
   color: var(--color-heading);
   text-align: start;
@@ -747,10 +1052,26 @@ textarea[aria-invalid="true"] {
 
 .results-table td {
   padding-block: var(--space-1);
-  padding-inline: var(--space-2);
-  overflow-wrap: anywhere;
+  padding-inline: var(--cell-padding-inline);
+  overflow-wrap: break-word;
   font-family: var(--font-mono);
   vertical-align: baseline;
+}
+
+/* Codes and ZIPs stay on one line. */
+.results-table .cell--nowrap {
+  white-space: nowrap;
+}
+
+/*
+ * The row action buttons stay side by side on one line, top-aligned with the
+ * Opt field: the proportional button font sits on a different baseline from
+ * the monospace cells, and baseline alignment would make every row taller
+ * than its controls.
+ */
+.results-table .cell--actions {
+  white-space: nowrap;
+  vertical-align: top;
 }
 
 /*
@@ -762,15 +1083,128 @@ textarea[aria-invalid="true"] {
   margin-inline-end: var(--space-1);
 }
 
+/*
+ * Row buttons are generic buttons: the proportional font of every other
+ * button, not the monospace font they would inherit from their data cell.
+ */
 .results-table button {
   overflow-wrap: normal;
+  font-family: var(--font-sans);
 }
 
 @media (max-width: 30rem) {
-  .results-table th,
-  .results-table td {
-    padding-inline: var(--space-1);
+  .results-table {
+    --cell-padding-inline: var(--space-1);
   }
+}
+
+/*
+ * Customer and state lists (the PMTCUSTD and PMTSTATED subfiles). Columns
+ * take their widths from the table's <colgroup>, never from the rows on the
+ * page (table-layout: fixed), so no column moves when a page, an order or a
+ * filter changes the rows, as each DDS field keeps its screen column:
+ * PMTCUSTD Opt 1A at 3, Name 40A at 6, City 20A at 47, St 2A at 69 and
+ * ZIP 5A at 74; PMTSTATED Opt at 2, Code 2A at 6 and Name 30A at 11.
+ * - Widths are in ch of the monospace data font, which the table sets (the
+ *   headings and buttons set their own), so an n-character field gets n ch
+ *   plus the cell padding. Name, which has no width, takes the rest of the
+ *   row. Opt holds a 1-character field, which browsers size to their widest
+ *   character (about 2ch) plus its padding and border.
+ * - Actions holds the row buttons, side by side: per button its label
+ *   allowance plus padding and border, an end margin between buttons, and
+ *   the cell padding. --actions-count and --actions-label (the sum of the
+ *   label allowances) default to the State list's one Select button;
+ *   src/features/customers/ResultsTable.tsx sets them for the buttons of its
+ *   mode.
+ * - The minimum inline size keeps every column whole and Name wide enough
+ *   for a 13-character word (INTERNATIONAL) by default; the State list's
+ *   Name holds all 30 characters of SF_NAME on one line. In a narrower
+ *   container the table scrolls sideways inside its .scroll-region, so no
+ *   word breaks and the page never scrolls sideways.
+ */
+.results-table--fixed {
+  --actions-count: 1;
+  --actions-label: 3.25rem;
+  --col-opt: calc(2ch + var(--space-4) + var(--space-1) + 2 * var(--cell-padding-inline));
+  --col-name-min: calc(13ch + 2 * var(--cell-padding-inline));
+  --col-actions: calc(
+    var(--actions-label) + var(--actions-count) * (2 * var(--space-3) + 2px) +
+      max(var(--actions-count) - 1, 0) * var(--space-1) + 2 * var(--cell-padding-inline)
+  );
+  table-layout: fixed;
+  font-family: var(--font-mono);
+}
+
+/* On a coarse pointer the Opt field is at least the touch-target minimum wide. */
+@media (pointer: coarse) {
+  .results-table--fixed {
+    --col-opt: calc(
+      max(2ch + var(--space-4) + var(--space-1), var(--size-touch-target)) + 2 * var(--cell-padding-inline)
+    );
+  }
+}
+
+.results-table--customers {
+  --col-city: calc(20ch + 2 * var(--cell-padding-inline));
+  --col-st: calc(2ch + 2 * var(--cell-padding-inline));
+  --col-zip: calc(5ch + 2 * var(--cell-padding-inline));
+  min-inline-size: calc(
+    var(--col-opt) + var(--col-name-min) + var(--col-city) + var(--col-st) + var(--col-zip) + var(--col-actions)
+  );
+}
+
+/*
+ * Code holds its 'Code' heading, which is wider than the 2A field. Name is
+ * at least SF_NAME 30A wide and its cells never wrap (.cell--nowrap), as
+ * PMTSTATED shows each name on one line at row 6, so every row is one control
+ * high and the six rows .state-picker__list reserves hold any page.
+ */
+.results-table--states {
+  --col-code: calc(5ch + 2 * var(--cell-padding-inline));
+  --col-name-min: calc(30ch + 2 * var(--cell-padding-inline));
+  min-inline-size: calc(var(--col-opt) + var(--col-code) + var(--col-name-min) + var(--col-actions));
+}
+
+.col--opt {
+  inline-size: var(--col-opt);
+}
+
+.col--city {
+  inline-size: var(--col-city);
+}
+
+.col--st {
+  inline-size: var(--col-st);
+}
+
+.col--zip {
+  inline-size: var(--col-zip);
+}
+
+.col--code {
+  inline-size: var(--col-code);
+}
+
+.col--actions {
+  inline-size: var(--col-actions);
+}
+
+/*
+ * A list wider than its container scrolls sideways inside this box, never
+ * the page; src/components/ScrollRegion.tsx makes the box a named, focusable
+ * region while it overflows, so a keyboard user can scroll it too. The box
+ * clips what it holds, so its padding, cancelled by an equal negative
+ * margin, keeps room for the focus ring of the controls at the table's
+ * edges without moving anything. position: relative makes the box the
+ * containing block of the .visually-hidden texts in the cells, which would
+ * otherwise sit outside its clip and widen the page at their place in a
+ * column scrolled out of view.
+ */
+.scroll-region {
+  position: relative;
+  margin: calc(-1 * (var(--focus-ring-width) + 2px));
+  padding: calc(var(--focus-ring-width) + 2px);
+  overflow-x: auto;
 }
 
 /* Indicator 83 COLOR(RED); the row also carries a .visually-hidden "Inactive" label. */
@@ -792,11 +1226,64 @@ textarea[aria-invalid="true"] {
   color: var(--color-highlight);
 }
 
+/*
+ * The status line under a list (search page, Customer picker, State picker):
+ * its live region always holds one indicator line, empty before any list or
+ * after F5, and a pending label shares that line with "More..." or "Bottom",
+ * so no label appearing or going moves the footer and keys beneath it.
+ */
+.list-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  column-gap: var(--space-4);
+  min-block-size: calc(var(--space-1) + var(--font-size-md) * var(--line-height));
+}
+
 /* SFLEND(*MORE): "More..." or "Bottom". */
 .paging-indicator {
   margin-block: var(--space-1) 0;
   font-family: var(--font-mono);
   text-align: end;
+}
+
+/*
+ * The detail window's busy line, its bottom status line while a request is
+ * pending: "Loading customer...", "Checking..." or "Saving...". Always
+ * rendered with one line's height reserved, below the window's frame (frames,
+ * after the .screen rule), so the window, anchored at its top edge
+ * (.dialog.dialog--detail), neither grows nor moves when the text comes and
+ * goes.
+ * - It never grows or shrinks; the frame alone gives way to the window's
+ *   height limit, so the line stays in view at the window's end, outside the
+ *   scrolling body. The --space-2 gap above it clears the focus ring (width
+ *   plus offset) of the keys above.
+ * - Where the header, the body's two-line minimum and the footer outgrow the
+ *   room the line leaves them, the frame runs on over the line, and once it
+ *   runs past the line the window scrolls as a whole (frames). The frame's
+ *   parts are positioned and the line is not, so they paint over it: the
+ *   function keys stay visible.
+ * - It paints no background of its own: its text sits on the window surface
+ *   (--color-muted, 5.74:1). It never takes the pointer, with or without
+ *   text, so a click lands on what is beneath it.
+ * - Where the window scrolls as a whole, its end scroll padding (the line,
+ *   its gap and the window's padding) stops focus scrolling a control that
+ *   far above the window's end, as far as the window can scroll.
+ */
+.busy-line {
+  flex: none;
+  min-block-size: calc(var(--font-size-sm) * var(--line-height));
+  margin-block: var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height);
+  color: var(--color-muted);
+  text-align: end;
+  pointer-events: none;
+}
+
+.dialog--detail {
+  scroll-padding-block-end: calc(var(--font-size-sm) * var(--line-height) + var(--space-2) + var(--space-4));
 }
 
 /* "Including Inactives" (COLOR(RED); the source typo is fixed in the markup). */
@@ -814,21 +1301,34 @@ textarea[aria-invalid="true"] {
   border-block-end: 1px solid var(--color-fg);
 }
 
-/* .customer-form and .dialog--picker are deliberately unstyled hooks; .search-panel takes only the key-scope focus rule (after :focus-visible). */
+/*
+ * .customer-form is a deliberately unstyled hook; .search-panel takes only
+ * the key-scope focus rule (after :focus-visible) and, on the framed search
+ * page, the frame (frames, after the .screen rule); .dialog--detail only its
+ * anchoring (.dialog.dialog--detail) and the busy line's scroll padding
+ * (.busy-line).
+ */
 
 /*
  * The confirmation (MTNCUSTD after ProtectAll) takes focus as a whole, so its
  * ring needs room: --space-2 of padding keeps the ring clear of the fields,
- * and an equal negative margin takes that room from the window's --space-4
- * padding and the header and footer margins, so the fields keep the form's
- * columns and the window keeps its width. The ring is drawn inside the
- * panel's edge, in that padding (an offset of minus its width), so the
- * window's overflow never clips it where the panel shows, and it sits on the
- * window surface (4.88:1).
+ * and an equal negative margin takes that room from the --space-2 padding of
+ * the window's body (frames), so each field keeps the place it has in the
+ * form and the window keeps its width. The panel's edge then lies on the
+ * body's scrolling edge, and the ring is drawn inside it, in that padding (an
+ * offset of minus its width), so the body's overflow never clips it where the
+ * panel shows, and it sits on the window surface (4.88:1).
+ * - The panel is the body's first and last child, whose outer block margins
+ *   the frame drops on specificity (0,3,0); the rule after this one restores
+ *   them, more specific still, wherever it sits.
  */
 .confirmation-panel {
   margin: calc(-1 * var(--space-2));
   padding: var(--space-2);
+}
+
+.dialog > .customer-detail > .screen-body > .confirmation-panel {
+  margin-block: calc(-1 * var(--space-2));
 }
 
 .confirmation-panel:focus-visible {
@@ -836,25 +1336,30 @@ textarea[aria-invalid="true"] {
 }
 
 /*
- * The detail window body (.customer-detail, the window's key container).
- * Focusing a body taller than a short viewport's window scrolls it into
- * view; a scroll margin equal to the window's padding keeps that padding in
- * view, so the header stays at the top and a ring drawn there is not
- * scrolled out of sight.
+ * The detail window's content (.customer-detail, the window's key container),
+ * which wraps its header, body and footer. Only the body scrolls, so focusing
+ * the content scrolls nothing, unless the header and the footer leave the
+ * body no room and the window scrolls as a whole (frames, .busy-line): then
+ * focusing the content scrolls the window back to it, and a scroll margin
+ * equal to the window's padding keeps that padding in view, so the header
+ * stays at the top and a ring drawn there is not scrolled out of sight.
  */
 .customer-detail {
   scroll-margin: var(--space-4);
 }
 
 /*
- * A Display window opens with focus on its body, the key container where
+ * A Display window opens with focus on its content, the key container where
  * Enter closes it: its fields are read-only textareas, on which Enter keeps
- * its native action. There the body is the window's deliberate focus, not
+ * its native action. There the content is the window's deliberate focus, not
  * the incidental one the key-scope rule (after :focus-visible) hides, so it
- * keeps the ring. The ring is drawn --space-2 outside the body, in the
- * window's --space-4 padding: clear of the header, the fields and the key
- * bar, and inside the window's padding box, so the window's overflow never
- * clips it.
+ * keeps the ring. The ring is drawn --space-2 outside the content, in the
+ * window's --space-4 padding: clear of the header, the fields and the key bar
+ * wherever the frame fits the window (.busy-line), outside the body's ring
+ * room (its --space-2 negative margin ends where the ring begins), and inside
+ * the window's padding box, so the window's overflow never clips it. Below
+ * the content it crosses the top of the busy line, which paints no background
+ * and, as a Display window starts no request, holds no text.
  */
 .customer-detail--display:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus);
@@ -924,17 +1429,6 @@ textarea[aria-invalid="true"] {
   margin-block: 0 var(--space-3);
   font-weight: 600;
   color: var(--color-error-bg);
-}
-
-/*
- * Conflict comparison headings, field labels and the "Changed" mark wrap
- * only between words: break-word, unlike the table's `anywhere`, keeps each
- * word in the column's minimum width, so on a narrow viewport only the value
- * cells give up width and no label breaks mid-word.
- */
-.dialog--conflict .results-table th,
-.dialog--conflict .results-table td:last-child {
-  overflow-wrap: break-word;
 }
 
 /*

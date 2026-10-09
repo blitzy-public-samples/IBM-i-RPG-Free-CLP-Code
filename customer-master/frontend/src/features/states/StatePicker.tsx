@@ -15,7 +15,15 @@
  * - **Load all.** The list loads once on open, sorted by name (:171-177),
  *   and reloads only when Enter applies a changed filter or F7 changes the
  *   order. Rows are paged six at a time on the client, as the workstation
- *   paged the loaded subfile itself.
+ *   paged the loaded subfile itself. While a reload is pending, the rows it
+ *   replaces stay on screen, inert, and the keys act on no row until it
+ *   answers.
+ * - **Fixed window.** The window keeps one size, as PMTSTATED's 16×40
+ *   window did: its columns never follow the rows (`.results-table--fixed`),
+ *   a name stays on one line, as SF_NAME 30A did (`.results-table--states`),
+ *   six one-line rows are always reserved (`.state-picker__list`) and the
+ *   status line always takes its line (`.list-status`), in
+ *   `src/styles/global.css`.
  * - **Keys.** Only the topmost key scope receives keys, so a picker opened
  *   over the detail dialog suspends the dialog's and the search page's keys
  *   until it closes.
@@ -42,13 +50,14 @@
 import { useId, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { FieldError } from '../../api/problem';
-import type { StateSort } from '../../api/states';
+import type { StateResponse, StateSort } from '../../api/states';
 import { useAuth } from '../../auth/AuthProvider';
 import { Dialog } from '../../components/Dialog';
 import { FormField } from '../../components/FormField';
 import { FunctionKeyBar } from '../../components/FunctionKeyBar';
 import type { FunctionKeyBarItem } from '../../components/FunctionKeyBar';
 import { ScreenHeader } from '../../components/ScreenHeader';
+import { ScrollRegion } from '../../components/ScrollRegion';
 import { useToasts } from '../../components/ToastRegion';
 import { upperField } from '../../components/upperField';
 import { useProblemPresenter } from '../../errors/useProblemPresenter';
@@ -96,6 +105,9 @@ const FILTER_ID = 'state-picker-name';
 const INITIAL_QUERY: StateQuery = { nameContains: '', sort: 'name' };
 
 const NO_INVALID: Readonly<Record<string, string>> = Object.freeze({});
+
+/** No rows held: the first load and F5 show an empty list. */
+const NO_ROWS: readonly StateResponse[] = Object.freeze([]);
 
 /** SC_SORTED: SortbyName / SortbyCode (PMTSTATER:121-122). */
 const SORT_LABEL: Readonly<Record<StateSort, string>> = { name: 'Name', code: 'Code' };
@@ -179,6 +191,11 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   // The first row in view, 0-based: SC_CSR_RCD less one.
   const [pageStart, setPageStart] = useState(0);
   const [filterError, setFilterError] = useState<string | undefined>(undefined);
+  // The rows on screen when the latest reload started (Enter with a changed
+  // filter, F7), shown, inert, while it is pending, so the window never
+  // flashes an empty list. Nothing acts on them: Enter, the options, paging
+  // and Select use `rows`, which stays empty until the reload answers.
+  const [heldRows, setHeldRows] = useState<readonly StateResponse[]>(NO_ROWS);
 
   const filterRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -187,6 +204,8 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   // indicator 82 (PMTSTATED:59).
   const optionInputs = useRef(new Map<string, HTMLInputElement>());
   const optionIdPrefix = useId();
+  // Names the list's scroll region while it overflows, as the caption names the table.
+  const captionId = `${optionIdPrefix}-caption`;
 
   function optionIdOf(code: string): string {
     return `${optionIdPrefix}-opt-${code}`;
@@ -213,6 +232,10 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
   const pageRows = rows.slice(firstRow, firstRow + PAGE_SIZE);
   const hasMore = firstRow + PAGE_SIZE < rows.length;
   const listStatus = listStatusOf(loading, error, applied, rows.length);
+  // While a request is pending the table shows the held rows: none on the
+  // first load, and none after F5, which requests nothing.
+  const holding = listStatus === 'pending';
+  const shownRows = holding ? heldRows : pageRows;
 
   /*
    * Focus recovery. Rows are keyed by their slot on the page, so paging keeps
@@ -263,6 +286,12 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
     setInvalid(NO_INVALID);
   }
 
+  /** Requests the list again, holding the rows on screen until it answers. */
+  function reload(nameContains: string, order: StateSort): void {
+    setHeldRows(shownRows);
+    search(nameContains, order);
+  }
+
   /**
    * Enter (PMTSTATER:196-207, ProcessOption :289-342). New search criteria
    * take precedence over options.
@@ -272,7 +301,7 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
     //    other than the one applied. The CHAR comparison of the source ignores
     //    trailing blanks, so only those are disregarded here.
     if (applied === null || typed.trimEnd() !== applied.nameContains.trimEnd()) {
-      search(typed, sort);
+      reload(typed, sort);
       resetList();
       setFilterError(undefined);
       return;
@@ -332,17 +361,19 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
     setTyped(filter);
     setFilterError(undefined);
     resetList();
-    search(filter, nextSort);
+    reload(filter, nextSort);
   }
 
   /**
-   * F5 (PMTSTATER:257-260): clears the filter and empties the list; the next
-   * Enter always searches, because nothing is applied any more.
+   * F5 (PMTSTATER:257-260): clears the filter and empties the list at once,
+   * held rows included; the next Enter always searches, because nothing is
+   * applied any more.
    */
   function refresh(): void {
     setTyped('');
     setFilterError(undefined);
     resetList();
+    setHeldRows(NO_ROWS);
     clear();
   }
 
@@ -412,131 +443,158 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
       <div ref={containerRef} tabIndex={-1} className="state-picker__body">
         {/* SH_FUNCT is never assigned by PMTSTATER, so the function line stays blank. */}
         <ScreenHeader id={HEADER_ID} title="USA States" functionText="" user={username ?? undefined} />
-        <FormField
-          id={FILTER_ID}
-          label="Name Contains"
-          value={typed}
-          onChange={setTyped}
-          maxLength={FILTER_LENGTH}
-          size={FILTER_LENGTH}
-          uppercase
-          autoComplete="off"
-          inputRef={filterRef}
-          error={filterError}
-        />
-        {/* SC_OPTIONS: a picker always has its return slot, onSelect, so 1=Select always applies. */}
-        <p className="instructions">1=Select</p>
-        <p>{`Sorted by: ${SORT_LABEL[sort]}`}</p>
-        <table className="results-table" aria-busy={loading}>
-          <caption className="visually-hidden">USA states</caption>
-          <thead>
-            <tr>
-              <th scope="col">Opt</th>
-              <th
-                scope="col"
-                aria-sort={sort === 'code' ? 'ascending' : undefined}
-                className={sort === 'code' ? 'is-sorted' : undefined}
-              >
-                Code
-              </th>
-              <th
-                scope="col"
-                aria-sort={sort === 'name' ? 'ascending' : undefined}
-                className={sort === 'name' ? 'is-sorted' : undefined}
-              >
-                Name
-              </th>
-              <th scope="col">
-                <span className="visually-hidden">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody ref={tableBodyRef}>
-            {pageRows.map((row, slot) => {
-              // Ids derive from the code, so they follow the row in view, not its slot.
-              const optionId = optionIdOf(row.state);
-              const error = invalid[row.state] ?? '';
-              const errorId = `${optionId}-error`;
-              return (
-                <tr key={slot}>
-                  <td>
-                    <label htmlFor={optionId} className="visually-hidden">
-                      {`Option for ${row.name}`}
-                    </label>
-                    <input
-                      id={optionId}
-                      type="text"
-                      maxLength={OPTION_LENGTH}
-                      size={OPTION_LENGTH}
-                      inputMode="numeric"
-                      autoComplete="off"
-                      spellCheck={false}
-                      value={options[row.state] ?? ''}
-                      onChange={(event) => changeOption(row.state, event.target.value)}
-                      aria-invalid={error !== '' ? 'true' : undefined}
-                      aria-describedby={error !== '' ? errorId : undefined}
-                      ref={(element) => {
-                        if (element === null) {
-                          return undefined;
-                        }
-                        const inputs = optionInputs.current;
-                        inputs.set(row.state, element);
-                        return () => {
-                          if (inputs.get(row.state) === element) {
-                            inputs.delete(row.state);
-                          }
-                        };
-                      }}
-                      data-option-input=""
-                    />
-                    {/* The rejection, kept after its alert clears, so returning to the field explains it. */}
-                    {error !== '' ? (
-                      <span id={errorId} className="visually-hidden">
-                        {error}
-                      </span>
-                    ) : null}
-                  </td>
-                  <td>{row.state}</td>
-                  <td>{row.name}</td>
-                  <td>
-                    {/*
-                      The hidden name completes the accessible name "Select <Name>";
-                      the separating space stays outside the span, because accessible
-                      name computation trims an element's own text.
-                    */}
-                    <button type="button" onClick={() => onSelect(row.state)}>
-                      Select{' '}
-                      <span className="visually-hidden">{row.name}</span>
-                    </button>
-                  </td>
+        {/* The window's scrolling part, between the fixed header and footer. */}
+        <div className="screen-body">
+          <FormField
+            id={FILTER_ID}
+            label="Name Contains"
+            value={typed}
+            onChange={setTyped}
+            maxLength={FILTER_LENGTH}
+            size={FILTER_LENGTH}
+            uppercase
+            autoComplete="off"
+            inputRef={filterRef}
+            error={filterError}
+          />
+          {/*
+            PMTSTATED row 4, one line: SC_OPTIONS, then 'Sorted by:' and SC_SORTED.
+            A picker always has its return slot, onSelect, so 1=Select always applies.
+          */}
+          <div className="state-picker__legend">
+            <p className="instructions">1=Select</p>
+            <p>{`Sorted by: ${SORT_LABEL[sort]}`}</p>
+          </div>
+          <ScrollRegion labelledBy={captionId} className="state-picker__list">
+            <table className="results-table results-table--fixed results-table--states" aria-busy={loading}>
+              <caption id={captionId} className="visually-hidden">
+                USA states
+              </caption>
+              {/* Opt 1A, Code 2A, Name 30A (the rest of the row, at least 30ch), then the Select button. */}
+              <colgroup>
+                <col className="col--opt" />
+                <col className="col--code" />
+                <col />
+                <col className="col--actions" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">Opt</th>
+                  <th
+                    scope="col"
+                    aria-sort={sort === 'code' ? 'ascending' : undefined}
+                    className={sort === 'code' ? 'is-sorted' : undefined}
+                  >
+                    Code
+                  </th>
+                  <th
+                    scope="col"
+                    aria-sort={sort === 'name' ? 'ascending' : undefined}
+                    className={sort === 'name' ? 'is-sorted' : undefined}
+                  >
+                    Name
+                  </th>
+                  <th scope="col">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {/*
-          The list status: always rendered, so assistive technology has
-          registered the region before its first change; atomic, so each change
-          is read whole. Not role="status", which is the toast host's. Its
-          texts are screen labels, never toasts: a failure's problem is
-          already the one alert.
-        */}
-        <div aria-live="polite" aria-atomic="true">
-          {listStatus === 'rows' ? (
-            <>
-              <p className="visually-hidden">
-                {pageSummary(firstRow + 1, firstRow + pageRows.length, rows.length, sort)}
-              </p>
-              {/* SFLEND(*MORE), shown only while the subfile holds records (PMTSTATED:82-86). */}
-              <p className="paging-indicator">{hasMore ? 'More...' : 'Bottom'}</p>
-            </>
-          ) : null}
-          {listStatus === 'pending' || listStatus === 'failed' || listStatus === 'empty' ? (
-            <p className="paging-indicator">{STATUS_LABEL[listStatus]}</p>
-          ) : null}
+              </thead>
+              {/* Held rows are inert: neither focus, a press nor assistive technology reaches them. */}
+              <tbody ref={tableBodyRef} inert={holding}>
+                {shownRows.map((row, slot) => {
+                  // Ids derive from the code, so they follow the row in view, not its slot.
+                  const optionId = optionIdOf(row.state);
+                  const error = invalid[row.state] ?? '';
+                  const errorId = `${optionId}-error`;
+                  return (
+                    <tr key={slot}>
+                      <td>
+                        <label htmlFor={optionId} className="visually-hidden">
+                          {`Option for ${row.name}`}
+                        </label>
+                        <input
+                          id={optionId}
+                          type="text"
+                          maxLength={OPTION_LENGTH}
+                          size={OPTION_LENGTH}
+                          inputMode="numeric"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={options[row.state] ?? ''}
+                          onChange={(event) => {
+                            if (!holding) {
+                              changeOption(row.state, event.target.value);
+                            }
+                          }}
+                          aria-invalid={error !== '' ? 'true' : undefined}
+                          aria-describedby={error !== '' ? errorId : undefined}
+                          ref={(element) => {
+                            if (element === null) {
+                              return undefined;
+                            }
+                            const inputs = optionInputs.current;
+                            inputs.set(row.state, element);
+                            return () => {
+                              if (inputs.get(row.state) === element) {
+                                inputs.delete(row.state);
+                              }
+                            };
+                          }}
+                          data-option-input=""
+                        />
+                        {/* The rejection, kept after its alert clears, so returning to the field explains it. */}
+                        {error !== '' ? (
+                          <span id={errorId} className="visually-hidden">
+                            {error}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="cell--nowrap">{row.state}</td>
+                      <td className="cell--nowrap">{row.name}</td>
+                      <td className="cell--actions">
+                        {/*
+                          The hidden name completes the accessible name "Select <Name>";
+                          the separating space stays outside the span, because accessible
+                          name computation trims an element's own text.
+                        */}
+                        <button type="button" onClick={holding ? undefined : () => onSelect(row.state)}>
+                          Select{' '}
+                          <span className="visually-hidden">{row.name}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </ScrollRegion>
+          {/*
+            The list status: always rendered, so assistive technology has
+            registered the region before its first change; atomic, so each change
+            is read whole. Not role="status", which is the toast host's. Its
+            texts are screen labels, never toasts: a failure's problem is
+            already the one alert. It always takes one line, empty or not
+            (.list-status), so the window keeps its size.
+          */}
+          <div className="list-status" aria-live="polite" aria-atomic="true">
+            {listStatus === 'rows' ? (
+              <>
+                <p className="visually-hidden">
+                  {pageSummary(firstRow + 1, firstRow + pageRows.length, rows.length, sort)}
+                </p>
+                {/* SFLEND(*MORE), shown only while the subfile holds records (PMTSTATED:82-86). */}
+                <p className="paging-indicator">{hasMore ? 'More...' : 'Bottom'}</p>
+              </>
+            ) : null}
+            {listStatus === 'pending' || listStatus === 'failed' || listStatus === 'empty' ? (
+              <p className="paging-indicator">{STATUS_LABEL[listStatus]}</p>
+            ) : null}
+          </div>
         </div>
-        <p className="footer-brand">Demo Corp of America</p>
-        <FunctionKeyBar keys={keys} />
+        <footer className="screen-footer">
+          <p className="footer-brand">Demo Corp of America</p>
+          <FunctionKeyBar keys={keys} />
+        </footer>
       </div>
     </Dialog>
   );

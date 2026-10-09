@@ -1105,6 +1105,185 @@ describe('CustomerDetailDialog', () => {
     });
   });
 
+  // The opening read in progress: a loading shell, which is not a window.
+  describe('while the opening read is pending', () => {
+    /**
+     * The one polite live region without a role in the document: the shell's
+     * busy line, never the toast host's `status` region.
+     */
+    function politeRegion(): HTMLElement {
+      const regions = Array.from(document.querySelectorAll<HTMLElement>('[aria-live="polite"]')).filter(
+        (element) => !element.hasAttribute('role'),
+      );
+      const [region, ...others] = regions;
+      if (region === undefined || others.length > 0) {
+        throw new Error(`Expected one polite live region without a role, found ${regions.length}`);
+      }
+      return region;
+    }
+
+    it.each(['display', 'edit'] as const)(
+      '%s: the shell shows the function and "Loading customer..." in a polite region, opens no window and moves no focus; the window then opens and returns focus there',
+      async (mode) => {
+        const read = hold();
+        server.use(http.get(CUSTOMER_PATH, () => read.answer(() => HttpResponse.json({ ...STORED }))));
+        // The field that asked for the window, as the list's Opt field does.
+        const invoker = document.createElement('input');
+        invoker.setAttribute('aria-label', 'Opt');
+        document.body.append(invoker);
+        try {
+          invoker.focus();
+          const { user, onClose, setOpen } = renderDialog({ mode, custId: STORED.custId });
+
+          // Registered empty before its text arrives, so the text is announced.
+          expect(politeRegion()).toBeEmptyDOMElement();
+          expect(politeRegion()).toHaveAttribute('aria-atomic', 'true');
+          const line = await within(politeRegion()).findByText('Loading customer...');
+          expect(line).toBe(politeRegion());
+          expect(line.closest('[aria-busy]')).toBeNull();
+          const busy = document.querySelectorAll<HTMLElement>('[aria-busy="true"]');
+          expect(busy).toHaveLength(1);
+          const header = busy[0] as HTMLElement;
+          expect(within(header).getByText(mode === 'display' ? 'Displaying Customer' : 'Change Customer')).toBeInTheDocument();
+          expect(within(header).getByText(MAINTENANCE_USER.username)).toBeInTheDocument();
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+          expect(document.querySelector('[id^="customer-"]')).toBeNull();
+          expect(invoker).toHaveFocus();
+          // A press on the shell or its scrim keeps focus on the invoker.
+          const scrim = document.querySelector<HTMLElement>('.dialog__backdrop');
+          expect(scrim).toHaveAttribute('aria-hidden', 'true');
+          await user.click(line);
+          await user.click(header);
+          await user.click(scrim as HTMLElement);
+          expect(invoker).toHaveFocus();
+          expect(statusRegion()).toBeEmptyDOMElement();
+          expect(alertRegion()).toBeEmptyDOMElement();
+          expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+
+          read.release();
+
+          const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES[mode] });
+          await waitFor(() => expect(valuesOf(dialog)).toEqual(fieldsOf(STORED)));
+          expect(screen.queryByText('Loading customer...')).not.toBeInTheDocument();
+          if (mode === 'edit') {
+            await waitFor(() => expect(inputOf(dialog, 'name')).toHaveFocus());
+          }
+          expect(onClose).not.toHaveBeenCalled();
+
+          await user.keyboard('{F12}');
+          expect(onClose).toHaveBeenCalledTimes(1);
+          setOpen(false);
+          expect(invoker).toHaveFocus();
+        } finally {
+          invoker.remove();
+        }
+      },
+    );
+
+    it('F12 closes the shell before the read answers, with focus still on the invoker', async () => {
+      const read = hold();
+      server.use(http.get(CUSTOMER_PATH, () => read.answer(() => HttpResponse.json({ ...STORED }))));
+      const invoker = document.createElement('input');
+      invoker.setAttribute('aria-label', 'Opt');
+      document.body.append(invoker);
+      try {
+        invoker.focus();
+        const { user, onClose, setOpen } = renderDialog({ mode: 'display', custId: STORED.custId });
+        await within(politeRegion()).findByText('Loading customer...');
+
+        await user.keyboard('{F12}');
+
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(onClose).toHaveBeenCalledWith();
+        setOpen(false);
+        expect(screen.queryByText('Loading customer...')).not.toBeInTheDocument();
+        expect(document.querySelector('[aria-busy]')).toBeNull();
+        expect(invoker).toHaveFocus();
+      } finally {
+        invoker.remove();
+      }
+    });
+  });
+
+  // An opening read failing other than with 404: its alert, then the window closes unopened.
+  describe('when the opening read fails other than with 404 DEM0599', () => {
+    /** Nothing of the window or its shell is displayed. */
+    function expectNothingShown(): void {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.queryByText('Loading customer...')).not.toBeInTheDocument();
+      expect(document.querySelector('[aria-busy]')).toBeNull();
+      expect(screen.queryByLabelText('Customer Id')).not.toBeInTheDocument();
+    }
+
+    it.each([
+      ['display', '500 DEM9999', () => problem(500, 'DEM9999', { instance: CUSTOMER_PATH }), 'DEM9999'],
+      ['edit', '500 DEM9999', () => problem(500, 'DEM9999', { instance: CUSTOMER_PATH }), 'DEM9999'],
+      ['display', 'a lost connection (synthetic DEM9999, status 0)', () => HttpResponse.error(), 'DEM9999'],
+      ['edit', '403 APP0403', () => problem(403, 'APP0403', { instance: CUSTOMER_PATH }), 'APP0403'],
+    ] as const)('%s: %s shows its alert once and closes the window once, never opening it', async (mode, _answer, respond, code) => {
+      // Held until the catalog has loaded: a problem without a detail is
+      // shown in the catalog's text, which `format` has only from then on.
+      const read = hold();
+      server.use(http.get(CUSTOMER_PATH, () => read.answer(respond)));
+      const { user, onClose, setOpen } = renderDialog({ mode, custId: STORED.custId });
+      await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+      await waitFor(() => expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1));
+      expect(onClose).not.toHaveBeenCalled();
+
+      read.release();
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+
+      expect(onClose).toHaveBeenCalledWith();
+      await waitFor(() => expect(within(alertRegion()).getAllByText(messageText(code))).toHaveLength(1));
+      expect(statusRegion()).toBeEmptyDOMElement();
+      expectNothingShown();
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      // Until the caller closes it, the session displays nothing and holds no key scope.
+      await user.keyboard('{F12}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      setOpen(false);
+      expectNothingShown();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('a 500 DEM9999 answering after Escape closed the window shows no alert and closes nothing more', async () => {
+      const read = hold();
+      server.use(http.get(CUSTOMER_PATH, () => read.answer(() => problem(500, 'DEM9999', { instance: CUSTOMER_PATH }))));
+      const { user, onClose, setOpen } = renderDialog({ mode: 'display', custId: STORED.custId });
+      await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+      await waitFor(() => expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1));
+
+      await user.keyboard('{Escape}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      setOpen(false);
+      await act(async () => {
+        read.release();
+        await read.settled();
+      });
+
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expectNothingShown();
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledWith();
+    });
+
+    it('under StrictMode the remount read answering 500 DEM9999 shows one alert and closes once', async () => {
+      server.use(http.get(CUSTOMER_PATH, () => problem(500, 'DEM9999', { instance: CUSTOMER_PATH })));
+      const { onClose } = renderDialog({ mode: 'edit', custId: STORED.custId, strict: true });
+      await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(within(alertRegion()).getAllByText(messageText('DEM9999'))).toHaveLength(1));
+      await releaseHolds();
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledWith();
+      expect(within(alertRegion()).getAllByText(messageText('DEM9999'))).toHaveLength(1);
+      expectNothingShown();
+    });
+  });
+
   // Edit and add flows (MTNCUSTR :195-297)
   describe('edit and add flows', () => {
     it('edit: reviews the draft, confirms the reviewed values with DEM0000 and sends them with the version read', async () => {
@@ -1217,6 +1396,49 @@ describe('CustomerDetailDialog', () => {
       expect(onClose).toHaveBeenCalledWith({ added: true });
       expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+    });
+
+    it('each phase opens in a new window body scrolled to its top, never at the offset the other phase left', async () => {
+      /** The window's scrolling part holding `element`, between the fixed header and footer. */
+      function bodyOf(element: HTMLElement): HTMLElement {
+        const body = element.closest('.screen-body');
+        if (!(body instanceof HTMLElement)) {
+          throw new Error('The element sits outside the window body');
+        }
+        return body;
+      }
+
+      const { user, dialog } = await openDialog('add');
+      const heading = within(dialog).getByRole('heading', { name: 'Customer Master' });
+      const enterKey = within(dialog).getByRole('button', { name: 'Enter' });
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      const formBody = bodyOf(inputOf(dialog, 'name'));
+      // The header and the key legend lie outside the body, so no scroll ever hides them.
+      expect(formBody).not.toContainElement(heading);
+      expect(formBody).not.toContainElement(enterKey);
+      // Scrolled down to the last fields, as a short viewport needs.
+      formBody.scrollTop = 179;
+      expect(formBody.scrollTop).toBe(179);
+
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0009');
+
+      const confirmBody = bodyOf(panel);
+      expect(confirmBody).not.toBe(formBody);
+      expect(formBody).not.toBeInTheDocument();
+      expect(confirmBody.scrollTop).toBe(0);
+      expect(confirmBody).not.toContainElement(heading);
+      expect(confirmBody).not.toContainElement(enterKey);
+      confirmBody.scrollTop = 87;
+
+      // F12 at the add confirmation: back to a cleared form, in a body of its own.
+      await user.keyboard('{F12}');
+      await waitForForm(dialog);
+
+      const clearedBody = bodyOf(inputOf(dialog, 'name'));
+      expect(clearedBody).not.toBe(confirmBody);
+      expect(confirmBody).not.toBeInTheDocument();
+      expect(clearedBody.scrollTop).toBe(0);
+      expect(valuesOf(dialog)).toEqual(EMPTY_ADD);
     });
 
     it('a held Enter repeating while the review is in flight sends no second review, PUT or POST', async () => {
@@ -2380,6 +2602,105 @@ describe('CustomerDetailDialog', () => {
       expect(valuesOf(panel)).toEqual(NEW_CUSTOMER);
       expect(onClose).not.toHaveBeenCalled();
       expect(await bodiesOf<unknown>('POST', ADD_PATH)).toEqual([NEW_CUSTOMER]);
+    });
+
+    /**
+     * The window's busy line: its one polite live region without a role
+     * (never the toast host's `status` region), atomic and outside the
+     * aria-busy body, so its news is not held back.
+     */
+    function busyLine(dialog: HTMLElement): HTMLElement {
+      const regions = Array.from(dialog.querySelectorAll<HTMLElement>('[aria-live="polite"]')).filter(
+        (element) => !element.hasAttribute('role'),
+      );
+      const [region, ...others] = regions;
+      if (region === undefined || others.length > 0) {
+        throw new Error(`Expected one busy line in the window, found ${regions.length}`);
+      }
+      expect(region).toHaveAttribute('aria-atomic', 'true');
+      expect(region.closest('[aria-busy]')).toBeNull();
+      return region;
+    }
+
+    /** Waits until the busy line shows `text` while the body is aria-busy and the window shows the progress cursor class. */
+    async function expectBusyLine(dialog: HTMLElement, text: string): Promise<void> {
+      await waitFor(() => expect(busyLine(dialog)).toHaveTextContent(text));
+      expect(within(busyLine(dialog)).getByText(text)).toBe(busyLine(dialog));
+      expect(dialog.querySelector('[aria-busy="true"]')).not.toBeNull();
+      expect(dialog).toHaveClass('dialog--busy');
+    }
+
+    /** Asserts the idle window: an empty busy line, no aria-busy body and no progress cursor class. */
+    function expectIdleBusyLine(dialog: HTMLElement): void {
+      expect(busyLine(dialog)).toBeEmptyDOMElement();
+      expect(dialog.querySelector('[aria-busy]')).toBeNull();
+      expect(dialog).not.toHaveClass('dialog--busy');
+    }
+
+    it('the busy line says "Checking..." while a review is pending, and is empty again once the confirmation shows', async () => {
+      const gate = hold();
+      server.use(http.post(REVIEW_PATH, () => gate.answer(() => reviewPassed('EDIT', fieldsOf(STORED)))));
+      const { user, dialog } = await openDialog('edit');
+      expectIdleBusyLine(dialog);
+
+      await user.keyboard('{Enter}');
+
+      await expectBusyLine(dialog, 'Checking...');
+      expect(statusRegion()).toBeEmptyDOMElement();
+      gate.release();
+      await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+      await waitFor(() => expectIdleBusyLine(dialog));
+    });
+
+    it('the busy line says "Saving..." while the PUT is pending, and is empty again once it answered', async () => {
+      const gate = hold();
+      const saved: CustomerResponse = { ...STORED, version: STORED.version + 1 };
+      answerReview(() => reviewPassed('EDIT', fieldsOf(STORED)));
+      server.use(http.put('/api/customers/:custId', () => gate.answer(() => HttpResponse.json({ ...saved }))));
+      const { user, dialog, onClose } = await openDialog('edit');
+      await reviewToConfirmation(user, dialog, 'DEM0000');
+      expectIdleBusyLine(dialog);
+
+      await user.keyboard('{Enter}');
+
+      await expectBusyLine(dialog, 'Saving...');
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(1);
+      gate.release();
+      await waitFor(() => expect(onClose).toHaveBeenCalledWith({ saved }));
+      // The harness keeps the window rendered after onClose.
+      await waitFor(() => expectIdleBusyLine(dialog));
+    });
+
+    it('the busy line says "Saving..." while the add POST is pending, and is empty again once it answered', async () => {
+      const gate = hold();
+      server.use(http.post(ADD_PATH, () => gate.answer(() => problem(503, 'APP0503', { instance: ADD_PATH }))));
+      const { user, dialog } = await openDialog('add');
+      await fillForm(user, dialog, NEW_CUSTOMER);
+      await reviewToConfirmation(user, dialog, 'DEM0009');
+      expectIdleBusyLine(dialog);
+
+      await user.keyboard('{Enter}');
+
+      await expectBusyLine(dialog, 'Saving...');
+      expect(sent('POST', ADD_PATH)).toHaveLength(1);
+      gate.release();
+      await within(alertRegion()).findByText(messageText('APP0503'));
+      await waitFor(() => expectIdleBusyLine(dialog));
+    });
+
+    it('the busy line says "Loading customer..." while an F5 reload is pending, and is empty again once the form is reloaded', async () => {
+      const { user, dialog } = await openDialog('edit');
+      const reloaded: CustomerResponse = { ...STORED, name: 'NIBH RELOADED CO', version: STORED.version + 2 };
+      const gate = hold();
+      server.use(http.get('/api/customers/:custId', () => gate.answer(() => HttpResponse.json({ ...reloaded }))));
+      expectIdleBusyLine(dialog);
+
+      await user.keyboard('{F5}');
+
+      await expectBusyLine(dialog, 'Loading customer...');
+      gate.release();
+      await waitFor(() => expect(valuesOf(dialog)).toEqual(fieldsOf(reloaded)));
+      await waitFor(() => expectIdleBusyLine(dialog));
     });
   });
 

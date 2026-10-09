@@ -22,9 +22,13 @@
  *   window; closing removes only the `inert` the window added.
  * - **Nested windows.** A window rendered inside another (the State picker in
  *   the detail window) holds focus and the trap alone: the outer window's
- *   content becomes inert while the outer `<dialog>` stays live, and closing
- *   the inner window returns focus to its invoker and the trap to the outer
- *   window.
+ *   content becomes inert while the outer `<dialog>` and the elements that
+ *   name it (its `aria-labelledby` targets, reached by walking any wrapper
+ *   and header around them, whose other content still becomes inert) stay
+ *   live, so the outer window keeps its accessible name; a click on such a
+ *   label is stopped and focus on it goes back into the inner window; and
+ *   closing the inner window returns focus to its invoker, releases every
+ *   `inert` and guard it added, and hands the trap back to the outer window.
  * - **Initial focus and focus return.** The window focuses `initialFocusRef`,
  *   else its first editable field, overriding a child that focused itself on
  *   mount; closing focuses the control that opened it, and an invoker removed
@@ -42,14 +46,17 @@
  * containment sends it straight back to the stop it left, and focus never
  * reaches the other end, which every boundary assertion catches. Background
  * modality is asserted through the `inert` attribute and through focus
- * recovery.
+ * recovery. jsdom's accessible-name computation, behind `getByRole`'s
+ * `name`, ignores `inert` as well, so the name a browser gives a window is
+ * asserted through {@link browserNameOf}, which drops label targets that lie
+ * in an inert subtree as browsers do.
  *
  * Every harness renders the real `Dialog`; nothing is mocked and no request is
  * made, so the MSW server of `src/test/setup.ts` stays idle.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
@@ -93,6 +100,22 @@ async function tabFrom(user: UserEvent, count: number, shift = false): Promise<E
     visited.push(document.activeElement ?? document.body);
   }
   return visited;
+}
+
+/**
+ * The accessible name a browser gives `dialog` through its `aria-labelledby`:
+ * the text of each target, in order, joined by a space. A target inside an
+ * `inert` subtree contributes nothing, because browsers leave inert content
+ * out of the accessibility tree, name computation included.
+ */
+function browserNameOf(dialog: HTMLElement): string {
+  return (dialog.getAttribute('aria-labelledby') ?? '')
+    .split(/\s+/)
+    .filter((id) => id !== '')
+    .map((id) => document.getElementById(id))
+    .filter((label): label is HTMLElement => label !== null && label.closest('[inert]') === null)
+    .map((label) => label.textContent?.trim() ?? '')
+    .join(' ');
 }
 
 /** The backdrop `Dialog` renders immediately before its `<dialog>` element. */
@@ -248,6 +271,59 @@ async function openNestedWindows(
   await user.click(prompt);
   const inner = screen.getByRole('dialog', { name: 'Inner window' });
   return { outer, inner, prompt };
+}
+
+/**
+ * Two stacked windows laid out as the detail window lays out its content
+ * (`div.customer-detail > header.screen-header > h1`): the outer window's
+ * labels, a title and a function line, sit in a header beside a user line,
+ * and that header sits in a focusable body wrapper beside the outer fields
+ * and keys. The inner window is rendered beside the wrapper, as the State
+ * picker is. "Add note" in the inner window adds an element inside the
+ * wrapper while the inner window stays open.
+ */
+function WrappedNestedPage(): JSX.Element {
+  const [outerOpen, setOuterOpen] = useState(false);
+  const [innerOpen, setInnerOpen] = useState(false);
+  const [noteShown, setNoteShown] = useState(false);
+  return (
+    <div>
+      <button type="button" onClick={() => setOuterOpen(true)}>
+        Open wrapped
+      </button>
+      <Dialog open={outerOpen} labelledBy="wrapped-title wrapped-function">
+        <div data-testid="wrapped-body" tabIndex={-1}>
+          <header data-testid="wrapped-header">
+            <h2 id="wrapped-title">Customer Master</h2>
+            <p id="wrapped-function">Change Customer</p>
+            <p data-testid="wrapped-user">SALES</p>
+          </header>
+          <div data-testid="wrapped-fields">
+            <input aria-label="Wrapped name" />
+            <button type="button" onClick={() => setInnerOpen(true)}>
+              State prompt
+            </button>
+          </div>
+          {noteShown ? <p data-testid="wrapped-note">Note</p> : null}
+          <div data-testid="wrapped-keys">
+            <button type="button" onClick={() => setOuterOpen(false)}>
+              Wrapped close
+            </button>
+          </div>
+        </div>
+        <Dialog open={innerOpen} labelledBy="wrapped-inner-title">
+          <h3 id="wrapped-inner-title">USA States</h3>
+          <input aria-label="Name Contains" />
+          <button type="button" onClick={() => setNoteShown(true)}>
+            Add note
+          </button>
+          <button type="button" onClick={() => setInnerOpen(false)}>
+            Cancel
+          </button>
+        </Dialog>
+      </Dialog>
+    </div>
+  );
 }
 
 /** Props of {@link SelfFocusingField}. */
@@ -516,11 +592,16 @@ describe('Dialog nested in another Dialog', () => {
     expect([...forward, ...backward].filter((element) => !inner.contains(element)).map(nameOf)).toEqual([]);
   });
 
-  it('makes the outer content inert while the outer dialog element stays live, and moves focus on it back into the inner window', async () => {
+  it('makes the outer content inert while the outer dialog element and its label stay live, so both windows keep their names, and moves focus on the outer dialog back into the inner window', async () => {
     const user = userEvent.setup();
     const { outer, inner } = await openNestedWindows(user);
+    const heading = within(outer).getByRole('heading', { name: 'Outer window' });
 
-    expect(within(outer).getByRole('heading', { name: 'Outer window' })).toHaveAttribute('inert');
+    expect(heading).not.toHaveAttribute('inert');
+    expect(screen.getByRole('dialog', { name: 'Outer window' })).toBe(outer);
+    expect(screen.getByRole('dialog', { name: 'Inner window' })).toBe(inner);
+    expect(browserNameOf(outer)).toBe('Outer window');
+    expect(browserNameOf(inner)).toBe('Inner window');
     expect(screen.getByTestId('outer-fields')).toHaveAttribute('inert');
     expect(screen.getByTestId('outer-keys')).toHaveAttribute('inert');
     expect(backdropOf(outer)).toHaveAttribute('inert');
@@ -541,6 +622,81 @@ describe('Dialog nested in another Dialog', () => {
     expect(select).toHaveFocus();
   });
 
+  it('stops a click on the live outer label before it reaches the outer window, and focus stays in the inner window', async () => {
+    const user = userEvent.setup();
+    const { outer, inner } = await openNestedWindows(user);
+    const heading = within(outer).getByRole('heading', { name: 'Outer window' });
+    await user.tab();
+    const select = within(inner).getByRole('button', { name: 'Select' });
+    expect(select).toHaveFocus();
+    const outerClick = vi.fn();
+    outer.addEventListener('click', outerClick);
+
+    // A pointer press focuses the outer <dialog>, the label's focusable
+    // ancestor, and focus goes straight back into the inner window.
+    await user.click(heading);
+    expect(select).toHaveFocus();
+    expect(outerClick).not.toHaveBeenCalled();
+
+    // A click dispatched by script is stopped and its default action prevented.
+    expect(fireEvent.click(heading)).toBe(false);
+    expect(outerClick).not.toHaveBeenCalled();
+    expect(select).toHaveFocus();
+    expect(browserNameOf(outer)).toBe('Outer window');
+
+    outer.removeEventListener('click', outerClick);
+  });
+
+  it('walks the wrapper and header around the outer labels, so the labels stay live while the other content there, and content added there meanwhile, becomes inert', async () => {
+    const user = userEvent.setup();
+    render(<WrappedNestedPage />);
+    await user.click(screen.getByRole('button', { name: 'Open wrapped' }));
+    const outer = screen.getByRole('dialog', { name: 'Customer Master Change Customer' });
+    const prompt = within(outer).getByRole('button', { name: 'State prompt' });
+    await user.click(prompt);
+    const inner = screen.getByRole('dialog', { name: 'USA States' });
+    const filter = within(inner).getByRole('textbox', { name: 'Name Contains' });
+    expect(filter).toHaveFocus();
+    const wrapper = screen.getByTestId('wrapped-body');
+
+    expect(wrapper).not.toHaveAttribute('inert');
+    expect(screen.getByTestId('wrapped-header')).not.toHaveAttribute('inert');
+    expect(within(outer).getByRole('heading', { name: 'Customer Master' })).not.toHaveAttribute('inert');
+    expect(within(outer).getByText('Change Customer')).not.toHaveAttribute('inert');
+    expect(screen.getByTestId('wrapped-user')).toHaveAttribute('inert');
+    expect(screen.getByTestId('wrapped-fields')).toHaveAttribute('inert');
+    expect(screen.getByTestId('wrapped-keys')).toHaveAttribute('inert');
+    expect(backdropOf(outer)).toHaveAttribute('inert');
+    expect(outer).not.toHaveAttribute('inert');
+    expect(inner).not.toHaveAttribute('inert');
+    expect(backdropOf(inner)).not.toHaveAttribute('inert');
+    expect(browserNameOf(outer)).toBe('Customer Master Change Customer');
+    expect(browserNameOf(inner)).toBe('USA States');
+
+    // The walked wrapper stays live and carries tabindex="-1".
+    act(() => {
+      wrapper.focus();
+    });
+    expect(filter).toHaveFocus();
+
+    await user.click(within(inner).getByRole('button', { name: 'Add note' }));
+    expect(screen.getByTestId('wrapped-note')).toHaveAttribute('inert');
+    expect(browserNameOf(outer)).toBe('Customer Master Change Customer');
+
+    await user.click(within(inner).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('dialog', { name: 'USA States' })).not.toBeInTheDocument();
+    expect(prompt).toHaveFocus();
+    const released = ['body', 'header', 'user', 'fields', 'note', 'keys'].map((part) =>
+      screen.getByTestId(`wrapped-${part}`),
+    );
+    for (const element of released) {
+      expect(element).not.toHaveAttribute('inert');
+    }
+    expect(backdropOf(outer)).not.toHaveAttribute('inert');
+    expect(browserNameOf(outer)).toBe('Customer Master Change Customer');
+  });
+
   it('closing the inner window returns focus to its invoker, releases its inert and hands the trap back to the outer window', async () => {
     const user = userEvent.setup();
     const { outer, inner, prompt } = await openNestedWindows(user);
@@ -549,12 +705,22 @@ describe('Dialog nested in another Dialog', () => {
 
     expect(screen.queryByRole('dialog', { name: 'Inner window' })).not.toBeInTheDocument();
     expect(prompt).toHaveFocus();
-    expect(within(outer).getByRole('heading', { name: 'Outer window' })).not.toHaveAttribute('inert');
+    const heading = within(outer).getByRole('heading', { name: 'Outer window' });
+    expect(heading).not.toHaveAttribute('inert');
     expect(screen.getByTestId('outer-fields')).not.toHaveAttribute('inert');
     expect(screen.getByTestId('outer-keys')).not.toHaveAttribute('inert');
     expect(backdropOf(outer)).not.toHaveAttribute('inert');
     expect(screen.getByTestId('nested-header')).toHaveAttribute('inert');
     expect(screen.getByTestId('nested-footer')).toHaveAttribute('inert');
+    expect(browserNameOf(outer)).toBe('Outer window');
+
+    // The label's click guard went with the inner window.
+    const outerClick = vi.fn();
+    outer.addEventListener('click', outerClick);
+    expect(fireEvent.click(heading)).toBe(true);
+    expect(outerClick).toHaveBeenCalledTimes(1);
+    outer.removeEventListener('click', outerClick);
+    expect(prompt).toHaveFocus();
 
     const forward = await tabFrom(user, 4);
     const backward = await tabFrom(user, 4, true);

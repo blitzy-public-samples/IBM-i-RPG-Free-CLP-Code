@@ -807,29 +807,31 @@ describe('App', () => {
       expect(sentSince(retriedAt)).toEqual([`GET ${SEARCH_PATH}`]);
     });
 
-    it('option 5 sent offline shows DEM9999 once and the window on blank fields, and the reconnect reads nothing', async () => {
+    it('option 5 sent offline shows DEM9999 once and opens no window, and the reconnect reads nothing', async () => {
       const { user, client } = await openInquirySearch();
       const alert = screen.getByRole('alert');
       const offlineAt = requests.length;
       goOffline();
 
-      await user.type(screen.getByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` }), '5');
+      const option = screen.getByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` });
+      await user.type(option, '5');
       await user.keyboard('{Enter}');
 
       expect(await within(alert).findByText(PROGRAM_ERROR)).toBeInTheDocument();
       expect(alert.textContent).toBe(PROGRAM_ERROR);
-      // A failed read still opens the window, on blank fields, as the detail
-      // dialog does for any read that fails.
-      const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
-      expect(within(dialog).getByLabelText('Name')).toHaveValue('');
+      // A read that fails other than with 404 DEM0599 closes the detail
+      // window without ever opening it, so blank fields never pass for the
+      // customer; the processed option is cleared and keeps focus.
+      await waitFor(() => expect(option).toHaveValue(''));
+      expect(screen.queryByRole('dialog', { name: DISPLAY_DIALOG })).not.toBeInTheDocument();
+      expect(option).toHaveFocus();
       // StrictMode's simulated remount may send the read a second time, after
       // aborting the first; nothing but that read is sent.
       expect(new Set(sentSince(offlineAt))).toEqual(new Set([`GET ${FIRST_ACTIVE_ROW_PATH}`]));
 
       await expectReconnectSendsNothing(client);
 
-      expect(screen.getAllByRole('dialog')).toEqual([dialog]);
-      expect(within(dialog).getByLabelText('Name')).toHaveValue('');
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(alert.textContent).toBe(PROGRAM_ERROR);
     });
   });

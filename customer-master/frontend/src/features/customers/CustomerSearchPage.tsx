@@ -110,8 +110,10 @@ export function CustomerSearchPage() {
   const navigate = useNavigate();
   const panelMode: SearchMode = mode === 'MAINTENANCE' ? 'maintenance' : 'inquiry';
 
+  // screen--framed: on a large enough viewport the page fits above the toast
+  // band, its list scrolls inside the panel, and the key bar stays in view.
   return (
-    <main className="screen">
+    <main className="screen screen--framed">
       <CustomerSearchPanel key={panelMode} mode={panelMode} onExit={() => void navigate('/')} />
     </main>
   );
@@ -773,54 +775,65 @@ export function CustomerSearchPanel({ mode, initialName, onSelect, onExit, heade
     // never a tab stop.
     <section ref={containerRef} className="search-panel" tabIndex={-1}>
       <ScreenHeader title="Customer Master" functionText={FUNCTION_TEXT[mode]} user={username ?? undefined} id={headerId} />
-      <SearchFilters
-        idPrefix={idPrefix}
-        values={typed}
-        onChange={changeFilter}
-        includeInactive={includeInactive}
-        errors={filterErrors}
-        nameRef={nameRef}
-        stateRef={stateRef}
-      />
-      <p className="instructions">Type options, press Enter.</p>
-      <p className="instructions">{OPTION_LEGEND[mode]}</p>
-      <ResultsTable
-        rows={list.page}
-        options={options}
-        invalid={invalid}
-        allowedOptions={ALLOWED_OPTIONS[mode]}
-        onOptionChange={changeOption}
-        onAction={runAction}
-        optionRef={optionRef}
-        busy={searching || loadingNextInView}
-      />
       {/*
-        List status: the list's one polite live region (aria-atomic; not
-        role="status", which is the toast host's), always present so every
-        change of its whole text is announced, as screen labels and never as
-        toasts. With a list, a visually hidden summary of the page shown, then
-        the SFLEND(*MORE) indicator "More..." or "Bottom"; with no list,
-        nothing (ERASE(SFL), PMTCUSTD :84-88), and DEM0002 and DEM0006 stay
-        status toasts. A pending label, and the table's aria-busy, show only
-        while its request can change the page shown: "Searching..." for a
-        first page always; "Loading next page..." only while the deepest loaded
-        page, whose next page is loading, is shown (a PageDown there joins that
-        load). After a PageUp the load runs on unannounced, and paging back to
-        the deepest page before it arrives shows the label and aria-busy again.
+        The screen's scrolling part, between the fixed header and footer, in
+        the picker's window and on the framed page (global.css frames).
       */}
-      <div aria-live="polite" aria-atomic="true">
-        {list.hasList ? (
-          <p className="paging-indicator">
-            <span className="visually-hidden">{describePage(list.pages, list.position)}</span>{' '}
-            {list.more ? 'More...' : 'Bottom'}
-          </p>
-        ) : null}
-        {searching ? <p className="paging-indicator">Searching...</p> : null}
-        {loadingNextInView ? <p className="paging-indicator">Loading next page...</p> : null}
+      <div className="screen-body">
+        <SearchFilters
+          idPrefix={idPrefix}
+          values={typed}
+          onChange={changeFilter}
+          includeInactive={includeInactive}
+          errors={filterErrors}
+          nameRef={nameRef}
+          stateRef={stateRef}
+        />
+        <p className="instructions">Type options, press Enter.</p>
+        <p className="instructions">{OPTION_LEGEND[mode]}</p>
+        <ResultsTable
+          rows={list.page}
+          options={options}
+          invalid={invalid}
+          allowedOptions={ALLOWED_OPTIONS[mode]}
+          onOptionChange={changeOption}
+          onAction={runAction}
+          optionRef={optionRef}
+          busy={searching || loadingNextInView}
+        />
+        {/*
+          List status: the list's one polite live region (aria-atomic; not
+          role="status", which is the toast host's), always present so every
+          change of its whole text is announced, as screen labels and never as
+          toasts. With a list, a visually hidden summary of the page shown, then
+          the SFLEND(*MORE) indicator "More..." or "Bottom"; with no list,
+          nothing (ERASE(SFL), PMTCUSTD :84-88), and DEM0002 and DEM0006 stay
+          status toasts. A pending label, and the table's aria-busy, show only
+          while its request can change the page shown: "Searching..." for a
+          first page always; "Loading next page..." only while the deepest loaded
+          page, whose next page is loading, is shown (a PageDown there joins that
+          load). After a PageUp the load runs on unannounced, and paging back to
+          the deepest page before it arrives shows the label and aria-busy again.
+          The region keeps one line, empty or not, and a pending label comes
+          first on it, before the indicator (.list-status), so nothing beneath
+          moves as labels come and go.
+        */}
+        <div className="list-status" aria-live="polite" aria-atomic="true">
+          {searching ? <p className="paging-indicator">Searching...</p> : null}
+          {loadingNextInView ? <p className="paging-indicator">Loading next page...</p> : null}
+          {list.hasList ? (
+            <p className="paging-indicator">
+              <span className="visually-hidden">{describePage(list.pages, list.position)}</span>{' '}
+              {list.more ? 'More...' : 'Bottom'}
+            </p>
+          ) : null}
+        </div>
       </div>
       {/* The SFT_FKEY footer constant, PMTCUSTD :128. */}
-      <p className="footer-brand">Demo Corp of America</p>
-      <FunctionKeyBar keys={keys} />
+      <footer className="screen-footer">
+        <p className="footer-brand">Demo Corp of America</p>
+        <FunctionKeyBar keys={keys} />
+      </footer>
       <CustomerDetailDialog
         open={detail !== null}
         mode={detail?.mode ?? 'display'}

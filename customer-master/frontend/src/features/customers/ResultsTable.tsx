@@ -29,9 +29,18 @@
  * typed value is reported unchanged through `onOptionChange`. Names, cities
  * and codes render as plain React text, so `NIBH L'LOR COMPANY` and
  * `URNA \NUNC\ COMPANY` show exactly as stored.
+ *
+ * Columns keep the PMTCUSTD field positions: the `<colgroup>` sizes Opt,
+ * City, St, ZIP and the action buttons, Name takes the rest of the row, and
+ * the rows never resize a column (`.results-table--fixed` in
+ * `src/styles/global.css`). St, ZIP and the buttons stay on one line. Where
+ * the columns do not fit, the table scrolls sideways in a `ScrollRegion`
+ * named by its caption.
  */
 import { useId } from 'react';
+import type { CSSProperties } from 'react';
 import type { CustomerSummaryResponse } from '../../api/customers';
+import { ScrollRegion } from '../../components/ScrollRegion';
 
 /**
  * A list option a row can take: `1` = Select (Selection mode), `2` = Edit
@@ -80,6 +89,30 @@ const OPTION_VERBS: Readonly<Record<RowOption, string>> = {
   '5': 'Display',
 };
 
+/**
+ * The width, in rem, the Actions column allows for each button's label in the
+ * proportional button font, a little more than the widest common system
+ * font sets it in. global.css adds each button's padding and border.
+ */
+const OPTION_LABEL_ALLOWANCE_REM: Readonly<Record<RowOption, number>> = {
+  '1': 3.25,
+  '2': 2.25,
+  '5': 3.75,
+};
+
+/**
+ * The Actions column inputs of `.results-table--fixed`: how many buttons each
+ * row holds and their label allowances together, so the column fits this
+ * mode's buttons whatever rows the page holds.
+ */
+function actionsColumnStyle(actions: readonly RowOption[]): CSSProperties {
+  const label = actions.reduce((sum, option) => sum + OPTION_LABEL_ALLOWANCE_REM[option], 0);
+  return {
+    '--actions-count': String(actions.length),
+    '--actions-label': `${label}rem`,
+  } as CSSProperties;
+}
+
 const DEFAULT_CAPTION = 'Customers';
 
 const INACTIVE = 'N';
@@ -98,11 +131,27 @@ export function ResultsTable({
   // Opt input ids are `${idPrefix}-opt-${custId}`: unique per row, and per
   // table, so a Customer picker's table over the search page shares no id.
   const idPrefix = useId();
+  const captionId = `${idPrefix}-caption`;
   const actions = OPTION_ORDER.filter((option) => allowedOptions.includes(option));
 
-  return (
-    <table className="results-table" aria-busy={busy ? 'true' : undefined}>
-      <caption className="visually-hidden">{caption}</caption>
+  const table = (
+    <table
+      className="results-table results-table--fixed results-table--customers"
+      style={actionsColumnStyle(actions)}
+      aria-busy={busy ? 'true' : undefined}
+    >
+      <caption id={captionId} className="visually-hidden">
+        {caption}
+      </caption>
+      {/* Opt 1A, Name 40A (the rest of the row), City 20A, St 2A, ZIP 5A, then the action buttons. */}
+      <colgroup>
+        <col className="col--opt" />
+        <col />
+        <col className="col--city" />
+        <col className="col--st" />
+        <col className="col--zip" />
+        <col className="col--actions" />
+      </colgroup>
       <thead>
         <tr>
           <th scope="col">Opt</th>
@@ -178,9 +227,9 @@ export function ResultsTable({
                 ) : null}
               </td>
               <td>{row.city ?? ''}</td>
-              <td>{row.state ?? ''}</td>
-              <td>{row.zip5 ?? ''}</td>
-              <td>
+              <td className="cell--nowrap">{row.state ?? ''}</td>
+              <td className="cell--nowrap">{row.zip5 ?? ''}</td>
+              <td className="cell--actions">
                 {actions.map((option) => (
                   <button key={option} type="button" onClick={() => onAction(custId, option)}>
                     {OPTION_VERBS[option]}{' '}
@@ -194,4 +243,6 @@ export function ResultsTable({
       </tbody>
     </table>
   );
+
+  return <ScrollRegion labelledBy={captionId}>{table}</ScrollRegion>;
 }
