@@ -2,8 +2,10 @@
  * Component tests for the column structure of {@link ResultsTable}: the
  * `<colgroup>` that fixes the PMTCUSTD columns, the Actions column inputs for
  * each mode's buttons, the cells kept on one line, and the scroll box the
- * table sits in. Behaviour of the list itself (options, paging, modes) is
- * covered through the search panel in `CustomerSearchPage.test.tsx`.
+ * table sits in, which sets the compact rows and, on the search page,
+ * reserves a full page of rows. Behaviour of the list itself (options,
+ * paging, modes) is covered through the search panel in
+ * `CustomerSearchPage.test.tsx`.
  */
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -72,7 +74,7 @@ describe('ResultsTable columns', () => {
     }
   });
 
-  it('keeps St, ZIP and the row buttons on one line, and lets names and cities wrap', () => {
+  it('keeps St, ZIP and the row buttons on one line, marks the Name cell, and lets names and cities wrap', () => {
     const table = renderTable(['2', '5']);
 
     const [, first] = within(table).getAllByRole('row');
@@ -80,7 +82,16 @@ describe('ResultsTable columns', () => {
       throw new Error('The table shows no data row');
     }
     const cells = within(first).getAllByRole('cell');
-    expect(cells.map((cell) => cell.className)).toEqual(['', '', '', 'cell--nowrap', 'cell--nowrap', 'cell--actions']);
+    // cell--name wraps like City by default; the unframed search page keeps
+    // each name on one line through it (global.css .results-table--customers).
+    expect(cells.map((cell) => cell.className)).toEqual([
+      '',
+      'cell--name',
+      '',
+      'cell--nowrap',
+      'cell--nowrap',
+      'cell--actions',
+    ]);
     expect(within(cells[5] as HTMLElement).getAllByRole('button')).toHaveLength(2);
   });
 
@@ -89,6 +100,9 @@ describe('ResultsTable columns', () => {
 
     const box = table.parentElement;
     expect(box).toHaveClass('scroll-region');
+    // The box sets the compact rows and, on the search page, reserves a full
+    // page of rows, empty or not (global.css .customer-list).
+    expect(box).toHaveClass('customer-list');
     const caption = table.querySelector('caption');
     expect(caption).toHaveTextContent('Customers');
     expect(caption?.id).not.toBe('');

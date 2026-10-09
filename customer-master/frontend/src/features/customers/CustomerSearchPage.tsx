@@ -110,8 +110,9 @@ export function CustomerSearchPage() {
   const navigate = useNavigate();
   const panelMode: SearchMode = mode === 'MAINTENANCE' ? 'maintenance' : 'inquiry';
 
-  // screen--framed: on a large enough viewport the page fits above the toast
-  // band, its list scrolls inside the panel, and the key bar stays in view.
+  // screen--framed: on a large enough viewport the page fills the viewport,
+  // its footer and key bar stay at the bottom, its list scrolls inside the
+  // panel, and messages show over the end of the list (global.css frames).
   return (
     <main className="screen screen--framed">
       <CustomerSearchPanel key={panelMode} mode={panelMode} onExit={() => void navigate('/')} />

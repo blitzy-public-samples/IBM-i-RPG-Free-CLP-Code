@@ -36,6 +36,22 @@
  * `src/styles/global.css`). St, ZIP and the buttons stay on one line. Where
  * the columns do not fit, the table scrolls sideways in a `ScrollRegion`
  * named by its caption.
+ *
+ * That box (`.customer-list`) gives the rows their compact height. On the
+ * search page it also reserves the heading row and the twelve rows of a full
+ * page (`SFLPAG(0012)`, PMTCUSTD.DSPF:59), so an empty table, a short last
+ * page and a first page still loading take a full page's height, and the
+ * "More..." / "Bottom" line, the footer and the keys beneath stay where they
+ * are when rows arrive. Where the page is not framed (a narrow or short
+ * viewport), the Name column is at least `SF_NAME 40A` wide and each name
+ * (`cell--name`) stays on one line, as PMTCUSTD shows it at row 9, so no row
+ * and not the "Customer Name" heading wraps and the reservation holds any
+ * page; the table scrolls sideways there. On the framed page a
+ * long name wraps in a narrow Name column, which only moves the "More..." /
+ * "Bottom" line down the scrolling list, as the footer and keys stay at the
+ * viewport bottom. The Customer picker's window reserves nothing and sizes to
+ * its rows, so a short list and its "More..." / "Bottom" line show together
+ * without scrolling.
  */
 import { useId } from 'react';
 import type { CSSProperties } from 'react';
@@ -217,7 +233,7 @@ export function ResultsTable({
                 "… COMPANY Inactive", and as trailing line white space it
                 collapses, so nothing visible changes.
               */}
-              <td>
+              <td className="cell--name">
                 {name}
                 {inactive ? (
                   <>
@@ -244,5 +260,9 @@ export function ResultsTable({
     </table>
   );
 
-  return <ScrollRegion labelledBy={captionId}>{table}</ScrollRegion>;
+  return (
+    <ScrollRegion labelledBy={captionId} className="customer-list">
+      {table}
+    </ScrollRegion>
+  );
 }
