@@ -21,7 +21,10 @@
  *   `/demo/selection` returns to the Order entry host form.
  * - **Menu.** "Work with customers (Inquiry|Maintenance)" names the session's
  *   mode and reaches `/customers` in it; "Selection demo (Order entry)"
- *   reaches `/demo/selection`.
+ *   reaches `/demo/selection`. A route change never leaves focus on the page
+ *   body: the menu opens with focus on its first link (after sign-in and on
+ *   return from the search page), where Enter keeps its native action, and
+ *   the host form opens with focus in "Customer id +".
  * - **Sign-out.** The Sign out button, the F3 key and the F3=Exit legend
  *   button each route to `/sign-in` and end the session: a guarded path
  *   redirects to `/sign-in` again, and a request the application's own API
@@ -432,8 +435,12 @@ describe('App', () => {
           `Work with customers (${modeLabel})`,
           'Selection demo (Order entry)',
         ]);
+        // Sign-in unmounted the focused Sign in button; the menu takes focus
+        // onto its first link rather than leaving it on the page body.
+        const workWithCustomers = within(menu).getByRole('link', { name: `Work with customers (${modeLabel})` });
+        await waitFor(() => expect(workWithCustomers).toHaveFocus());
 
-        await user.click(within(menu).getByRole('link', { name: `Work with customers (${modeLabel})` }));
+        await user.click(workWithCustomers);
 
         await waitFor(() => expect(window.location.pathname).toBe('/customers'));
         expect(await screen.findByText(modeLabel, { selector: 'p' })).toBeInTheDocument();
@@ -441,7 +448,25 @@ describe('App', () => {
       },
     );
 
-    it('"Selection demo (Order entry)" reaches the host form at /demo/selection', async () => {
+    it('opens with focus on its first link, where Enter keeps its native action and reaches /customers', async () => {
+      const { user } = await renderApp('/');
+      await expectSignInScreen();
+      await signIn(user, INQUIRY_USER);
+      const menu = await findMenu();
+      await waitFor(() =>
+        expect(within(menu).getByRole('link', { name: 'Work with customers (Inquiry)' })).toHaveFocus(),
+      );
+
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(window.location.pathname).toBe('/customers'));
+      expect(await screen.findByText('Inquiry', { selector: 'p' })).toBeInTheDocument();
+      expect(screen.queryByRole('navigation', { name: 'Main menu' })).not.toBeInTheDocument();
+      // Enter is unbound on the menu, so it raised no DEM0003.
+      expect(screen.getByRole('alert')).toBeEmptyDOMElement();
+    });
+
+    it('"Selection demo (Order entry)" reaches the host form at /demo/selection, with focus in "Customer id +"', async () => {
       const { user } = await renderApp('/');
       await expectSignInScreen();
       await signIn(user, INQUIRY_USER);
@@ -451,7 +476,9 @@ describe('App', () => {
 
       await waitFor(() => expect(window.location.pathname).toBe('/demo/selection'));
       expect(await screen.findByText('Order entry', { selector: 'p' })).toBeInTheDocument();
-      expect(screen.getByLabelText('Customer id +')).toBeInTheDocument();
+      // The clicked menu link unmounted; the host form puts the cursor on its
+      // first input field.
+      await waitFor(() => expect(screen.getByLabelText('Customer id +')).toHaveFocus());
       expect(screen.queryByRole('navigation', { name: 'Main menu' })).not.toBeInTheDocument();
     });
   });
@@ -595,7 +622,11 @@ describe('App', () => {
 
       await waitFor(() => expect(window.location.pathname).toBe('/'));
       const menu = await findMenu();
-      expect(within(menu).getByRole('link', { name: 'Work with customers (Inquiry)' })).toBeInTheDocument();
+      // The search page's focused Name filter unmounted; the menu takes focus
+      // onto its first link.
+      await waitFor(() =>
+        expect(within(menu).getByRole('link', { name: 'Work with customers (Inquiry)' })).toHaveFocus(),
+      );
       // The menu's own F3 signs out; it did not run for the same keypress.
       expect(screen.getByText(INQUIRY_USER.username)).toBeInTheDocument();
       expect(window.location.pathname).toBe('/');
@@ -605,8 +636,11 @@ describe('App', () => {
       const { user } = await renderApp('/demo/selection');
       await expectSignInScreen();
       await signIn(user, INQUIRY_USER);
-      expect(await screen.findByText('Order entry', { selector: 'p' })).toBeInTheDocument();
-      // Focus is off the "Customer id +" field, so F4 there is DEM0005.
+      const hostFunction = await screen.findByText('Order entry', { selector: 'p' });
+      await waitFor(() => expect(screen.getByLabelText('Customer id +')).toHaveFocus());
+      // A click on plain text takes focus off the "Customer id +" field, so F4
+      // there is DEM0005.
+      await user.click(hostFunction);
       expect(document.body).toHaveFocus();
       const alert = screen.getByRole('alert');
 

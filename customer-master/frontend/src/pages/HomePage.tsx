@@ -15,9 +15,16 @@
  * answered with DEM0003 from the message catalog, so an accidental F5 cannot
  * reload the page and drop the in-memory credentials.
  *
+ * Focus on open: whenever the menu is shown (after sign-in, or on return from
+ * the search page or the Selection host form), focus moves to the first menu
+ * link, "Work with customers (…)", so the new screen is announced and Enter
+ * opens the search page at once. The element focused on the screen just left
+ * has unmounted, so focus would otherwise fall to the page body.
+ *
  * Paths are literal: this file never imports `../routes`, which imports it,
  * so no import cycle can form.
  */
+import { useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import { FunctionKeyBar } from '../components/FunctionKeyBar';
@@ -35,6 +42,13 @@ export function HomePage() {
   const { username, mode, signOut } = useAuth();
   const { publish } = useToasts();
   const { format } = useMessages();
+  const firstLinkRef = useRef<HTMLAnchorElement>(null);
+
+  // The cursor on open: the first menu link. This effect only moves focus;
+  // the key scope never does.
+  useEffect(() => {
+    firstLinkRef.current?.focus();
+  }, []);
 
   /**
    * The one exit handler, shared by F3, F3=Exit and Sign out. Calling
@@ -57,7 +71,7 @@ export function HomePage() {
       <nav aria-label="Main menu">
         <ul>
           <li>
-            <Link to="/customers">Work with customers ({modeLabel})</Link>
+            <Link to="/customers" ref={firstLinkRef}>Work with customers ({modeLabel})</Link>
           </li>
           <li>
             <Link to="/demo/selection">Selection demo (Order entry)</Link>

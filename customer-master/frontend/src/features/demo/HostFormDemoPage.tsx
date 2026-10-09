@@ -8,8 +8,14 @@
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:245-249] and sets it only on option 1
  * [5250_Subfile/PMTCUSTR.SQLRPGLE:439-445]. So option 1 writes the id into
  * "Customer id +", and a cancel (F3, F12 or Escape in the picker) returns
- * nothing and the field keeps its value. After either, the cursor is back in
- * "Customer id +", as a 5250 prompt returned the cursor to the prompted field.
+ * nothing and the field keeps its value.
+ *
+ * Focus. The screen opens with the cursor in "Customer id +", its first input
+ * field. After option 1 the cursor is back in "Customer id +", which now holds
+ * the id, as a 5250 prompt returned the cursor to the prompted field. After a
+ * cancel, focus returns to the control that opened the picker: the field when
+ * F4 or F4=Prompt+ prompted from it, the "Look up customer" button when it was
+ * clicked or held focus for F4 or F4=Prompt+.
  *
  * F4, or the F4=Prompt+ button (it takes no focus when clicked), prompts only
  * while focus is on the field or the "Look up customer" button; anywhere else
@@ -42,6 +48,9 @@ const CUSTOMER_ID_FIELD = 'order-custid';
 /** The 4-character base-36 CUSTID. */
 const CUSTOMER_ID_LENGTH = 4;
 
+/** The two controls that open the picker: "Customer id +" and "Look up customer". */
+type PickerInvoker = 'field' | 'lookup';
+
 /** Route component of `/demo/selection`; takes no props. */
 export function HostFormDemoPage() {
   const navigate = useNavigate();
@@ -54,30 +63,49 @@ export function HostFormDemoPage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const lookupButtonRef = useRef<HTMLButtonElement>(null);
-  // Set by a selection or a cancel; the focus effect clears it once focus is
-  // back in the field. Written in handlers, read only in the effect.
-  const refocusFieldRef = useRef(false);
+  // The control that opened the picker, set as it opens. Written in handlers,
+  // read only in handlers.
+  const invokerRef = useRef<PickerInvoker>('field');
+  // Where focus goes once the picker has closed: the field after a selection,
+  // the invoker after a cancel; null while no close is pending. Written in
+  // handlers, read and cleared only in the focus effect.
+  const returnFocusRef = useRef<PickerInvoker | null>(null);
 
-  // Dialog's cleanup returns focus to its invoker (the lookup button when that
-  // opened it) synchronously while the picker unmounts. React runs a commit's
-  // unmount cleanups before the passive effects it creates, so this effect
-  // runs after that focus return and the field wins.
+  // The cursor on open: "Customer id +", the screen's first input field, as a
+  // 5250 display positions it. This effect only moves focus.
   useEffect(() => {
-    if (pickerOpen || !refocusFieldRef.current) {
+    inputRef.current?.focus();
+  }, []);
+
+  // Dialog's cleanup returns focus to the element that had it when the picker
+  // opened, synchronously while the picker unmounts. React runs a commit's
+  // unmount cleanups before the passive effects it creates, so this effect
+  // runs after that focus return and has the last word. It names the target
+  // itself rather than trusting that return: a browser that does not focus a
+  // clicked button leaves focus where it was when "Look up customer" is
+  // clicked, so Dialog may hold the field or nothing instead of the button.
+  useEffect(() => {
+    const target = returnFocusRef.current;
+    if (pickerOpen || target === null) {
       return;
     }
-    refocusFieldRef.current = false;
-    inputRef.current?.focus();
+    returnFocusRef.current = null;
+    (target === 'field' ? inputRef.current : lookupButtonRef.current)?.focus();
   }, [pickerOpen]);
 
-  function openPicker(): void {
+  function openPicker(invoker: PickerInvoker): void {
+    invokerRef.current = invoker;
     setPickerOpen(true);
   }
 
   function prompt(): void {
     const active = document.activeElement;
-    if (active !== null && (active === inputRef.current || active === lookupButtonRef.current)) {
-      openPicker();
+    if (active !== null && active === inputRef.current) {
+      openPicker('field');
+      return;
+    }
+    if (active !== null && active === lookupButtonRef.current) {
+      openPicker('lookup');
       return;
     }
     publish({ kind: 'alert', text: format('DEM0005') });
@@ -85,12 +113,12 @@ export function HostFormDemoPage() {
 
   function handleSelect(selected: string): void {
     setCustId(selected);
-    refocusFieldRef.current = true;
+    returnFocusRef.current = 'field';
     setPickerOpen(false);
   }
 
   function handleCancel(): void {
-    refocusFieldRef.current = true;
+    returnFocusRef.current = invokerRef.current;
     setPickerOpen(false);
   }
 
@@ -125,7 +153,7 @@ export function HostFormDemoPage() {
           autoComplete="off"
           size={CUSTOMER_ID_LENGTH}
         />
-        <button type="button" ref={lookupButtonRef} aria-haspopup="dialog" onClick={() => openPicker()}>
+        <button type="button" ref={lookupButtonRef} aria-haspopup="dialog" onClick={() => openPicker('lookup')}>
           Look up customer
         </button>
       </div>

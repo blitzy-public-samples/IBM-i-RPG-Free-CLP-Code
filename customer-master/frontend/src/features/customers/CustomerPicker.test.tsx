@@ -20,7 +20,7 @@
  * between them.
  */
 import type { ReactElement, ReactNode } from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -239,8 +239,8 @@ interface HostFormHandle {
 /**
  * Renders the production Order entry host form (`HostFormDemoPage`) at
  * {@link HOST_PATH}, in a route table whose `/` shows {@link HOME_MARKER},
- * and resolves once the catalog has loaded. The picker it hosts is closed,
- * and nothing has focus.
+ * and resolves once the catalog has loaded and "Customer id +", where the form
+ * puts the cursor on open, has focus. The picker it hosts is closed.
  */
 async function renderHostForm(): Promise<HostFormHandle> {
   const user = await renderWithProviders(
@@ -254,7 +254,14 @@ async function renderHostForm(): Promise<HostFormHandle> {
   if (!(field instanceof HTMLInputElement)) {
     throw new Error(`The ${CUSTOMER_ID_LABEL} label does not name an input`);
   }
+  await waitFor(() => expect(field).toHaveFocus());
   return { user, field, lookup: screen.getByRole('button', { name: LOOKUP_BUTTON }) };
+}
+
+/** Takes focus off every control of the host form, as a click on its plain function-line text does. */
+async function focusOffHostControls(user: UserEvent): Promise<void> {
+  await user.click(screen.getByText(HOST_FUNCTION, { selector: 'p' }));
+  expect(document.body).toHaveFocus();
 }
 
 /**
@@ -590,11 +597,13 @@ describe('CustomerPicker', () => {
   });
 
   describe('in the Order entry host form', () => {
-    it('shows "Customer id +" as a four-character field that uppercases as typed, beside "Look up customer" and the F3, F4 and F12 legend', async () => {
+    it('opens with focus in "Customer id +", a four-character field that uppercases as typed, beside "Look up customer" and the F3, F4 and F12 legend', async () => {
       const { user, field, lookup } = await renderHostForm();
 
       expect(screen.getByRole('heading', { name: 'Customer Master' })).toBeInTheDocument();
       expectHostShown();
+      // The cursor starts on the screen's first input field, not the page body.
+      expect(field).toHaveFocus();
       expect(field).toHaveAttribute('maxlength', '4');
       expect(field).toHaveValue('');
       expect(lookup).toHaveAttribute('aria-haspopup', 'dialog');
@@ -611,7 +620,7 @@ describe('CustomerPicker', () => {
       expect(traffic).toEqual([]);
     });
 
-    it('"Look up customer" opens the picker; option 1 writes the id into the field and puts focus back in the field, not on the button; a reopened picker starts fresh, and F12 there leaves the field as it was', async () => {
+    it('"Look up customer" opens the picker; option 1 writes the id into the field and puts focus back in the field, not on the button; a reopened picker starts fresh, and F12 there leaves the field as it was and focus on the button that opened it', async () => {
       const { user, field, lookup } = await renderHostForm();
 
       await user.click(lookup);
@@ -643,7 +652,9 @@ describe('CustomerPicker', () => {
 
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
       expect(field).toHaveValue(URNA.custId);
-      await waitFor(() => expect(field).toHaveFocus());
+      // A cancel returns focus to the invoking control, here the button.
+      await waitFor(() => expect(lookup).toHaveFocus());
+      expect(field).not.toHaveFocus();
       expectHostShown();
       expect(searches()).toEqual([firstPageQuery('URNA')]);
       expect(alertRegion()).toBeEmptyDOMElement();
@@ -692,7 +703,7 @@ describe('CustomerPicker', () => {
       ['F12', '{F12}'],
       ['Escape', '{Escape}'],
       ['F3', '{F3}'],
-    ])('%s in the picker cancels only the picker: the field keeps its value and gets focus back, and the host form stays', async (_key, keys) => {
+    ])('%s in a picker prompted from the field with F4 cancels only the picker: the field keeps its value and gets focus back, and the host form stays', async (_key, keys) => {
       const { user, field } = await renderHostForm();
       await user.type(field, 'ab');
       await user.keyboard('{F4}');
@@ -714,9 +725,79 @@ describe('CustomerPicker', () => {
       expect(alertRegion()).toBeEmptyDOMElement();
     });
 
+    it.each([
+      ['F12', '{F12}'],
+      ['Escape', '{Escape}'],
+      ['F3', '{F3}'],
+    ])('%s in a picker opened by clicking "Look up customer" cancels it and puts focus back on the button, not the field', async (_key, keys) => {
+      const { user, field, lookup } = await renderHostForm();
+      await user.type(field, 'ab');
+      await user.click(lookup);
+      const dialog = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(dialog)).toHaveFocus());
+
+      await user.keyboard(keys);
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(field).toHaveValue('AB');
+      await waitFor(() => expect(lookup).toHaveFocus());
+      expect(field).not.toHaveFocus();
+      expectHostShown();
+      expect(traffic).toEqual([]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
+    it.each([
+      [
+        'F4 with focus on "Look up customer"',
+        async ({ user, lookup }: HostFormHandle) => {
+          await user.tab();
+          expect(lookup).toHaveFocus();
+          await user.keyboard('{F4}');
+        },
+      ],
+      [
+        'the F4=Prompt+ legend button with focus on "Look up customer"',
+        async ({ user, lookup }: HostFormHandle) => {
+          await user.tab();
+          expect(lookup).toHaveFocus();
+          await user.click(hostLegendKey('F4=Prompt+'));
+        },
+      ],
+      [
+        'a click on "Look up customer" that leaves focus in the field',
+        async ({ field, lookup }: HostFormHandle) => {
+          expect(field).toHaveFocus();
+          // A bare click event moves no focus, as in a browser that does not
+          // focus a clicked button, so the picker's Dialog records the field,
+          // not the button, as the element focused when it opened.
+          fireEvent.click(lookup);
+        },
+      ],
+    ])('a picker opened by %s and cancelled with Escape puts focus back on "Look up customer"', async (_how, open) => {
+      const host = await renderHostForm();
+      await host.user.type(host.field, 'ab');
+
+      await open(host);
+
+      const dialog = await screen.findByRole('dialog', { name: PICKER_NAME });
+      await waitFor(() => expect(nameFilter(dialog)).toHaveFocus());
+
+      await host.user.keyboard('{Escape}');
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(host.field).toHaveValue('AB');
+      await waitFor(() => expect(host.lookup).toHaveFocus());
+      expect(host.field).not.toHaveFocus();
+      expectHostShown();
+      expect(traffic).toEqual([]);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    });
+
     it('F4, and the F4=Prompt+ button, with focus off the field show DEM0005 "Use F4 only if + is on field" and open nothing', async () => {
       const { user } = await renderHostForm();
-      expect(document.body).toHaveFocus();
+      // The form opens with focus in the field; a click on plain text takes it off.
+      await focusOffHostControls(user);
 
       await user.keyboard('{F4}');
 
