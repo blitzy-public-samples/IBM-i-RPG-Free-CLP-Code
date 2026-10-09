@@ -27,7 +27,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Specifies step 1 of {@link CustomerGeneratorRunner#execute(org.springframework.boot.ApplicationArguments)},
- * the strict options, for arguments whose value is missing and for fully qualified generator options.
+ * the strict options, for arguments whose value is missing or empty and for fully qualified generator
+ * options.
  *
  * <p><b>Why a missing value must fail.</b> Spring Boot parses a bare {@code --seed} as an option with no
  * value and exposes it as the property value {@code ""}, so the bridge in {@code application-generator.yml}
@@ -36,6 +37,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * out. Each of the four flags and each accepted fully qualified generator property given without a
  * value therefore prints {@code Option --<name> requires a value} and exits 1 before the CSZ file is
  * read or the database is touched.
+ *
+ * <p><b>Why an empty value must fail.</b> An explicitly empty or blank value, such as {@code --count=}
+ * from a script whose {@code $N} is unset, is a present property that shadows the option's
+ * {@code GENERATOR_*} variable in the bridge and then binds as the default, so the load would run with
+ * that default (300 rows, the automatic start id, the bundled sample or a random seed), replace the
+ * table and exit 0. It is rejected exactly like the bare flag, also when only one value of a repeated
+ * option is empty.
  *
  * <p><b>Why a mistyped qualified name must fail.</b> A name under {@code customer-master.generator.}
  * that is not one of {@link CustomerGeneratorRunner#QUALIFIED_OPTIONS}, such as
@@ -46,13 +54,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <p><b>Usage guidance.</b> Every unknown option or argument, {@code --help} included since the strict
  * options accept no help flag, is followed by exactly one {@link CustomerGeneratorRunner#USAGE} line
  * naming the four flags, their {@code GENERATOR_*} variables, ranges, defaults and an example; a
- * valueless option prints its one line only.
+ * valueless or empty-valued option prints its one line only.
  *
- * <p><b>What stays accepted.</b> An explicitly empty value such as {@code --seed=} still selects its
- * default (an empty start id is the automatic start, an empty seed is random), each accepted qualified
- * property with a value proceeds to the load, a bare {@code --spring.*} option is not judged, and an
- * unknown option still prints {@code Unknown option --<name>} and the usage line, ahead of any missing
- * value.
+ * <p><b>What stays accepted.</b> Each accepted qualified property with a non-blank value proceeds to
+ * the load, a bare {@code --spring.*} option is not judged, and an unknown option still prints
+ * {@code Unknown option --<name>} and the usage line, ahead of any missing or empty value.
  *
  * <p>The runner is built through its package-private constructor with mocked collaborators and a
  * captured output stream, so the options are judged exactly as the runner receives them from
@@ -298,33 +304,97 @@ class CustomerGeneratorRunnerOptionsTest {
     }
 
     /**
-     * Command lines with one explicitly empty value, which selects that option's default.
+     * Each generator option given an empty or blank value, the other options of a valid load given with
+     * values: the four flags, whitespace-only values, every accepted fully qualified property, and a
+     * repeated flag of which one value is empty.
      *
-     * @return the empty option and the command line holding it
+     * @return the empty-valued option as given, the option name as printed and the command line
      */
-    static Stream<Arguments> explicitlyEmptyOptions() {
+    static Stream<Arguments> emptyValuedOptions() {
         return Stream.of(
-                Arguments.of("--seed=", new String[] {PROFILE_OPTION, "--seed=", "--count=5", "--start-id=C000"}),
-                Arguments.of("--start-id=", new String[] {PROFILE_OPTION, "--count=5", "--start-id=", "--seed=7"}),
-                Arguments.of("--csz-file=",
-                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=C000", "--csz-file="}),
-                Arguments.of("--customer-master.generator.seed=",
-                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.seed="}));
+                Arguments.of("--count=", "count",
+                        new String[] {PROFILE_OPTION, "--count=", "--start-id=C000", "--seed=7"}),
+                Arguments.of("--start-id=", "start-id",
+                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=", "--seed=7"}),
+                Arguments.of("--csz-file=", "csz-file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=C000", "--csz-file=", "--seed=7"}),
+                Arguments.of("--seed=", "seed",
+                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=C000", "--seed="}),
+                Arguments.of("--seed=<blank>", "seed",
+                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=C000", "--seed= "}),
+                Arguments.of("--count=<tab>", "count",
+                        new String[] {PROFILE_OPTION, "--count=\t", "--start-id=C000", "--seed=7"}),
+                Arguments.of("--csz-file=<blanks>", "csz-file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--start-id=C000", "--csz-file=   "}),
+                Arguments.of("--customer-master.generator.count=", "customer-master.generator.count",
+                        new String[] {PROFILE_OPTION, "--customer-master.generator.count=", "--start-id=C000"}),
+                Arguments.of("--customer-master.generator.start-id=", "customer-master.generator.start-id",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.start-id="}),
+                Arguments.of("--customer-master.generator.startId=", "customer-master.generator.startId",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.startId="}),
+                Arguments.of("--customer-master.generator.start_id=", "customer-master.generator.start_id",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.start_id="}),
+                Arguments.of("--customer-master.generator.csz-file=", "customer-master.generator.csz-file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.csz-file="}),
+                Arguments.of("--customer-master.generator.cszFile=", "customer-master.generator.cszFile",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.cszFile="}),
+                Arguments.of("--customer-master.generator.csz_file=", "customer-master.generator.csz_file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.csz_file="}),
+                Arguments.of("--customer-master.generator.seed=", "customer-master.generator.seed",
+                        new String[] {PROFILE_OPTION, "--count=5", "--customer-master.generator.seed="}),
+                Arguments.of("--csz-file=x --csz-file=", "csz-file",
+                        new String[] {PROFILE_OPTION, "--count=5", "--csz-file=x", "--csz-file="}),
+                Arguments.of("--seed= --seed=7", "seed",
+                        new String[] {PROFILE_OPTION, "--count=5", "--seed=", "--seed=7"}));
     }
 
     @ParameterizedTest(name = "{0}")
-    @MethodSource("explicitlyEmptyOptions")
-    @DisplayName("an explicitly empty value is accepted and the load proceeds")
-    void explicitlyEmptyValueProceeds(String emptyOption, String[] args) {
-        stubSuccessfulLoad();
-
+    @MethodSource("emptyValuedOptions")
+    @DisplayName("a generator option with an empty or blank value fails like a bare one, before any CSZ read or"
+            + " database work")
+    void emptyValuedGeneratorOptionFails(String given, String name, String[] args) {
         int status = runner.execute(new DefaultApplicationArguments(args));
 
+        assertThat(status).as("exit status of %s", given).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).as("printed lines of %s", given)
+                .containsExactly("Option --" + name + " requires a value");
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("empty-valued and valueless options together report the first in sorted order")
+    void firstEmptyOrValuelessOptionInSortedOrder() {
+        int status = runner.execute(new DefaultApplicationArguments("--seed", "--start-id=", "--count=5",
+                "--csz-file="));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).containsExactly("Option --csz-file requires a value");
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("an unknown option is reported ahead of an empty-valued one")
+    void unknownOptionBeforeEmptyValued() {
+        int status = runner.execute(new DefaultApplicationArguments("--count=", "--cuont=5"));
+
+        assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(printedLines()).containsExactly("Unknown option --cuont", CustomerGeneratorRunner.USAGE);
+        verifyNoInteractions(cszSource, loader, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("an empty --spring.* value is not judged")
+    void emptySpringOptionAccepted() {
+        stubSuccessfulLoad();
+
+        int status = runner.execute(new DefaultApplicationArguments(
+                PROFILE_OPTION, "--spring.main.banner-mode=", "--count=5", "--start-id=C000", "--seed=7"));
+
         assertThat(status).isEqualTo(CustomerGeneratorRunner.EXIT_SUCCESS);
-        assertThat(printedLines()).singleElement().asString()
-                .matches("Loaded 5 customers C000\\.\\.C004 in \\d+\\.\\d s");
+        assertThat(printedLines()).singleElement().asString().startsWith("Loaded 5 customers C000..C004 in ");
         verify(cszSource).load(GeneratorProperties.DEFAULT_CSZ_FILE);
         verify(loader).load(any(CustomerLoader.Plan.class));
+        verify(jdbcTemplate).execute(CustomerGeneratorRunner.ANALYZE_SQL);
     }
 
     @Test

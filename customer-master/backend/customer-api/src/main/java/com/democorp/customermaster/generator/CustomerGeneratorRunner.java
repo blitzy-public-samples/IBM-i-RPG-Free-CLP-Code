@@ -65,7 +65,9 @@ import org.springframework.stereotype.Component;
  * line. Spring Boot's {@code --debug}, {@code --trace} and {@code --logging.*} are rejected too;
  * logging is tuned through {@code LOGGING_LEVEL_*} environment variables instead. A generator option
  * given without a value prints {@code Option --<name> requires a value}
- * ({@link #firstValuelessOption(ApplicationArguments)}).
+ * ({@link #firstValuelessOption(ApplicationArguments)}), and so does one given an empty or blank value,
+ * such as {@code --count=} from a script whose {@code $N} is unset: it is rejected like the bare flag,
+ * so it can neither shadow its {@code GENERATOR_*} variable nor fall back to the default.
  *
  * <p><b>Steps.</b> {@code executeSteps} checks the options, the start id
  * ({@link #resolveStart(String, int)}) and the id capacity ({@link #fitsCapacity(CustomerId, int)}),
@@ -300,7 +302,7 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
      * {@link Error}, or a failure raised while the report is logged or printed, propagates.
      *
      * @param args the parsed command line; its option names, its non-option arguments and whether
-     *             each generator option carries a value are checked, while the values themselves
+     *             each generator option carries a non-blank value are checked, while the values themselves
      *             arrive already bound in {@link GeneratorProperties}
      * @return {@value #EXIT_SUCCESS} when the rows are committed, otherwise {@value #EXIT_FAILURE}
      */
@@ -448,21 +450,25 @@ public class CustomerGeneratorRunner implements ApplicationRunner, ExitCodeGener
     }
 
     /**
-     * Finds the first generator option given without a value, such as a bare {@code --seed}. Spring Boot
-     * binds a bare option as an empty value, which would select the automatic start id, the bundled
-     * sample or a random seed instead of the value the operator left out. An explicitly empty value
-     * such as {@code --seed=} carries a value and still selects that default, and a bare
-     * {@code --spring.*} option is not judged here.
+     * Finds the first generator option given without a value, such as a bare {@code --seed}, or with an
+     * empty or blank one, such as {@code --count=} from a script whose {@code $N} is unset. Spring Boot
+     * binds a bare option as an empty value, and an empty value is a present property that shadows the
+     * option's {@code GENERATOR_*} variable in the bridge and then binds as the default: 300 rows, the
+     * automatic start id, the bundled sample or a random seed, instead of the value the operator meant.
+     * So an option is reported when it has no value or when any of its values, a repeated option's
+     * included, is blank. A whitespace-only start id or seed already fails binding, by the start-id
+     * pattern and the number conversion of {@link GeneratorProperties}, so in a process it ends context
+     * startup before this check. A bare {@code --spring.*} option is not judged here.
      *
      * @param args the parsed command line
      * @return {@code --<name>} for the first flag or fully qualified generator property, in sorted
-     *         order, that has no value, otherwise empty
+     *         order, that has no value or an empty or blank one, otherwise empty
      */
     static Optional<String> firstValuelessOption(ApplicationArguments args) {
         for (String name : new TreeSet<>(args.getOptionNames())) {
             if (isGeneratorOption(name)) {
                 List<String> values = args.getOptionValues(name);
-                if (values == null || values.isEmpty()) {
+                if (values == null || values.isEmpty() || values.stream().anyMatch(String::isBlank)) {
                     return Optional.of("--" + oneLine(name));
                 }
             }

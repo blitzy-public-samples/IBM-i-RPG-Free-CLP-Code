@@ -31,9 +31,11 @@ import org.springframework.validation.annotation.Validated;
  * flag ({@code --count}, {@code --start-id}, {@code --csz-file}, {@code --seed}) wins over its
  * {@code GENERATOR_*} environment variable, which wins over the default; a fully qualified
  * {@code --customer-master.generator.count=N} also works, because command-line properties outrank
- * the profile file. An empty value means "not given": {@code startId} binds as {@code ""},
- * {@code seed} as {@code null}, and an empty or whitespace-only {@code count} as the default
- * through {@code BlankCountAdvisor}.
+ * the profile file. An empty value at bind time, such as an empty {@code GENERATOR_*} variable, means
+ * "not given": {@code startId} binds as {@code ""}, {@code seed} as {@code null}, and an empty or
+ * whitespace-only {@code count} as the default through {@code BlankCountAdvisor}. A command-line
+ * flag given an empty value ({@code --count=}) binds the same way, but {@code CustomerGeneratorRunner}
+ * rejects it before any work, as it rejects a bare flag.
  *
  * <p><b>Validation.</b> Binding validates the options: a value outside the ranges and formats
  * below, such as a {@code startId} of blanks only, or a non-blank {@code count} or a {@code seed}
@@ -112,7 +114,9 @@ public record GeneratorProperties(
      * is absent, so a present but empty {@code GENERATOR_COUNT} (or {@code --count=}) resolves to
      * {@code ""}. Spring's String-to-Number conversion maps that to null, and a null cannot be
      * assigned to the primitive {@code int count}, so binding would fail before the constructor
-     * default is reached.
+     * default is reached. With this advisor an empty variable means the default; an empty or bare
+     * {@code --count} flag binds the same way, and {@code CustomerGeneratorRunner} then rejects it
+     * before any work.
      *
      * <p><b>How.</b> The handler acts in {@code onStart} of that one key only. It binds the key as
      * a {@code String} through {@link BindContext#getBinder()}, that is with the binder's own

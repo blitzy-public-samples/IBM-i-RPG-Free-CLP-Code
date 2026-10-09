@@ -25,7 +25,10 @@ spring:
 # "count", not customer-master.generator.count, so each flat flag is mapped here.
 # Precedence: command-line flag > GENERATOR_* variable > default. A fully
 # qualified --customer-master.generator.count=N also wins, because command-line
-# properties outrank this file. Empty start-id and seed mean "not given".
+# properties outrank this file. Empty start-id and seed mean "not given". A
+# command-line flag given an empty or blank value (--count=) is rejected before
+# any read or write: by CustomerGeneratorRunner, like a bare flag, or, for a
+# whitespace-only start-id or seed, already by binding.
 customer-master:
   generator:
     count: ${count:${GENERATOR_COUNT:300}}

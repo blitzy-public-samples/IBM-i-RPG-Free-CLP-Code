@@ -28,6 +28,8 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.TypeExcludeFilter;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
@@ -258,6 +260,47 @@ class GeneratorProcessIT extends AbstractPostgresIT {
         assertThat(checksum()).as("name checksum after --cuont=5; %s", result.describe()).isEqualTo(checksumBefore);
         assertThat(jdbcTemplate.queryForMap(SEQUENCE_STATE_SQL))
                 .as("custmast_id_seq after --cuont=5; %s", result.describe())
+                .isEqualTo(sequenceBefore);
+    }
+
+    /**
+     * A flag given an empty value, as a script's {@code --count=$N} with {@code N} unset passes it, while
+     * every {@code GENERATOR_*} variable holds a valid value. The empty flag would otherwise shadow its
+     * variable and bind as the default (300 rows, start {@code 1001}, the bundled sample or a random
+     * seed) and replace the table with exit 0; it is rejected like the bare flag instead.
+     *
+     * @param flag the flag given as {@code --<flag>=}
+     */
+    @ParameterizedTest(name = "--{0}=")
+    @ValueSource(strings = {"count", "start-id", "csz-file", "seed"})
+    @DisplayName("A flag given an empty value exits 1 with 'requires a value' instead of overriding its GENERATOR_*"
+            + " variable, leaving table and sequence untouched")
+    void emptyFlagValueExitsOneAndChangesNothing(String flag) {
+        jdbcTemplate.update(PRELOAD_SQL);
+        long countBefore = rowCount();
+        String checksumBefore = checksum();
+        Map<String, Object> sequenceBefore = jdbcTemplate.queryForMap(SEQUENCE_STATE_SQL);
+        String option = "--" + flag + "=";
+        String rejection = "Option --" + flag + " requires a value";
+
+        RunResult result = run(
+                Map.of("GENERATOR_COUNT", "40",
+                        "GENERATOR_START_ID", "C000",
+                        "GENERATOR_CSZ_FILE", testCszPath().toString(),
+                        "GENERATOR_SEED", "11"),
+                option);
+
+        assertThat(result.exitCode()).as("exit status of %s; %s", option, result.describe())
+                .isEqualTo(CustomerGeneratorRunner.EXIT_FAILURE);
+        assertThat(result.output()).as("output of %s; %s", option, result.describe())
+                .contains(rejection)
+                .containsPattern(Pattern.compile("(?m)^" + Pattern.quote(rejection) + "\\r?$"))
+                .doesNotContainPattern(LOADED_REPORT);
+        assertGeneratorLog(result);
+        assertThat(rowCount()).as("row count after %s; %s", option, result.describe()).isEqualTo(countBefore);
+        assertThat(checksum()).as("name checksum after %s; %s", option, result.describe()).isEqualTo(checksumBefore);
+        assertThat(jdbcTemplate.queryForMap(SEQUENCE_STATE_SQL))
+                .as("custmast_id_seq after %s; %s", option, result.describe())
                 .isEqualTo(sequenceBefore);
     }
 

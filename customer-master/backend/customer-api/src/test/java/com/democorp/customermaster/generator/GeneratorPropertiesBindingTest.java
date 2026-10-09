@@ -135,7 +135,7 @@ final class GeneratorPropertiesBindingTest {
     }
 
     @Test
-    @DisplayName("bridge: an explicitly empty --count= yields 300")
+    @DisplayName("bridge: an explicitly empty --count= yields 300 (CustomerGeneratorRunner rejects the empty value)")
     void bridgeEmptyFlagYieldsDefault() {
         assertCount(bridged(Map.of("GENERATOR_COUNT", "40"), "--count="), DEFAULT_COUNT);
     }
