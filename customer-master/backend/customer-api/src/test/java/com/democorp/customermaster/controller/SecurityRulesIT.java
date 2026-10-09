@@ -159,8 +159,10 @@ class SecurityRulesIT extends AbstractPostgresIT {
      * The request matrix: every endpoint of the authorization rules with its expected status for an
      * anonymous, an {@code INQUIRY} and a {@code MAINTENANCE} caller, and the stored state the
      * maintenance call must leave. {@value #ID_VARIABLE} in a path stands for the setup customer's id.
-     * The last two rows cover "anything else: authenticated": an unknown path and a method no rule or
-     * route serves, so neither can be probed anonymously and no customer can be deleted.
+     * The last four rows cover "anything else: authenticated": an unknown path, the Actuator base path
+     * with and without its trailing slash, and a method no rule or route serves. None can be probed
+     * anonymously, the Actuator lists no endpoints beyond its health probes, and no customer can be
+     * deleted.
      *
      * @return one argument set per request: label, method, path, body supplier ({@code null} for no
      *     body), the three expected statuses and the maintenance effect
@@ -195,6 +197,8 @@ class SecurityRulesIT extends AbstractPostgresIT {
                         200, 200, 200, Effect.NONE),
                 // Anything else: authenticated first, then the MVC layer's own answer.
                 row("GET /api/nope", HttpMethod.GET, "/api/nope", null, 401, 404, 404, Effect.NONE),
+                row("GET /actuator", HttpMethod.GET, "/actuator", null, 401, 404, 404, Effect.NONE),
+                row("GET /actuator/", HttpMethod.GET, "/actuator/", null, 401, 404, 404, Effect.NONE),
                 row("DELETE /api/customers/{id}", HttpMethod.DELETE, CUSTOMER, null, 401, 405, 405, Effect.NONE));
     }
 
@@ -529,6 +533,27 @@ class SecurityRulesIT extends AbstractPostgresIT {
                 HttpStatus.NOT_FOUND, APP0400, NO_SUCH_RESOURCE, "/api/nope");
         assertProblem(send(maintenance(), HttpMethod.GET, "/api/nope", null),
                 HttpStatus.NOT_FOUND, APP0400, NO_SUCH_RESOURCE, "/api/nope");
+    }
+
+    /**
+     * The Actuator serves its health probes only: {@code /actuator}, where Spring Boot would list the
+     * exposed endpoints, has no links page. It is not public, so an anonymous request is answered 401
+     * {@code APP0401}, and an authenticated caller learns only that no such resource exists, from a 404
+     * {@code APP0400} problem that carries none of the links page's {@code _links}.
+     */
+    @Test
+    void actuatorListsNoEndpoints() {
+        for (String uri : List.of("/actuator", "/actuator/")) {
+            assertProblem(send(anonymous(), HttpMethod.GET, uri, null),
+                    HttpStatus.UNAUTHORIZED, APP0401, SIGN_IN_REQUIRED, uri);
+
+            for (RestClient caller : List.of(inquiry(), maintenance())) {
+                ResponseEntity<String> response = send(caller, HttpMethod.GET, uri, null);
+                assertProblem(response, HttpStatus.NOT_FOUND, APP0400, NO_SUCH_RESOURCE, uri);
+                assertThat(fieldNames(problem(response))).as(uri).doesNotContain("_links");
+                assertThat(response.getBody()).as(uri).doesNotContain("/actuator/health");
+            }
+        }
     }
 
     /**

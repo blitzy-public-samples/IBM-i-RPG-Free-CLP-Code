@@ -29,10 +29,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
  * <p><b>Scope.</b> It answers what {@code ApiExceptionHandler} never sees: an exception thrown by a servlet
  * filter, a {@code sendError} call, and a failure before handler mapping. A filter-chain exception arrives
  * through {@link ErrorDispatchFilter}, which sets the exception attribute and calls {@code sendError(500)}
- * instead of rethrowing, so the container logs nothing and this class writes the only ERROR line. A
- * request Tomcat's connector rejects before any filter runs is never forwarded here;
- * {@link ProblemErrorReportValve} answers it with the body {@link #problemFor} builds, so this status map
- * stays the only one.
+ * instead of rethrowing, so the container logs nothing and this class writes the only ERROR line. A 4xx
+ * that framework code answers with a status and no body arrives through {@link StatusOnlyErrorFilter},
+ * which calls {@code sendError} with that status. A request Tomcat's connector rejects before any filter
+ * runs is never forwarded here; {@link ProblemErrorReportValve} answers it with the body
+ * {@link #problemFor} builds, so this status map stays the only one.
  *
  * <p><b>Redaction.</b> A 500 {@code DEM9999} body carries a random {@code errorId} and nothing of the
  * failure. The SQLSTATE and the {@link RedactedThrowable} copy of the exception, types and stack frames
@@ -47,6 +48,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
  *       <td>404 {@code APP0400} "Request is not valid: not found"</td></tr>
  *   <tr><td>status 401</td><td>401 {@code APP0401}</td></tr>
  *   <tr><td>status 403</td><td>403 {@code APP0403}</td></tr>
+ *   <tr><td>status 404, such as an unknown actuator health component sent here by
+ *       {@link StatusOnlyErrorFilter}</td>
+ *       <td>404 {@code APP0400} "Request is not valid: no such resource", as for an unknown API
+ *       route</td></tr>
  *   <tr><td>any other 4xx status</td>
  *       <td>that status, {@code APP0400} with the lower-case reason phrase, or {@code client error}
  *       when the status has no standard phrase</td></tr>
@@ -200,14 +205,19 @@ public class ProblemErrorController implements ErrorController {
     }
 
     /**
-     * Returns the {@code APP0400} reason of a 4xx status: its standard reason phrase in lower case, for
-     * example {@code method not allowed} for 405, or {@value #REASON_CLIENT_ERROR} for a status with no
-     * standard phrase.
+     * Returns the {@code APP0400} reason of a 4xx status: for 404 the reason
+     * {@code ApiExceptionHandler} gives an unknown route, {@code no such resource}, so a 404 the
+     * container forwards here reads as one answered by a controller; otherwise the standard reason
+     * phrase in lower case, for example {@code method not allowed} for 405, or
+     * {@value #REASON_CLIENT_ERROR} for a status with no standard phrase.
      *
      * @param code a status code from 400 to 499
      * @return the reason, never blank
      */
     private static String clientErrorReason(int code) {
+        if (code == HttpStatus.NOT_FOUND.value()) {
+            return ApiExceptionHandler.REASON_NO_SUCH_RESOURCE;
+        }
         HttpStatus resolved = HttpStatus.resolve(code);
         return resolved == null ? REASON_CLIENT_ERROR : resolved.getReasonPhrase().toLowerCase(Locale.ROOT);
     }

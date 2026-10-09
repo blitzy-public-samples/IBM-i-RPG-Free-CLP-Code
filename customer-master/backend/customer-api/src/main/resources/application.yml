@@ -103,6 +103,14 @@ spring:
     parser:
       # A member given twice in one object ({"name":...,"name":...}), at any depth, is rejected: 400 APP0400.
       strict-duplicate-detection: true
+  mvc:
+    formcontent:
+      filter:
+        # No endpoint reads form data: every request body is JSON. Spring's form-content
+        # filter would parse the form body of a PUT, PATCH or DELETE ahead of Spring
+        # Security, so a malformed one (a=%ZZ) would answer 500 DEM9999 to any caller,
+        # anonymous included, instead of 401, 403, 405 or 415.
+        enabled: false
 
 server:
   error:
@@ -115,6 +123,9 @@ management:
     web:
       exposure:
         include: health
+      discovery:
+        # The /actuator links page is not served; only the health probes are exposed.
+        enabled: false
   endpoint:
     health:
       probes:

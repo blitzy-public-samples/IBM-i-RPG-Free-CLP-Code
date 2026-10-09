@@ -58,7 +58,7 @@ import org.springframework.security.web.header.writers.frameoptions.XFrameOption
  * <p><b>The body.</b> It comes from {@link ProblemErrorController#problemFor(Object, Throwable, String)},
  * the single status map of the ERROR dispatch, so a connector rejection is answered exactly as a
  * {@code sendError} of the same status would be: a 4xx keeps its status with {@code APP0400} and the
- * lower-case reason phrase ("Request is not valid: bad request", or "method not allowed" for the 405 of
+ * reason that map gives it ("Request is not valid: bad request", or "method not allowed" for the 405 of
  * {@code TRACE}), 401 and 403 become {@code APP0401} and {@code APP0403}, and anything else becomes 500
  * {@code DEM9999} with an {@code errorId} logged at ERROR. {@code instance} is the request path as the
  * connector read it, and is left out when there is none or it is not a usable URI. The body is written by

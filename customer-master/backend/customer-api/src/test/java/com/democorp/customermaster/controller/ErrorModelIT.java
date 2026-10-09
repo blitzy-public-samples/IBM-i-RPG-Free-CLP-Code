@@ -16,6 +16,7 @@ import com.democorp.customermaster.service.exception.CustomerLockedException;
 import com.democorp.customermaster.service.exception.CustomerNotFoundException;
 import com.democorp.customermaster.support.AbstractPostgresIT;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.Filter;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -28,6 +29,8 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -42,6 +45,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.web.client.RestClient;
 
 /**
  * Proves the error model end to end: every error the API sends is an RFC 9457
@@ -66,7 +70,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  *   <li>The security filter chain, before any handler mapping: an anonymous request to an unknown route is
  *       rejected and answered by {@code SecurityConfig}'s authentication entry point (401 APP0401).</li>
  *   <li>ERROR dispatch answered by {@code ProblemErrorController}: an exception thrown by a servlet filter
- *       outside any controller (500 DEM9999).</li>
+ *       outside any controller (500 DEM9999), and the status-only 404 the actuator gives an unknown
+ *       health component, sent there by {@link StatusOnlyErrorFilter} (404 APP0400, as an unknown API
+ *       route), while the known health paths keep their 200 answer.</li>
  *   <li>An {@code Accept: text/html} request still receives problem+json, never an HTML page, and no
  *       body ever holds Spring Boot's {@code timestamp}, {@code error} or {@code path} members.</li>
  * </ul>
@@ -99,6 +105,10 @@ class ErrorModelIT extends AbstractPostgresIT {
     /** The members {@code ProblemFactory.create} writes for every problem, and no others. */
     private static final Set<String> BASE_MEMBERS =
             Set.of("type", "title", "status", "detail", "instance", "code", "args");
+
+    /** The media type of the actuator's own health answers. */
+    private static final MediaType ACTUATOR_JSON =
+            MediaType.parseMediaType("application/vnd.spring-boot.actuator.v3+json");
 
     /** Spring Boot's own error-format members, which no problem body may hold. */
     private static final List<String> BOOT_ERROR_MEMBERS = List.of("timestamp", "error", "path");
@@ -315,6 +325,72 @@ class ErrorModelIT extends AbstractPostgresIT {
         assertNoBootErrorMembers(problem);
     }
 
+    /**
+     * The actuator answers an unknown health component or group member with a status-only 404, which
+     * {@link StatusOnlyErrorFilter} sends as an error, so the ERROR dispatch answers it: for an anonymous
+     * caller, since {@code GET /actuator/health/**} is public, and for a signed-in one alike, the problem
+     * equals that of an unknown API route apart from {@code instance}, the security headers stay, and
+     * nothing is logged at ERROR.
+     *
+     * @param path the unknown health path
+     * @param output the console output captured during the test
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/actuator/health/db", "/actuator/health/xyz", "/actuator/health/readiness/xyz"})
+    @DisplayName("unknown health component: 404 APP0400 \"no such resource\" problem, not an empty 404")
+    void unknownHealthComponentIsProblem(String path, CapturedOutput output) {
+        JsonNode unknownRoute = problem(maintenanceXhr().get().uri(UNKNOWN_ROUTE)
+                .retrieve()
+                .toEntity(String.class));
+
+        for (RestClient client : List.of(anonymous(), maintenanceXhr())) {
+            ResponseEntity<String> response = client.get().uri(path)
+                    .retrieve()
+                    .toEntity(String.class);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            JsonNode problem = problem(response);
+            assertThat(problem.path("type").asText()).isEqualTo("urn:customer-master:problem:APP0400");
+            assertThat(problem.path("title").asText()).isEqualTo("Not Found");
+            assertThat(problem.path("status").asInt()).isEqualTo(404);
+            assertThat(problem.path("detail").asText()).isEqualTo("Request is not valid: no such resource");
+            assertThat(problem.path("code").asText()).isEqualTo("APP0400");
+            assertThat(problem.path("instance").asText()).isEqualTo(path);
+            assertThat(memberNames(problem)).containsExactlyInAnyOrderElementsOf(BASE_MEMBERS);
+            assertThat(withoutInstance(problem))
+                    .as("the same problem as an unknown API route")
+                    .isEqualTo(withoutInstance(unknownRoute));
+            assertThat(response.getHeaders().getFirst("X-Content-Type-Options"))
+                    .as("the security headers set before the ERROR dispatch are kept")
+                    .isEqualTo("nosniff");
+        }
+
+        assertThat(errorLines(output)).as("a client error is never logged at ERROR").isEmpty();
+    }
+
+    /**
+     * The health paths the probes use keep the actuator's own answer: the status-only rule applies to
+     * client errors only.
+     *
+     * @param path the health path
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/actuator/health", "/actuator/health/readiness", "/actuator/health/liveness"})
+    @DisplayName("known health paths: 200 actuator JSON with status UP, unchanged")
+    void knownHealthPathsKeepTheirAnswer(String path) {
+        ResponseEntity<String> response = anonymous().get().uri(path)
+                .retrieve()
+                .toEntity(String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        MediaType contentType = response.getHeaders().getContentType();
+        assertThat(contentType).isNotNull();
+        assertThat(contentType.isCompatibleWith(ACTUATOR_JSON))
+                .as("content type %s", contentType)
+                .isTrue();
+        assertThat(json(response).path("status").asText()).isEqualTo("UP");
+    }
+
     @Test
     @DisplayName("filter failure outside any controller: ERROR dispatch answers 500 DEM9999 with a logged errorId")
     void filterExceptionIsErrorDispatched500(CapturedOutput output) {
@@ -392,6 +468,18 @@ class ErrorModelIT extends AbstractPostgresIT {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
+    }
+
+    /**
+     * Returns a copy of a problem without its {@code instance}, the one member that names the request.
+     *
+     * @param problem the parsed problem body, a JSON object
+     * @return the copy
+     */
+    private static JsonNode withoutInstance(JsonNode problem) {
+        ObjectNode copy = problem.deepCopy();
+        copy.remove("instance");
+        return copy;
     }
 
     private static List<String> errorLines(CapturedOutput output) {

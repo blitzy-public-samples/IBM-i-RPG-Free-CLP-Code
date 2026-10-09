@@ -18,11 +18,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.MediaType;
 import org.springframework.lang.Nullable;
 
@@ -39,15 +43,28 @@ import org.springframework.lang.Nullable;
  * an anonymous request with a malformed query is 401 {@code APP0401}, and the public message catalog
  * answers the same 400 as any other route.
  *
+ * <p><b>Form bodies.</b> No endpoint reads form data, so nothing parses a form-encoded body ahead of
+ * Spring Security ({@code spring.mvc.formcontent.filter.enabled: false}). A {@code PUT}, {@code PATCH}
+ * or {@code DELETE} of {@code /api/customers/AAAB} with {@code Content-Type:
+ * application/x-www-form-urlencoded} and the undecodable body {@code a=%ZZ} gets the answer of any
+ * non-JSON body: 401 {@code APP0401} anonymously, 403 {@code APP0403} for {@code INQUIRY} on
+ * {@code PUT}, 415 {@code APP0400} "unsupported media type" for {@code MAINTENANCE} on {@code PUT}, and
+ * 405 {@code APP0400} for {@code PATCH} and {@code DELETE}, which are not built. None is a 500
+ * {@code DEM9999}, and none writes an ERROR log line; console output is captured by
+ * {@link OutputCaptureExtension} for that check.
+ *
  * <p><b>Why a raw socket.</b> {@code java.net.URI}, and with it the JDK {@code HttpClient} behind
  * {@link AbstractPostgresIT}'s clients, rejects a malformed escape such as {@code %%%} before sending,
  * and its quoting constructors would send {@code %25} instead. Each request is therefore written to the
- * application's port byte for byte, as curl sends it, so Tomcat parses exactly the query under test.
+ * application's port byte for byte, as curl sends it, so Tomcat parses exactly the query or body under
+ * test.
  *
  * <p>The base context variant of {@link AbstractPostgresIT}: no mocked bean, no import, no nested
  * configuration.
  */
-@DisplayName("Query parameters Tomcat cannot decode: 400 APP0400 on the parameter, never served as absent")
+@ExtendWith(OutputCaptureExtension.class)
+@DisplayName("Undecodable query parameters and form bodies: 400 APP0400 on a query parameter, never served"
+        + " as absent; a form body never parsed ahead of security")
 class MalformedQueryParameterIT extends AbstractPostgresIT {
 
     /** The members of an APP0400 that names a parameter, in the order the factory writes them. */
@@ -63,6 +80,15 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
 
     /** The end of an HTTP header section. */
     private static final byte[] HEADER_END = {'\r', '\n', '\r', '\n'};
+
+    /** A form body whose only value holds a {@code %} not followed by two hexadecimal digits. */
+    private static final String UNDECODABLE_FORM_BODY = "a=%ZZ";
+
+    /** The customer every form-body request targets; {@link #insertCustomers()} creates it. */
+    private static final String FORM_TARGET = "/api/customers/AAAB";
+
+    /** A console line logged at level ERROR, in Spring Boot's default console pattern. */
+    private static final Pattern ERROR_LINE = Pattern.compile("^\\S+\\s+ERROR\\s.*");
 
     /**
      * Inserts three active customers after the base class has reset the database, so a dropped filter
@@ -174,6 +200,62 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
         assertThat(xhr.status()).isEqualTo(401);
         assertThat(problem(xhr).path("code").asText()).isEqualTo("APP0401");
         assertThat(xhr.header("WWW-Authenticate")).isNull();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Form bodies: security, then the route's method and media type, answer; nothing parses them first
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * An undecodable form body gets exactly the answer of the decodable control body {@code a=b}:
+     * security decides first, then the route's method and media type. It is never a 500 and writes no
+     * ERROR log line.
+     *
+     * @param method the request method
+     * @param caller {@code anonymous}, {@code INQUIRY} or {@code MAINTENANCE}
+     * @param status the status expected
+     * @param code the catalog key expected
+     * @param detail the {@code detail} expected
+     * @param output the console output captured for this class
+     * @throws IOException when a connection fails
+     */
+    @ParameterizedTest(name = "{0} as {1} -> {2} {3}")
+    @CsvSource(delimiter = '|', value = {
+        "PUT|anonymous|401|APP0401|Sign in required.",
+        "PATCH|anonymous|401|APP0401|Sign in required.",
+        "DELETE|anonymous|401|APP0401|Sign in required.",
+        "PUT|INQUIRY|403|APP0403|You are not authorized to perform this action.",
+        "PUT|MAINTENANCE|415|APP0400|Request is not valid: unsupported media type",
+        "PATCH|INQUIRY|405|APP0400|Request is not valid: method not allowed",
+        "PATCH|MAINTENANCE|405|APP0400|Request is not valid: method not allowed",
+        "DELETE|INQUIRY|405|APP0400|Request is not valid: method not allowed",
+        "DELETE|MAINTENANCE|405|APP0400|Request is not valid: method not allowed"
+    })
+    @DisplayName("an undecodable form body: 401 or 403 from security, else 415 or 405; never 500, no ERROR line")
+    void undecodableFormBodyIsNeverParsedAheadOfSecurity(String method, String caller, int status, String code,
+            String detail, CapturedOutput output) throws IOException {
+        List<String> errorLinesBefore = errorLines(output);
+
+        RawResponse response = sendForm(method, caller, UNDECODABLE_FORM_BODY);
+
+        assertThat(errorLines(output)).as("ERROR log lines after %s as %s", method, caller)
+                .isEqualTo(errorLinesBefore);
+        assertThat(response.status()).as(response.body()).isEqualTo(status);
+        JsonNode problem = problem(response);
+        assertThat(problem.path("type").asText()).isEqualTo("urn:customer-master:problem:" + code);
+        assertThat(problem.path("status").asInt()).isEqualTo(status);
+        assertThat(problem.path("code").asText()).isEqualTo(code);
+        assertThat(problem.path("detail").asText()).isEqualTo(detail);
+        assertThat(problem.path("instance").asText()).isEqualTo(FORM_TARGET);
+        assertThat(problem.has("errorId")).as("no server fault").isFalse();
+        assertThat(response.header("WWW-Authenticate")).as("X-Requested-With suppresses the challenge").isNull();
+        if (status == 405) {
+            assertThat(response.header("Allow")).as("the methods the route serves").contains("GET", "PUT");
+        }
+
+        RawResponse control = sendForm(method, caller, "a=b");
+        assertThat(control.status()).as(control.body()).isEqualTo(status);
+        assertThat(problem).as("the answer to the decodable body a=b").isEqualTo(problem(control));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -307,6 +389,16 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
         return ids;
     }
 
+    /**
+     * Returns the captured console lines logged at level ERROR, in capture order.
+     *
+     * @param output the console output captured for this class
+     * @return the ERROR lines
+     */
+    private static List<String> errorLines(CapturedOutput output) {
+        return output.getAll().lines().filter(line -> ERROR_LINE.matcher(line).matches()).toList();
+    }
+
     private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
@@ -349,9 +441,7 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
     }
 
     /**
-     * Sends {@code GET target HTTP/1.1} to the application with the target exactly as given and reads
-     * the whole response; the request asks for {@code Connection: close}, so the response ends at end of
-     * stream.
+     * Sends {@code GET target HTTP/1.1} with no body; see {@link #send}.
      *
      * @param target the request target, written as US-ASCII bytes without any encoding
      * @param user the HTTP Basic username, or {@code null} for an anonymous request
@@ -362,8 +452,50 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
      */
     private RawResponse get(String target, @Nullable String user, @Nullable String password, boolean xhr)
             throws IOException {
+        return send("GET", target, user, password, xhr, null);
+    }
+
+    /**
+     * Sends a form body to {@link #FORM_TARGET} as one of the test users, with
+     * {@code X-Requested-With: XMLHttpRequest} as the SPA sends it; see {@link #send}.
+     *
+     * @param method the request method
+     * @param caller {@code anonymous}, {@code INQUIRY} or {@code MAINTENANCE}
+     * @param formBody the body, written as US-ASCII bytes without any encoding
+     * @return the response
+     * @throws IOException when the connection fails
+     * @throws IllegalArgumentException when {@code caller} is none of the three
+     */
+    private RawResponse sendForm(String method, String caller, String formBody) throws IOException {
+        return switch (caller) {
+            case "anonymous" -> send(method, FORM_TARGET, null, null, true, formBody);
+            case "INQUIRY" -> send(method, FORM_TARGET, INQUIRY_USER, INQUIRY_PASSWORD, true, formBody);
+            case "MAINTENANCE" -> send(method, FORM_TARGET, MAINTENANCE_USER, MAINTENANCE_PASSWORD, true,
+                    formBody);
+            default -> throw new IllegalArgumentException("Unknown caller " + caller);
+        };
+    }
+
+    /**
+     * Sends {@code method target HTTP/1.1} to the application with the target, and the body when there
+     * is one, exactly as given and reads the whole response; the request asks for
+     * {@code Connection: close}, so the response ends at end of stream.
+     *
+     * @param method the request method
+     * @param target the request target, written as US-ASCII bytes without any encoding
+     * @param user the HTTP Basic username, or {@code null} for an anonymous request
+     * @param password the password of {@code user}
+     * @param xhr whether to send {@code X-Requested-With: XMLHttpRequest}
+     * @param formBody the body, sent as {@code application/x-www-form-urlencoded} with its
+     *     {@code Content-Length} and written as US-ASCII bytes without any encoding, or {@code null} to
+     *     send no body
+     * @return the response
+     * @throws IOException when the connection fails
+     */
+    private RawResponse send(String method, String target, @Nullable String user, @Nullable String password,
+            boolean xhr, @Nullable String formBody) throws IOException {
         StringBuilder request = new StringBuilder()
-                .append("GET ").append(target).append(" HTTP/1.1\r\n")
+                .append(method).append(' ').append(target).append(" HTTP/1.1\r\n")
                 .append("Host: localhost:").append(port).append("\r\n")
                 .append("Connection: close\r\n");
         if (user != null) {
@@ -374,7 +506,15 @@ class MalformedQueryParameterIT extends AbstractPostgresIT {
         if (xhr) {
             request.append(X_REQUESTED_WITH).append(": ").append(XML_HTTP_REQUEST).append("\r\n");
         }
+        if (formBody != null) {
+            request.append("Content-Type: ").append(MediaType.APPLICATION_FORM_URLENCODED_VALUE).append("\r\n")
+                    .append("Content-Length: ").append(formBody.getBytes(StandardCharsets.US_ASCII).length)
+                    .append("\r\n");
+        }
         request.append("\r\n");
+        if (formBody != null) {
+            request.append(formBody);
+        }
         try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), port)) {
             socket.setSoTimeout((int) READ_TIMEOUT.toMillis());
             OutputStream out = socket.getOutputStream();
