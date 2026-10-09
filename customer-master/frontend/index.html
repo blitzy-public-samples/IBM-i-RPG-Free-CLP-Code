@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Customer Master</title>
+    <!--
+      The empty data: URL icon is never fetched; without an icon link the
+      browser requests /favicon.ico itself, which the Vite dev and preview
+      servers answer with a 404 and a console error. The app ships no favicon
+      file, so do not point this at a file unless one is added to the build.
+      No skip link: React renders every screen, each opening with its own
+      <main> landmark with no navigation block before it to bypass.
+    -->
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

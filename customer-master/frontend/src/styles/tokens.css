@@ -1,0 +1,114 @@
+/*
+ * Customer Master design-token layer: CSS custom properties that global.css
+ * and the components consume through var(--…). Token names are a
+ * cross-folder contract: rename none of them. Colour is token-only: outside
+ * this file no colour literal is written except `transparent`,
+ * `currentColor` and the forced-colors system colours.
+ *
+ * The palette translates the 5250 display attributes of PMTCUSTD (search
+ * subfile), MTNCUSTD (17x54 detail window, pink border) and PMTSTATED
+ * (16x40 state window) from a dark terminal screen to one light web theme.
+ * Every text colour reaches WCAG 2.2 AA (4.5:1) on both --color-bg and
+ * --color-surface, and every UI boundary colour reaches 3:1, so contrast
+ * holds through the palette itself.
+ *
+ * Self-contained: no imports, external resources or web fonts.
+ */
+:root {
+  color-scheme: light;
+
+  /* Page background: the screen behind every 5250 record format. */
+  --color-bg: #ffffff;
+  /* Window interior (MTNCUSTD, PMTSTATED WINDOW): dialogs, toasts, key buttons. */
+  --color-surface: #f6f8fa;
+  /* Default 5250 green text: body text (15.8:1 on bg, 14.84:1 on surface). */
+  --color-fg: #1f2328;
+  /* Unattributed literals such as "Sorted by:" and the change-stamp label (6.11:1 / 5.74:1). */
+  --color-muted: #59636e;
+  /* Field and window outlines (DSPATR(UL) input underline, WDWBORDER): 4.55:1 / 4.27:1. */
+  --color-border: #6e7781;
+  /* COLOR(BLU): "Type options, press Enter.", option and function-key legends (7.59:1 / 7.13:1). */
+  --color-accent: #0550ae;
+  /* COLOR(WHT) + DSPATR(UL): column headings and window titles (15.8:1 / 14.84:1). */
+  --color-heading: #1f2328;
+  /* DSPATR(HI) function line, Opt heading, customer id; COLOR(PNK) sorted column and MTNCUSTD border (7.82:1 / 7.35:1). */
+  --color-highlight: #9a1b5c;
+  /* COLOR(RED): inactive subfile rows and the "Including Inactives" label (6.57:1 / 6.18:1). */
+  --color-inactive: #b42318;
+  /* DSPATR(RI) on an invalid field: reverse-image background, also the error text colour (7.75:1 / 7.28:1). */
+  --color-error-bg: #a4161a;
+  /* DSPATR(RI) foreground: text on --color-error-bg (7.75:1). */
+  --color-error-fg: #ffffff;
+  /* DSPATR(PC) cursor position: keyboard focus ring (5.19:1 / 4.88:1, at least 3:1). */
+  --color-focus: #0969da;
+  /* WINDOW overlay: dims the screen beneath an open dialog (--color-fg at 45%). */
+  --color-backdrop: rgb(31 35 40 / 0.45);
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  /* Proportional system text for labels, headings and messages. */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* 5250 fixed-pitch grid: codes, ids, phones and inputs, so `size` matches character counts. */
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-size-sm: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.25rem;
+  --line-height: 1.5;
+
+  --shadow-dialog: 0 4px 16px var(--color-backdrop);
+  --shadow-toast: 0 2px 8px var(--color-backdrop);
+  --size-sign-in: 36rem;
+  /* Touch-target minimum on coarse pointers: 44 CSS px (WCAG 2.5.5, platform guidelines). */
+  --size-touch-target: 2.75rem;
+
+  --radius: 4px;
+  /* Focus ring thickness; WCAG 2.2 focus appearance needs at least 2 CSS px. */
+  --focus-ring-width: 3px;
+  /* Dialog backdrop layer; a dialog paints at calc(var(--z-dialog) + 1). */
+  --z-dialog: 100;
+  /* Message subfile (MSGSFL) equivalent: the toast host stays above every open dialog. */
+  --z-toast: 1000;
+  /*
+   * Height of the toast band, the strip above the bottom --space-4 margin
+   * where messages show. Every screen but the search page, and every window
+   * from 40rem wide, keeps it clear at all times, so a message that fits in
+   * the band never hides a focused control, even one focused just before the
+   * message renders. Below 40rem a window keeps it clear only while a message
+   * shows and takes its room while none does, so a picker shows its rows on a
+   * phone; when a message appears the window ends above the band and the
+   * focused control is scrolled back into view (the dialog rule in
+   * global.css, ToastRegion.tsx). The search page, framed or not, shows
+   * messages over the end of its list instead, above its footer and never
+   * over a function key, and the end scroll padding of its list (framed) or
+   * of the page (unframed) holds the band, so focus scrolling stops a control
+   * above them (toast clearance in global.css).
+   * A one-line toast is about 42px tall (a 24px line plus its padding and
+   * borders), each further line adds 24px, and two messages (a status and
+   * an alert, or two alerts) show 8px apart; an empty live region adds no
+   * space (.toast-region in global.css). A catalog message (at most 48
+   * characters) wraps to two lines at a 320px viewport, about 66px tall:
+   * 10rem holds two of them, and 30vh keeps most of a short viewport usable
+   * while still holding one message from 220px tall and two from about
+   * 467px. From 40rem wide (below) every catalog message fits on one line,
+   * so two need 2 x 42px + 8px = 92px: 6rem holds two and leaves the windows
+   * the rest of the height. Messages longer than the band together (from
+   * 40rem wide, any third message; at any width, one message longer than
+   * the band) continue below it and come into view as the page scrolls to
+   * its end; while it is scrolled there, they reach above the band, over an
+   * open window and any control focused in it, by as much as they are
+   * longer than the band (toast clearance in global.css).
+   */
+  --toast-band-block-size: min(10rem, 30vh);
+}
+
+/* The 40rem breakpoint is literal: a media query cannot read a custom property. */
+@media (min-width: 40rem) {
+  :root {
+    --toast-band-block-size: min(6rem, 30vh);
+  }
+}

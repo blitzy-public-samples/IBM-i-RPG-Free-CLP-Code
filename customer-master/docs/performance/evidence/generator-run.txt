@@ -1,0 +1,28 @@
+# Compose generator run (1,000,000 rows): metadata, verbatim generator lines and the row count
+#
+# Combined from three captures: generator-run.meta (command, shell timestamps and exit status),
+# five verbatim lines of the generator's console output (the Compose lines, the rest of the
+# Spring Boot start-up and the generator's other log lines are dropped), and the queries run
+# against the Compose database right after the load.
+
+## generator-run.meta
+command: cd customer-master && docker compose --profile tools run --rm generator --count=1000000
+started 2026-10-08T14:47:38Z
+exit=0
+finished 2026-10-08T14:47:58Z
+
+## Generator output (verbatim lines)
+ :: Spring Boot ::               (v3.5.16)
+2026-10-08T14:47:41.611Z  INFO 1 --- [           main] c.d.c.generator.CustomerGeneratorRunner  : generator.options count=1000000 start=AAAA cszFile=classpath:generator/csz-sample.csv mode=random
+2026-10-08T14:47:41.654Z  INFO 1 --- [           main] c.d.customermaster.generator.CszSource   : csz.file loaded location=classpath:generator/csz-sample.csv cityColumn=city read=200 kept=200 droppedCityTooLong=0 droppedUnknownState=0
+2026-10-08T14:47:57.955Z  INFO 1 --- [           main] c.d.c.repository.CustomerIdAllocator     : Customer id sequence custmast_id_seq restarted: the next add receives VPV2
+Loaded 1000000 customers AAAA..VPV1 in 17.0 s
+
+## generator-count.txt
+query: select count(*), min(custid), max(custid) from customer_master.custmast
+1000000|AAAA|VPV1
+query: select count(*) filter (where active = 'Y') from customer_master.custmast
+857143
+query: select pg_size_pretty(pg_total_relation_size('customer_master.custmast'))
+347 MB
+at 2026-10-08T14:48:04Z

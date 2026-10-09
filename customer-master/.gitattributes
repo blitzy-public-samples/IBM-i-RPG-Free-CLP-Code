@@ -1,0 +1,4 @@
+# LF for the Maven wrapper and shell scripts (run in Linux images), CRLF for Windows scripts; the root `* text=auto` still applies.
+backend/mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf

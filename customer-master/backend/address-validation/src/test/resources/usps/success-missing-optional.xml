@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AddressValidateResponse>
+  <Address ID="0">
+    <Address2>8 ELMWOOD DR</Address2>
+    <City>OLD HAVEN</City>
+    <State>CT</State>
+    <Zip5>06399</Zip5>
+    <DeliveryPoint>08</DeliveryPoint>
+    <CarrierRoute>R001</CarrierRoute>
+  </Address>
+</AddressValidateResponse>

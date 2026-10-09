@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Customer Master backend: Maven parent POM and reactor aggregator.
+
+  The IBM i binding directories UTIL_BND (SRV_MSG, SRV_STR;
+  Service_Pgms/CRTBNDDIR.CLLE), SRV_BASE36 (BASE36/CRTBNDDIR.CLLE) and
+  ADRVAL_BND (USADRVAL; USPS_Address/CRTBNDDIR.CLLE) become this reactor plus
+  Spring dependency injection.
+
+  Every version except springdoc comes from spring-boot-dependencies 3.5.16 and
+  is not pinned in this reactor; Testcontainers must stay at the Boot-managed
+  1.21.4 or later, the first 1.x that negotiates Docker Engine 29's minimum API.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- Resolved from Maven Central, never from the filesystem. -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <!--
+    Both child POMs name exactly these coordinates as their parent, with
+    <relativePath>../pom.xml</relativePath>. customer-api resolves
+    address-validation at ${project.version}, so the version string must stay
+    identical across the three POMs.
+  -->
+  <groupId>com.democorp</groupId>
+  <artifactId>customer-master-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>Customer Master (parent)</name>
+  <description>
+    Parent build for the Customer Master web application: the address-validation
+    library module and the customer-api Spring Boot application.
+  </description>
+
+  <properties>
+    <!-- The Boot parent derives maven.compiler.release from java.version. -->
+    <java.version>21</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!-- The only library version not managed by Spring Boot; 2.9.1 is built against Boot 3.5.16. -->
+    <springdoc.version>2.9.1</springdoc.version>
+
+    <!--
+      JUnit Platform tag expression applied to Failsafe. The default build runs
+      every IT not tagged "benchmark" (untagged ITs included); the benchmark
+      profile replaces it with "benchmark". A tag expression is used instead of
+      excludedGroups so the profile never has to clear a parameter to an empty
+      value. Override on the command line with -Dfailsafe.groups=...
+    -->
+    <failsafe.groups>!benchmark</failsafe.groups>
+  </properties>
+
+  <modules>
+    <module>address-validation</module>
+    <module>customer-api</module>
+  </modules>
+
+  <!--
+    Only the two versions Spring Boot does not manage. No <dependencies> block
+    is declared here: dependencies belong to the modules, and address-validation
+    must stay free of the web and data starters customer-api uses.
+  -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.democorp</groupId>
+        <artifactId>address-validation</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.springdoc</groupId>
+        <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        <version>${springdoc.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <plugins>
+      <!--
+        Declaring Failsafe (version managed by Boot) activates, in both modules,
+        the integration-test and verify executions and the
+        classesDirectory=${project.build.outputDirectory} setting defined in the
+        Boot parent's pluginManagement. That setting is essential: customer-api
+        is repackaged by spring-boot-maven-plugin, and the repackaged jar cannot
+        serve as the integration-test classpath. The configuration below merges
+        with the inherited one; it must never be declared with
+        combine.self="override", which would drop classesDirectory.
+
+        spring-boot-maven-plugin is intentionally not declared here: it belongs
+        to customer-api alone and must not repackage the address-validation
+        library jar. Surefire keeps its defaults and has no tag filter, so unit
+        tests run in the default and the benchmark build alike.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/*IT.java</include>
+          </includes>
+          <groups>${failsafe.groups}</groups>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!--
+      Runs only the ITs tagged "benchmark" (see failsafe.groups above). A module
+      without one, such as address-validation, runs zero ITs and still passes.
+    -->
+    <profile>
+      <id>benchmark</id>
+      <properties>
+        <failsafe.groups>benchmark</failsafe.groups>
+      </properties>
+    </profile>
+  </profiles>
+</project>

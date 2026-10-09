@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE AddressValidateResponse [<!ENTITY xxe SYSTEM "file:///dev/null">]>
+<AddressValidateResponse>
+  <Address ID="0">
+    <Address1>STE 2</Address1>
+    <Address2>&xxe;</Address2>
+    <City>OLD HAVEN</City>
+    <State>CT</State>
+    <Zip5>06399</Zip5>
+    <Zip4>1234</Zip4>
+  </Address>
+</AddressValidateResponse>

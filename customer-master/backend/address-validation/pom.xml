@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Customer Master :: Address Validation
+
+  A plain library jar that knows the USPS Web Tools XML contract and nothing
+  about customers. It replaces ADRVAL_BND (USPS_Address/CRTBNDDIR.CLLE), which
+  bound USADRVAL (USPS_Address/USADRVAL.SQLRPGLE) at bind time: customer-api
+  depends on this jar, and its AutoConfiguration.imports registers exactly one
+  AddressValidationClient bean. The dependency points one way only: this module
+  must never depend on customer-api.
+
+  The response is read with XPath over a hardened DOM. XML needs only the JDK
+  java.xml module (StAX, DOM, XPath), HTTP only spring-web and the stub's JSON
+  fixtures only Spring Boot's JsonParserFactory, so no HTTP-client, XML or JSON
+  library is declared.
+
+  No <build> section: a spring-boot-maven-plugin repackage would put classes
+  under BOOT-INF/ and break customer-api's dependency on this jar.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.democorp</groupId>
+    <artifactId>customer-master-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>address-validation</artifactId>
+  <packaging>jar</packaging>
+
+  <name>Customer Master :: Address Validation</name>
+  <description>USPS Web Tools address validation client (stub and real), replacing USADRVAL and ADRVAL_BND.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-autoconfigure</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-web</artifactId>
+    </dependency>
+
+    <!--
+      Logging API only: the real client logs host and status, never the URL or
+      credentials. The logging backend is chosen by the consuming application.
+    -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

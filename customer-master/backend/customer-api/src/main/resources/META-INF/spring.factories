@@ -1,0 +1,10 @@
+# Spring Boot factories of the customer-api application.
+#
+# Startup failure reporters, asked in order before Spring Boot's FailureAnalyzers:
+#   GeneratorStartupFailureReporter (profile generator only) prints a database
+#   connection or credentials failure, an invalid DB_SCHEMA ("Database schema
+#   invalid: ..."), or an unusable DB_LOCK_TIMEOUT ("Database lock timeout
+#   invalid: ..."), as the generator CLI's one outcome line (exit status 1)
+#   instead of "Application run failed" and a stack trace.
+org.springframework.boot.SpringBootExceptionReporter=\
+com.democorp.customermaster.generator.GeneratorStartupFailureReporter

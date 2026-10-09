@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  customer-api: the Customer Master web API and the test-data generator CLI in
+  one Spring Boot jar. It replaces UTIL_BND (Service_Pgms/CRTBNDDIR.CLLE:
+  SRV_MSG, SRV_STR) and SRV_BASE36 (BASE36/CRTBNDDIR.CLLE: BASE36ADD) with the
+  Maven dependencies below and Spring dependency injection; nothing from either
+  CL program is ported.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.democorp</groupId>
+        <artifactId>customer-master-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>customer-api</artifactId>
+    <packaging>jar</packaging>
+
+    <name>customer-api</name>
+    <description>Customer Master REST API and test-data generator</description>
+
+    <properties>
+        <!--
+          Passed to the integration tests: OpenApiSnapshotIT rewrites
+          customer-master/openapi/customer-master-api.yaml when this is true.
+          Override with -Dopenapi.snapshot.update=true.
+        -->
+        <openapi.snapshot.update>false</openapi.snapshot.update>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jdbc</artifactId>
+        </dependency>
+        <!-- Hibernate Validator: @CodePointLength column widths (in code points) and @StorableText on the customer DTOs, @Validated configuration properties -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Flyway migrations; the PostgreSQL database module is mandatory since Flyway 10 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+
+        <!--
+          Compile scope, not runtime: the generator's CustomerLoader and
+          CustomerCopyWriter compile against org.postgresql.PGConnection and
+          org.postgresql.copy.CopyManager to stream rows with COPY.
+        -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
+
+        <!-- Registers its AddressValidationClient through its own AutoConfiguration.imports; nothing is wired here. -->
+        <dependency>
+            <groupId>com.democorp</groupId>
+            <artifactId>address-validation</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          Testcontainers stays on the Boot-managed 1.21.4, the first 1.x release
+          that negotiates Docker Engine 29's minimum API version. Never pin an
+          older version here.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- target/app.jar: the jar backend/Dockerfile copies into the app and generator image -->
+        <finalName>app</finalName>
+        <plugins>
+            <!-- The repackage execution is inherited from spring-boot-starter-parent -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+              The *IT binding, the benchmark tag handling and classesDirectory are
+              inherited from the parents; only the test system properties are added.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <app.jar.path>${project.build.directory}/app.jar</app.jar.path>
+                        <openapi.snapshot.path>${project.basedir}/../../openapi/customer-master-api.yaml</openapi.snapshot.path>
+                        <openapi.snapshot.update>${openapi.snapshot.update}</openapi.snapshot.update>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

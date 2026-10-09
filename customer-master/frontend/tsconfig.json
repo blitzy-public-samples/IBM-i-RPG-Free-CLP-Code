@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    // `types` is deliberately unset. Ambient Vite types come from
+    // src/vite-env.d.ts (`/// <reference types="vite/client" />`); test files
+    // import describe/it/expect/vi from 'vitest' explicitly (Vitest runs with
+    // globals off); jest-dom matcher types come from
+    // `import '@testing-library/jest-dom/vitest'` in src/test/setup.ts.
+
+    // Vite does the bundling, so this project only type-checks. Build mode
+    // still records its incremental state; it goes under node_modules/.tmp so
+    // `tsc -b` writes nothing into the source tree.
+    "noEmit": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo"
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

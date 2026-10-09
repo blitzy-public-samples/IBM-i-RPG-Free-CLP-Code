@@ -1,0 +1,199 @@
+# Base configuration of the customer-api application (web API by default; the
+# generator profile overlays application-generator.yml).
+#
+# Every environment-dependent value is a ${ENV:default} placeholder whose name is
+# documented in customer-master/.env.example and set by docker-compose.yml.
+# Credentials (database, users, USPS) have no default here: Compose supplies the
+# local values, and a deployment supplies its own through the environment.
+#
+# Several classes share the customer-master prefix, each binding only its block:
+#   customer-master.db, .search   -> config.AppProperties
+#   customer-master.address       -> AddressValidationProperties (address-validation module)
+#   customer-master.security      -> security.UsersProperties (web context only)
+#   customer-master.generator     -> generator.GeneratorProperties (application-generator.yml)
+
+spring:
+  datasource:
+    # The schema comes from DB_SCHEMA; no SQL script selects a library or schema.
+    # Only an unset DB_SCHEMA means customer_master. Set but empty or blank, or with a
+    # space or control character (tab, line break) at either end, it stops startup
+    # before any connection opens (config.DataSourceSchemaGuard).
+    url: jdbc:postgresql://${DB_HOST:db}:${DB_PORT:5432}/${DB_NAME:customermaster}?currentSchema=${DB_SCHEMA:customer_master}
+    # One role runs Flyway, the API and the generator, and owns custmast_id_seq.
+    # No default: config.DataSourceCredentialsGuard stops startup when either is empty.
+    username: ${DB_USER:}
+    password: ${DB_PASSWORD:}
+    hikari:
+      # Keeps unqualified names resolving when Testcontainers @ServiceConnection
+      # replaces the URL with one that carries no currentSchema.
+      schema: ${DB_SCHEMA:customer_master}
+      # Longest wait, in ms, of one borrow of a pooled connection (Hikari's
+      # default is 30000). It bounds the borrow of the db check of
+      # /actuator/health/readiness while PostgreSQL is unreachable. When every
+      # connection stays busy (reads behind a generator load hold them until it
+      # commits) and PostgreSQL answers a direct probe, an add or update whose
+      # borrow expires answers 409 DEM1001, and the read-only transaction of a
+      # search or get borrows again after each expiry, so the read waits
+      # (config.BrokenConnectionTransactionManager).
+      connection-timeout: 5000
+      # Longest aliveness check, in ms, of a connection: the pool's check before it
+      # hands one out, and the db check's own validation of the connection it holds
+      # (config.BoundedDataSourceHealthIndicator, rounded up to whole seconds).
+      # Hikari requires it below connection-timeout.
+      validation-timeout: 2000
+      # pgjdbc connection properties of every pooled connection; the generator
+      # profile inherits them.
+      data-source-properties:
+        # Longest wait, in seconds, for PostgreSQL's answer on an open connection.
+        # Hikari hands out a connection used in the last 500 ms without an
+        # aliveness check, and any connection can lose the database mid-query;
+        # without this bound a request waits without end on a database that
+        # stops answering. With it the read fails with an I/O error, Hikari
+        # evicts the connection and the request answers 500 DEM9999 with an
+        # errorId. The bound applies to each wait for PostgreSQL's answer, not
+        # to the request. No legitimate answer takes longer than the lock
+        # timeout (DB_LOCK_TIMEOUT, 5s) plus statement time: an add or update
+        # gives up its lock wait with 409 DEM1001, and a search or get waiting
+        # behind a table lock (a generator load's ACCESS EXCLUSIVE) is answered
+        # at each lock timeout, re-checks and keeps waiting until the load
+        # commits (repository.LockWaitingReads, which fails startup unless the
+        # lock timeout is below this bound). Each re-check starts a new wait,
+        # so a read behind a load lasts as long as the load holds its lock, and
+        # 45 only bounds a database that stops answering. The frontend's nginx
+        # waits up to 300 s for an API answer (proxy_read_timeout in
+        # frontend/nginx.conf, which derives it): about ten times the lock hold
+        # expected of the largest load at the measured load rate, so the UI
+        # normally receives the API's own answer, and a longer wait gets
+        # nginx's 504 DEM9999. A fixed value: no environment variable sets it.
+        socketTimeout: 45
+        # Server-side TCP keepalives of each session. PostgreSQL ends a session
+        # whose client vanished without closing its socket (a generator container
+        # killed during COPY) after about 11 s (5 s idle, then 3 unanswered probes
+        # 2 s apart), rolling the load back and releasing its lock, instead of
+        # after the OS default of about 2 hours. Probes run only while the
+        # connection is idle and a live peer's kernel answers them, so a slow but
+        # live client is never dropped.
+        options: "-c tcp_keepalives_idle=5 -c tcp_keepalives_interval=2 -c tcp_keepalives_count=3"
+  flyway:
+    schemas: ${DB_SCHEMA:customer_master}
+    # V1-V4 only. Compose sets SPRING_FLYWAY_LOCATIONS to add classpath:db/seed (V5).
+    locations: classpath:db/migration
+    # A misspelt or absent location (SPRING_FLYWAY_LOCATIONS=classpath:db/migratoin)
+    # stops startup with "Unable to resolve location ..." before Flyway touches the
+    # database. Flyway's default only logs it at DEBUG and migrates nothing, so the
+    # API would report ready with no schema.
+    fail-on-missing-locations: true
+    # Lets a run without db/seed validate a database where the V5 seed was applied.
+    # Flyway classes an applied V5 above the newest local V4 as "future", not
+    # "missing", and setting this list replaces Flyway's default "*:future", so
+    # both patterns are needed; "*:missing" alone fails that validation.
+    ignore-migration-patterns:
+      - "*:missing"
+      - "*:future"
+  jackson:
+    deserialization:
+      # Unknown JSON properties (custId on add, chgUser, ...) are rejected: 400 APP0400.
+      fail-on-unknown-properties: true
+      # A fraction or exponent (version 0.9, 1.0, 1e0) is not truncated to an integer: 400 APP0400.
+      accept-float-as-int: false
+      # An enum binds by constant name only, never by ordinal (purpose 0, "1"): 400 APP0400.
+      fail-on-numbers-for-enums: true
+      # Content after the request's JSON value (`{...} {}`, `{...} x`) is rejected: 400 APP0400.
+      fail-on-trailing-tokens: true
+    mapper:
+      # A JSON string is not coerced to a number or boolean (version "5"): 400 APP0400.
+      # This switch does not cover the reverse, a JSON number or boolean for a text field
+      # (name 123, active true); config.StrictJsonBindingConfig rejects that: 400 APP0400.
+      allow-coercion-of-scalars: false
+    parser:
+      # A member given twice in one object ({"name":...,"name":...}), at any depth, is rejected: 400 APP0400.
+      strict-duplicate-detection: true
+  mvc:
+    formcontent:
+      filter:
+        # No endpoint reads form data: every request body is JSON. Spring's form-content
+        # filter would parse the form body of a PUT, PATCH or DELETE ahead of Spring
+        # Security, so a malformed one (a=%ZZ) would answer 500 DEM9999 to any caller,
+        # anonymous included, instead of 401, 403, 405 or 415.
+        enabled: false
+
+server:
+  error:
+    whitelabel:
+      # ProblemErrorController answers /error with problem+json; this is the second guard.
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+      discovery:
+        # The /actuator links page is not served; only the health probes are exposed.
+        enabled: false
+  endpoint:
+    health:
+      probes:
+        # /actuator/health/readiness backs the Compose app healthcheck.
+        enabled: true
+      group:
+        readiness:
+          # Ready only while PostgreSQL answers ("db" is the DataSource check):
+          # readiness turns 503 when the database is lost and UP once it returns.
+          # While requests waiting on locks hold every pooled connection, the
+          # check asks PostgreSQL directly over one unpooled connection and stays
+          # UP when it answers (config.ConnectionPoolSaturation).
+          # Worst-case answer, about 9s: connection-timeout (5s), plus a pool
+          # aliveness check started just before it expires (validation-timeout,
+          # 2s), plus the db check's validation (2s); in a saturated pool,
+          # connection-timeout plus the direct probe's login and validation (2s
+          # each). That stays below Spring Boot's 10s slow-indicator threshold
+          # and Docker's default 30s healthcheck timeout.
+          include: readinessState,db
+        liveness:
+          # Process state only, so a database outage never reports the app as broken.
+          include: livenessState
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  # Deterministic output for OpenApiSnapshotIT and openapi/customer-master-api.yaml.
+  writer-with-order-by-keys: true
+
+customer-master:
+  db:
+    # Lock wait of add and update transactions before 409 DEM1001, and the
+    # interval at which a search or get waiting on a table lock re-checks it.
+    # Must stay below the 45 s socketTimeout above, or startup fails.
+    # An empty DB_LOCK_TIMEOUT counts as unset: the 5s default applies.
+    lock-timeout: ${DB_LOCK_TIMEOUT:5s}
+  search:
+    # Page size of the search list (the 12-row subfile page).
+    default-size: 12
+    # Largest page an API client may request.
+    max-size: 100
+    # Row cap of one search (the 9,999-record subfile cap, DEM0006).
+    max-rows: 9999
+  address:
+    enabled: ${ADDRESS_VALIDATION_ENABLED:true}
+    # stub (deterministic) or usps (Web Tools XML client, retired by USPS on 2026-01-25).
+    client: ${ADDRESS_VALIDATION_CLIENT:stub}
+    usps:
+      base-url: ${USPS_BASE_URL:https://secure.shippingapis.com/ShippingAPI.dll}
+      # Replace the USPS_ID and USPS_PWD data areas; never given a value in this file.
+      user-id: ${USPS_USER_ID:}
+      password: ${USPS_PASSWORD:}
+      connect-timeout: ${USPS_CONNECT_TIMEOUT:5s}
+      read-timeout: ${USPS_READ_TIMEOUT:10s}
+  security:
+    # HTTP Basic users. No defaults: the web application refuses to start until
+    # the CM_* variables are set (Compose sets them).
+    users:
+      - username: ${CM_INQUIRY_USER:}
+        password: ${CM_INQUIRY_PASSWORD:}
+        role: INQUIRY
+      - username: ${CM_MAINTENANCE_USER:}
+        password: ${CM_MAINTENANCE_PASSWORD:}
+        role: MAINTENANCE

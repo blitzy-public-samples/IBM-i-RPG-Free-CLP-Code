@@ -1,0 +1,59 @@
+[
+  {
+    "description": "Primary e2e fixture: street with ZIP+4 (NH is the first NEW state in either picker sort)",
+    "input": { "address2": "41 QUARRY HILL ROAD", "city": "GRANITE FALLS", "state": "NH", "zip5": "03999" },
+    "output": { "address1": "", "address2": "41 QUARRY HILL RD", "city": "GRANITE FALLS", "state": "NH", "zip5": "03999", "zip4": "2210" }
+  },{
+    "description": "Harness calls 1-2: street and city given, no ZIP",
+    "input": { "address2": "8 ELMWOOD DRIVE", "city": "OLD HAVEN", "state": "CT", "zip5": "" },
+    "output": { "address1": "", "address2": "8 ELMWOOD DR", "city": "OLD HAVEN", "state": "CT", "zip5": "06399", "zip4": "1234" }
+  },{
+    "description": "Harness call 5: city blank, ZIP given, suite in the street line",
+    "input": { "address2": "8 ELMWOOD DRIVE, SUITE 2", "city": "", "state": "CT", "zip5": "06399" },
+    "output": { "address1": "STE 2", "address2": "8 ELMWOOD DR", "city": "OLD HAVEN", "state": "CT", "zip5": "06399", "zip4": "1234" }
+  },{
+    "description": "Harness call 6: lowercase input, matched after uppercasing",
+    "input": { "address2": "300 WEST AMBER STREET", "city": "PASO VERDE", "state": "CA", "zip5": "" },
+    "output": { "address1": "", "address2": "300 W AMBER ST", "city": "PASO VERDE", "state": "CA", "zip5": "91999", "zip4": "0042" }
+  },{
+    "description": "Harness call 7: long returned city (23 characters), no ZIP+4",
+    "input": { "address2": "6802 MESA GRANDE BLVD NW", "city": "LOS RANCHOS", "state": "NM", "zip5": "87999" },
+    "output": { "address1": "", "address2": "6802 MESA GRANDE BLVD NW", "city": "LOS RANCHOS DE ALBARADO", "state": "NM", "zip5": "87999", "zip4": "" }
+  },{
+    "description": "Harness call 8: long city name",
+    "input": { "address2": "13 SENDERO VERDE", "city": "RANCHO SANTA LUCIA", "state": "CA", "zip5": "92999" },
+    "output": { "address1": "", "address2": "13 SENDERO VERDE", "city": "RANCHO SANTA LUCIA", "state": "CA", "zip5": "92999", "zip4": "1300" }
+  },{
+    "description": "No ZIP+4 returned, reachable through the UI",
+    "input": { "address2": "77 HARBORVIEW LANE", "city": "PORT ELLISON", "state": "NY", "zip5": "10999" },
+    "output": { "address1": "", "address2": "77 HARBORVIEW LN", "city": "PORT ELLISON", "state": "NY", "zip5": "10999", "zip4": "" }
+  },{
+    "description": "30-character key: first 30 characters of the 38-character street 4400 SOUTHEAST LAKEVIEW TERRACE APT 12",
+    "input": { "address2": "4400 SOUTHEAST LAKEVIEW TERRAC", "city": "CEDAR BLUFF", "state": "OR", "zip5": "97999" },
+    "output": { "address1": "", "address2": "4400 SE LAKEVIEW TER", "city": "CEDAR BLUFF", "state": "OR", "zip5": "97999", "zip4": "5512" }
+  },{
+    "description": "Street with ZIP+4, reachable through the UI",
+    "input": { "address2": "15 ORCHARD PLACE", "city": "MAPLE CROSSING", "state": "NJ", "zip5": "08999" },
+    "output": { "address1": "", "address2": "15 ORCHARD PL", "city": "MAPLE CROSSING", "state": "NJ", "zip5": "08999", "zip4": "3101" }
+  },{
+    "description": "Re-standardization of F1's output: an already standardized address keeps its ZIP+4 on review",
+    "input": { "address2": "41 QUARRY HILL RD", "city": "GRANITE FALLS", "state": "NH", "zip5": "03999" },
+    "output": { "address1": "", "address2": "41 QUARRY HILL RD", "city": "GRANITE FALLS", "state": "NH", "zip5": "03999", "zip4": "2210" }
+  },{
+    "description": "Re-standardization of the output F2 and F3 share: an already standardized address keeps its ZIP+4 on review",
+    "input": { "address2": "8 ELMWOOD DR", "city": "OLD HAVEN", "state": "CT", "zip5": "06399" },
+    "output": { "address1": "", "address2": "8 ELMWOOD DR", "city": "OLD HAVEN", "state": "CT", "zip5": "06399", "zip4": "1234" }
+  },{
+    "description": "Re-standardization of F4's output: an already standardized address keeps its ZIP+4 on review",
+    "input": { "address2": "300 W AMBER ST", "city": "PASO VERDE", "state": "CA", "zip5": "91999" },
+    "output": { "address1": "", "address2": "300 W AMBER ST", "city": "PASO VERDE", "state": "CA", "zip5": "91999", "zip4": "0042" }
+  },{
+    "description": "Re-standardization of F8's output: an already standardized address keeps its ZIP+4 on review",
+    "input": { "address2": "4400 SE LAKEVIEW TER", "city": "CEDAR BLUFF", "state": "OR", "zip5": "97999" },
+    "output": { "address1": "", "address2": "4400 SE LAKEVIEW TER", "city": "CEDAR BLUFF", "state": "OR", "zip5": "97999", "zip4": "5512" }
+  },{
+    "description": "Re-standardization of F9's output: an already standardized address keeps its ZIP+4 on review",
+    "input": { "address2": "15 ORCHARD PL", "city": "MAPLE CROSSING", "state": "NJ", "zip5": "08999" },
+    "output": { "address1": "", "address2": "15 ORCHARD PL", "city": "MAPLE CROSSING", "state": "NJ", "zip5": "08999", "zip4": "3101" }
+  }
+]

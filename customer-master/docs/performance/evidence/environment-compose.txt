@@ -1,0 +1,53 @@
+# Environment capture before the Compose runs
+date -u: 2026-10-08T14:47:30Z
+git HEAD: bbe857b
+git status --short (tracked changes): 0 files
+
+## lscpu
+Architecture:                            x86_64
+CPU(s):                                  112
+Model name:                              INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.10GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      28
+Socket(s):                               2
+
+## nproc
+12
+
+## free -h
+               total        used        free      shared  buff/cache   available
+Mem:           2.9Ti        80Gi       2.4Ti       145Mi       371Gi       2.8Ti
+Swap:           15Gi        29Mi        15Gi
+
+## uname -srmo
+Linux 6.12.85+ x86_64 GNU/Linux
+
+## /etc/os-release
+PRETTY_NAME="Ubuntu 25.10"
+
+## docker version
+Client 29.7.2 / Server 29.7.2 (API 1.55)
+
+## docker compose version
+Docker Compose version v5.4.0
+
+## /proc/loadavg
+4.93 2.47 1.63 5/4391 1123005
+
+## Compose services (docker compose ps)
+cm-c4-app-1 cm-c4-app:local healthy
+cm-c4-db-1 postgres:18.6 healthy
+cm-c4-frontend-1 cm-c4-frontend healthy
+
+## Container limits (docker inspect)
+/cm-c4-app-1 Memory=1073741824 NanoCpus=0 ShmSize=67108864
+/cm-c4-db-1 Memory=3221225472 NanoCpus=0 ShmSize=134217728
+
+## PostgreSQL
+PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+128MB
+
+## App JVM
+openjdk version "21.0.12.1" 2026-08-18 LTS
+OpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS, mixed mode, sharing)

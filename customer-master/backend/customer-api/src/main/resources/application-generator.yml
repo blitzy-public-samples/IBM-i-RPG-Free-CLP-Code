@@ -1,0 +1,37 @@
+# Profile "generator": overlays application.yml and turns the customer-api image
+# into the test-data generator CLI, the counterpart of LOADCUST2 (SBMJOB of
+# LOADCUSTR with the &NUM row count) and LOADCUSTR. The Compose generator service
+# activates this profile in its entrypoint and appends the run arguments, for
+# example:
+#   docker compose --profile tools run --rm generator --count=1000000
+#
+# The datasource (DB_*) and customer-master.db.lock-timeout are inherited from
+# application.yml. The inherited datasource includes the 45-second socket bound
+# and the server-side TCP keepalives, which end the session of an interrupted
+# load (a killed generator container) within about 11 s, so PostgreSQL rolls the
+# load back and releases its lock on custmast. Unknown options are rejected by
+# CustomerGeneratorRunner.
+
+spring:
+  main:
+    # No web server: SecurityConfig (servlet-only) is absent, so the
+    # customer-master.security users are never bound or validated here.
+    web-application-type: none
+  flyway:
+    # The app service has already migrated the schema; the generator never does.
+    enabled: false
+
+# Option bridge (AAP 0.4.9). Spring Boot exposes --count=N as the flat property
+# "count", not customer-master.generator.count, so each flat flag is mapped here.
+# Precedence: command-line flag > GENERATOR_* variable > default. A fully
+# qualified --customer-master.generator.count=N also wins, because command-line
+# properties outrank this file. Empty start-id and seed mean "not given". A
+# command-line flag given an empty or blank value (--count=) is rejected before
+# any read or write: by CustomerGeneratorRunner, like a bare flag, or, for a
+# whitespace-only start-id or seed, already by binding.
+customer-master:
+  generator:
+    count: ${count:${GENERATOR_COUNT:300}}
+    start-id: ${start-id:${GENERATOR_START_ID:}}
+    csz-file: ${csz-file:${GENERATOR_CSZ_FILE:classpath:generator/csz-sample.csv}}
+    seed: ${seed:${GENERATOR_SEED:}}

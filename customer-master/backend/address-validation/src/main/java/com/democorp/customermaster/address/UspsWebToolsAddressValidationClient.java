@@ -1,0 +1,568 @@
+package com.democorp.customermaster.address;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.UnaryOperator;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.NestedExceptionUtils;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
+
+/**
+ * {@link AddressValidationClient} that calls the USPS Web Tools {@code Verify} API with the
+ * {@code AddressValidateRequest} XML document, the contract the original address service
+ * documents.
+ *
+ * <h2>Source replaced</h2>
+ * {@code USAdrVal} in USPS_Address/USADRVAL.SQLRPGLE runs
+ * {@code QSYS2.HTTP_GET('https://secure.shippingapis.com/ShippingAPI.dll' concat
+ * '?API=Verify&XML=' concat url_encode(...)) into :retXML} [74-93] with a 2,048-byte
+ * response buffer [58], reading the user id and password from the USPS_ID and USPS_PWD
+ * data areas [43-46,66-69]. Any SQLSTATE other than {@code 00000} after the call goes to
+ * {@code SQLProblem('USPS API Call')} [94-96], which dumps the program and ends it with a
+ * CPF9898 escape message carrying the SQL diagnostics (Service_Pgms/SRV_SQL.SQLRPGLE:20-57).
+ * Here the HTTP call is a Spring {@link RestClient} GET over the JDK
+ * {@link HttpClient}, the credentials come from {@link AddressValidationProperties.Usps},
+ * the XML is written and read by {@link UspsXmlCodec}, and every fault is an
+ * {@link AddressServiceUnavailableException}, which customer-api maps to 502 APP0502.
+ *
+ * <h2>Request and outcomes</h2>
+ * {@code GET <base-url>?API=Verify&XML=<url-encoded AddressValidateRequest>}, joined with
+ * {@code &} when the base URL already holds a query, sent as built over HTTP/1.1 with
+ * redirects never followed and the configured connect and read timeouts;
+ * {@link #validate validate} states how many requests each outcome sends. A 2xx body of at
+ * most {@value #MAX_BODY_BYTES} bytes that passes {@link UspsXmlCodec#parse(byte[])} is
+ * returned as parsed, an address-level error such as {@code Address Not Found.} included,
+ * which customer-api turns into 422 DEM9898. A status outside 2xx, a larger body (counted
+ * on the bytes read, not on {@code Content-Length}), a timeout or other I/O error, and
+ * every fault the codec reports are thrown as {@link AddressServiceUnavailableException},
+ * never returned as a result.
+ *
+ * <h2>Secret and data hygiene</h2>
+ * The Web Tools contract puts the user id and password in the query string, so the request
+ * URI is a secret: no log line or exception message is built from the URI, the query or
+ * the request document, and no exception message quotes the response. Spring's
+ * {@code ResourceAccessException} quotes the URI, so it is never chained or logged; the
+ * fault names its root cause's class instead. A log line carries the host, the HTTP status
+ * and the reason, and, when the response holds a USPS {@code Error}, its {@code Number} and
+ * {@code Description} as the service sent them, in the {@link #diagnostic diagnostic} form:
+ * a request echo and a credential, in every form {@link UspsTextRedactor} recognizes,
+ * percent-encoded to any depth included, a value this call submitted and any other URL, a
+ * percent-encoded one included, become markers; the {@code Number} and the
+ * {@code Description} each read as a customer-facing message shows a {@code Description},
+ * so either is withheld whole unless it is a documented description when a credential
+ * shorter than {@value UspsTextRedactor#SHORT_CREDENTIAL_CODE_POINTS} code points occurs
+ * in it; and every other character is kept, with control characters escaped.
+ * Results keep the service's text, and exception messages keep their reason with every
+ * credential masked by {@link UspsTextRedactor}. The client is built from the static
+ * {@link RestClient#builder()} rather than an application {@code RestClient.Builder} bean,
+ * so no observation registry records the URI as a metric or trace tag.
+ *
+ * <h2>Before enabling</h2>
+ * USPS retired the Web Tools APIs, including this endpoint, on 2026-01-25. The client keeps
+ * the base URL configurable but cannot be assumed to reach a live service. Complete the
+ * pre-enablement checklist in {@code customer-master/docs/developer-guide.md} (endpoint,
+ * registration and licensing, contract differences, credential exposure in the query
+ * string, the success test) before setting {@code ADDRESS_VALIDATION_CLIENT=usps}.
+ *
+ * <h2>Lifecycle and threading</h2>
+ * The class carries no stereotype annotation: its package lies under customer-api's
+ * component-scan root, and the bean is created only by
+ * {@link AddressValidationAutoConfiguration}. All fields are final and immutable or
+ * thread-safe ({@link HttpClient}, {@link RestClient}, {@link UspsXmlCodec},
+ * {@link UspsTextRedactor}), so one instance serves concurrent requests; the values one
+ * call redacts from its log line are passed down that call and never stored.
+ * {@link #validate validate} opens no transaction and touches no shared mutable state.
+ * {@link #close()} shuts the HTTP client down; Spring calls it when the application
+ * context closes.
+ */
+public class UspsWebToolsAddressValidationClient implements AddressValidationClient, AutoCloseable {
+
+    /**
+     * Largest response body accepted, in bytes (64 KiB). A larger body is a service fault.
+     * It replaces the 2,048-byte {@code retXML} buffer of the source
+     * [USPS_Address/USADRVAL.SQLRPGLE:58], which a valid Verify response never approaches.
+     */
+    public static final int MAX_BODY_BYTES = 65_536;
+
+    private static final Logger log = LoggerFactory.getLogger(UspsWebToolsAddressValidationClient.class);
+
+    private static final byte[] NO_BODY = new byte[0];
+
+    /** Logged in place of a {@code Number} or {@code Description} element the response lacks. */
+    private static final String ABSENT = "-";
+
+    /** Logged in place of each value the call submitted, in any of its {@link #addressForms forms}. */
+    static final String ADDRESS_MARKER = "[address]";
+
+    /** Logged in place of each URL {@link #URL} matches. */
+    static final String URL_MARKER = "[URL]";
+
+    /**
+     * The documented USPS {@code Description} texts, each as the service documents or sends
+     * it. {@link UspsTextRedactor#redactDescription redactDescription} shows one of them as
+     * sent when a short credential occurs in it, because a fixed text echoes nothing, and
+     * withholds any other description in which a short credential occurs:
+     * <ul>
+     *   <li>{@code Address Not Found.}: the Web Tools address-level error with
+     *       {@code Number} {@code -2147219401} and {@code Source} {@code clsAMS}, the triple
+     *       {@link StubAddressValidationClient} reproduces;</li>
+     *   <li>{@code Invalid Address.}, {@code Invalid City.}, {@code Invalid State Code.} and
+     *       {@code Invalid Zip Code.}: the address-level errors of the USPS Web Tools
+     *       Address Information API user guide, section 6.0 Error Response;</li>
+     *   <li>{@code Authorization failure.  Perhaps username and/or password is incorrect.},
+     *       the Web Tools root {@code Error} 80040B1A, and
+     *       {@code XML Syntax Error: Please check the XML request to see if it can be parsed.},
+     *       the root {@code Error} 80040B19, both as secure.shippingapis.com sent them on
+     *       2026-10-08.</li>
+     * </ul>
+     */
+    static final List<String> DOCUMENTED_DESCRIPTIONS = List.of(
+            "Address Not Found.",
+            "Invalid Address.",
+            "Invalid City.",
+            "Invalid State Code.",
+            "Invalid Zip Code.",
+            "Authorization failure.  Perhaps username and/or password is incorrect.",
+            "XML Syntax Error: Please check the XML request to see if it can be parsed.");
+
+    /**
+     * The markers {@link #redactSubmitted redactSubmitted} always keeps, as an alternation of
+     * literals: those of {@link UspsTextRedactor}, the withheld-description marker included,
+     * the credential mask and the client's own.
+     */
+    private static final String MARKERS = Stream.of(
+                    UspsTextRedactor.REQUEST_DOCUMENT_MARKER, UspsTextRedactor.REQUEST_QUERY_MARKER,
+                    UspsTextRedactor.REQUEST_URL_MARKER, UspsTextRedactor.ENCODED_TEXT_MARKER,
+                    UspsTextRedactor.DESCRIPTION_WITHHELD_MARKER,
+                    URL_MARKER, ADDRESS_MARKER, AddressValidationProperties.MASK)
+            .map(Pattern::quote)
+            .collect(Collectors.joining("|"));
+
+    /**
+     * A URL that is not the configured base URL, to the next whitespace and in any case: a
+     * scheme, which is a letter followed by at most 63 letters, digits, {@code +}, {@code .}
+     * or {@code -}, then {@code ://}; a {@code mailto:} or {@code tel:} URI; or a word
+     * starting with {@code www.}. Each alternative starts only at a word boundary and tests
+     * a bounded prefix at each position, which keeps the scan linear on a
+     * {@value #MAX_BODY_BYTES}-byte body, so a scheme longer than 64 characters before
+     * {@code ://} is not recognized and its text is kept. A percent-encoded URL is found in
+     * the {@link UspsTextRedactor#decodedLayers decoded layers} of its token, as
+     * {@link #diagnostic diagnostic} states.
+     */
+    private static final Pattern URL = Pattern.compile(
+            "(?i)\\b[a-z][a-z0-9+.-]{0,63}://\\S*|\\b(?:mailto|tel):\\S+|\\bwww\\.\\S*");
+
+    private final String baseUrl;
+    private final String userId;
+    private final String password;
+
+    /** Host of the base URL, the only part of the endpoint that is ever logged. */
+    private final String host;
+
+    /** Redacts request echoes and credentials from every logged text and thrown reason. */
+    private final UspsTextRedactor redactor;
+
+    private final UspsXmlCodec codec;
+    private final HttpClient httpClient;
+    private final RestClient restClient;
+
+    /**
+     * Creates the client from the bound settings.
+     *
+     * <p>The JDK client is built with the configured connect timeout, redirects disabled
+     * (a 3xx is a fault, never followed) and HTTP/1.1 (no {@code h2c} upgrade attempt on
+     * plain {@code http} endpoints such as a local gateway or test fake). The read timeout
+     * is set on Spring's {@link JdkClientHttpRequestFactory}, which cancels the exchange
+     * when it elapses. The JDK client re-sends a {@code GET} once when its connection is
+     * reset or closed before any byte of the response arrives, and no builder setting
+     * disables that; {@link #validate validate} states the resulting request count.
+     *
+     * @param properties the module settings; only {@link AddressValidationProperties#usps()}
+     *                   is used, already normalized and validated by its constructor
+     * @throws NullPointerException if {@code properties} is {@code null}
+     */
+    public UspsWebToolsAddressValidationClient(AddressValidationProperties properties) {
+        Objects.requireNonNull(properties, "properties");
+        AddressValidationProperties.Usps usps = properties.usps();
+        this.baseUrl = usps.baseUrl();
+        this.userId = usps.userId();
+        this.password = usps.password();
+        // The base URL was parsed and checked for a host when the settings were bound.
+        this.host = URI.create(baseUrl).getHost();
+        this.redactor = new UspsTextRedactor(usps);
+        this.codec = new UspsXmlCodec();
+
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(usps.connectTimeout())
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .version(HttpClient.Version.HTTP_1_1)
+                .build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(usps.readTimeout());
+        // The static builder, never an application RestClient.Builder bean: such a bean
+        // carries the observation registry, whose metrics and traces would record the
+        // request URI, credentials included.
+        this.restClient = RestClient.builder()
+                .requestFactory(requestFactory)
+                .build();
+    }
+
+    /**
+     * Sends the Verify request and returns the service's answer.
+     *
+     * <p><b>Requests sent.</b> One Verify request per call, except that the JDK
+     * {@link HttpClient} re-sends a {@code GET} once, on another connection, when the
+     * connection is reset or closed before any byte of the response arrives. The service
+     * can then receive the request, credentials included, twice and never more, while the
+     * call still ends in one result or one {@link AddressServiceUnavailableException} with
+     * one log line. No JDK client setting turns the re-send off: its
+     * {@code jdk.httpclient.disableRetryConnect} system property covers refused connects
+     * only, for the whole JVM. Any response, whatever its status, a response cut short
+     * after its first bytes and a read timeout each send the request once; a refused or
+     * timed-out connect, and a value or credential the request document cannot carry,
+     * send none.
+     *
+     * @param request the address to check; never {@code null}
+     * @return the standardized address, or the address-level error the service reported
+     * @throws AddressServiceUnavailableException for a status outside 2xx, a body over
+     *         {@value #MAX_BODY_BYTES} bytes, a timeout or other I/O failure, or a response
+     *         that fails the response rules of {@link UspsXmlCodec#parse(byte[])}
+     * @throws IllegalArgumentException if a request value or a configured credential holds a
+     *         character the XML 1.0 request document cannot carry, as
+     *         {@link UspsXmlCodec#requestDocument UspsXmlCodec.requestDocument} states. It is
+     *         raised before the request URI is built, so nothing is sent and nothing is logged;
+     *         the message names the element or attribute only. It is a caller error, never a
+     *         service fault, and is not turned into {@link AddressServiceUnavailableException}
+     * @throws NullPointerException if {@code request} is {@code null}
+     */
+    @Override
+    public AddressValidationResult validate(AddressValidationRequest request) {
+        Objects.requireNonNull(request, "request");
+        Raw raw = exchange(requestUri(request));
+
+        int status = raw.status().value();
+        if (!raw.status().is2xxSuccessful()) {
+            throw fault(status, "USPS returned HTTP " + status);
+        }
+        if (raw.body().length > MAX_BODY_BYTES) {
+            throw fault(status, "USPS response exceeds " + MAX_BODY_BYTES + " bytes");
+        }
+
+        AddressValidationResult result;
+        try {
+            result = codec.parse(raw.body());
+        } catch (AddressServiceUnavailableException e) {
+            logCodecFault(status, e.getMessage(), raw.body(), request);
+            throw e;
+        }
+
+        if (result.standardized()) {
+            log.debug("USPS address standardized: host={} status={}", host, status);
+        } else if (log.isInfoEnabled()) {
+            // The Number is projected from the text the service sent, not from the parsed
+            // int, so a credential echoed with a sign or leading zeros is still masked whole.
+            // The body parse accepted holds exactly one Error, which serviceError reads.
+            Optional<UspsXmlCodec.ServiceError> serviceError = codec.serviceError(raw.body());
+            String number = serviceError.isPresent()
+                    ? serviceError.get().number()
+                    : Integer.toString(result.errorNumber());
+            log.info("USPS address not standardized: host={} status={} errorNumber={} errorDescription={}",
+                    host, status, logElement(number, redactor::redactDescription, request),
+                    logElement(result.errorDescription(), redactor::redactDescription, request));
+        }
+        return result;
+    }
+
+    /**
+     * Shuts the JDK HTTP client down, waiting for any exchange still in flight, each of
+     * which ends within the configured timeouts. A later {@link #validate validate} call
+     * fails with {@link AddressServiceUnavailableException}. Spring infers this method as
+     * the bean's destroy method.
+     */
+    @Override
+    public void close() {
+        httpClient.close();
+    }
+
+    /**
+     * Builds {@code <base-url>?API=Verify&XML=<encoded document>}, or {@code &...} when the
+     * base URL already holds a query. The result carries the credentials and must never be
+     * logged.
+     */
+    private URI requestUri(AddressValidationRequest request) {
+        String query = codec.requestQuery(request, userId, password);
+        String separator = baseUrl.indexOf('?') >= 0 ? "&" : "?";
+        try {
+            return URI.create(baseUrl + separator + query);
+        } catch (IllegalArgumentException e) {
+            // Unreachable with a base URL that passed binding, as the encoded query holds only
+            // URI-safe characters. Neither chained nor quoted: the parser's message repeats the
+            // whole input, credentials included.
+            throw new IllegalStateException(
+                    "the USPS request could not be built from " + AddressValidationProperties.PREFIX
+                            + ".usps.base-url");
+        }
+    }
+
+    /**
+     * Performs the GET and captures the status and, for a 2xx, at most
+     * {@value #MAX_BODY_BYTES} + 1 bytes of the body, so an oversize body is detected
+     * without reading it whole. A non-2xx body is never read. No message converter and no
+     * status handler is involved, and the response is closed when the exchange returns.
+     */
+    private Raw exchange(URI uri) {
+        try {
+            return restClient.get()
+                    .uri(uri)
+                    .exchange((clientRequest, clientResponse) -> {
+                        HttpStatusCode status = clientResponse.getStatusCode();
+                        byte[] body = status.is2xxSuccessful() ? readBounded(clientResponse.getBody()) : NO_BODY;
+                        return new Raw(status, body);
+                    });
+        } catch (RestClientException | UncheckedIOException e) {
+            // Timeouts (HttpTimeoutException, HttpConnectTimeoutException), refused connections
+            // and read failures arrive wrapped in ResourceAccessException, whose message holds
+            // the full request URI with USERID and PASSWORD. The fault therefore names the root
+            // cause's class only and is constructed without a cause.
+            Throwable root = NestedExceptionUtils.getMostSpecificCause(e);
+            String reason = "USPS address service I/O failure: " + root.getClass().getSimpleName();
+            log.warn("USPS address validation failed: host={} reason={}", host, logText(reason));
+            throw new AddressServiceUnavailableException(redactor.mask(reason));
+        }
+    }
+
+    /** Reads at most one byte beyond the limit; the caller rejects anything longer. */
+    private static byte[] readBounded(InputStream body) throws IOException {
+        return body == null ? NO_BODY : body.readNBytes(MAX_BODY_BYTES + 1);
+    }
+
+    /** Logs a fault seen after a status was received and returns the exception to throw. */
+    private AddressServiceUnavailableException fault(int status, String reason) {
+        logFault(status, reason);
+        return new AddressServiceUnavailableException(redactor.mask(reason));
+    }
+
+    /** Logs a fault at WARN with the host, the status and the reason, masked and escaped. */
+    private void logFault(int status, String reason) {
+        log.warn("USPS address validation failed: host={} status={} reason={}", host, status, logText(reason));
+    }
+
+    /**
+     * Logs a fault {@link UspsXmlCodec#parse(byte[])} reported. When the body holds a USPS
+     * {@code Error} element, a Web Tools root {@code <Error>} or the {@code Error} of the
+     * one {@code Address}, the WARN line also carries its {@code Number} and
+     * {@code Description} as the service sent them, each {@link #logElement prepared for
+     * the log} as on the INFO line of an address-level error, with {@value #ABSENT} for an
+     * element the {@code Error} lacks. Otherwise the line is the one
+     * {@link #logFault logFault} writes.
+     *
+     * @param status  the HTTP status, a 2xx
+     * @param reason  the codec's fault message, which quotes no response content
+     * @param body    the response body the codec rejected, at most {@value #MAX_BODY_BYTES} bytes
+     * @param request the request of this call, whose submitted values the logged texts redact
+     */
+    private void logCodecFault(int status, String reason, byte[] body, AddressValidationRequest request) {
+        Optional<UspsXmlCodec.ServiceError> serviceError = codec.serviceError(body);
+        if (serviceError.isEmpty()) {
+            logFault(status, reason);
+            return;
+        }
+        UspsXmlCodec.ServiceError error = serviceError.get();
+        log.warn("USPS address validation failed: host={} status={} reason={} errorNumber={} errorDescription={}",
+                host, status, logText(reason), logElement(error.number(), redactor::redactDescription, request),
+                logElement(error.description(), redactor::redactDescription, request));
+    }
+
+    /**
+     * Prepares the text of a USPS {@code Error} child for the log: {@value #ABSENT} when
+     * the element is absent, otherwise the text {@code redaction} returns for it, in its
+     * {@link #diagnostic diagnostic} form and made {@link #logSafe log-safe}, so an empty
+     * element logs as empty.
+     *
+     * @param text      the element's text, or {@code null} when the element is absent
+     * @param redaction {@link UspsTextRedactor#redactDescription redactDescription}, for a
+     *                  {@code Number} and a {@code Description} alike: it masks every
+     *                  credential unless one shorter than
+     *                  {@value UspsTextRedactor#SHORT_CREDENTIAL_CODE_POINTS} code points
+     *                  occurs, and then yields a documented description as sent or
+     *                  {@value UspsTextRedactor#DESCRIPTION_WITHHELD_MARKER}, the text a
+     *                  customer-facing message shows
+     * @param request   the request of this call
+     * @return the text to log
+     */
+    private static String logElement(
+            String text, UnaryOperator<String> redaction, AddressValidationRequest request) {
+        return text == null ? ABSENT : logSafe(diagnostic(redaction.apply(text), request));
+    }
+
+    /**
+     * Prepares a fault reason for a log argument: {@link UspsTextRedactor#redact redacted},
+     * so that a request document or query is replaced whole, credentials and customer
+     * address included, and a credential outside them is masked before any of its
+     * characters is escaped, then made {@link #logSafe log-safe}.
+     *
+     * @param text text about to be logged; {@code null} reads as {@code ""}
+     * @return the redacted, masked, escaped text
+     */
+    private String logText(String text) {
+        return logSafe(redactor.redact(text));
+    }
+
+    /**
+     * The logged form of a USPS {@code Number} or {@code Description} that
+     * {@link UspsTextRedactor} has redacted: every echo of the request
+     * {@link UspsTextRedactor#redactRequest recognized} as such, percent-encoded to any
+     * depth included, is then {@code [request document]}, {@code [request query]},
+     * {@code [request URL]} or {@code [encoded text]}, every configured credential
+     * {@value AddressValidationProperties#MASK}, and a {@code Number} or
+     * {@code Description} in which a short credential occurs a documented description as
+     * sent or {@value UspsTextRedactor#DESCRIPTION_WITHHELD_MARKER}. Three steps follow,
+     * in this order:
+     * <ol>
+     *   <li>every {@link #addressForms form} of a value this call submitted becomes
+     *       {@value #ADDRESS_MARKER} where no letter or digit adjoins it, case-sensitively,
+     *       in one pass that leaves every {@link #MARKERS marker} intact;</li>
+     *   <li>every other {@link #URL URL}, a {@code mailto:} or {@code tel:} URI included,
+     *       becomes {@value #URL_MARKER};</li>
+     *   <li>each {@link UspsTextRedactor#replaceEncodedTokens token} still holding
+     *       {@code %} becomes {@value #URL_MARKER} whole when one of its
+     *       {@link UspsTextRedactor#decodedLayers decoded layers} holds such a URL, as do
+     *       {@code https%3A%2F%2Fhost}, {@code https:%2F%2Fhost} and
+     *       {@code login?return%3Dhttps%3A%2F%2Fhost}.</li>
+     * </ol>
+     * Every other character is kept as the service sent it, so a documented description and
+     * any other text read as sent. The redacted values are computed from {@code request} on
+     * each call and never stored. Applied to log lines only; {@link #logSafe logSafe}
+     * escapes the result.
+     *
+     * @param redacted the element's text as {@link UspsTextRedactor} returned it; never {@code null}
+     * @param request  the request of this call
+     * @return the text to log, before escaping
+     */
+    private static String diagnostic(String redacted, AddressValidationRequest request) {
+        String projected = redactSubmitted(redacted, request);
+        String urlsReplaced = URL.matcher(projected).replaceAll(Matcher.quoteReplacement(URL_MARKER));
+        return UspsTextRedactor.replaceEncodedTokens(urlsReplaced, token ->
+                UspsTextRedactor.decodedLayers(token).layers().stream()
+                        .anyMatch(layer -> URL.matcher(layer).find()) ? URL_MARKER : token);
+    }
+
+    /**
+     * Replaces each {@link #addressForms form} of a value {@code request} submitted with
+     * {@value #ADDRESS_MARKER}, where neither the character before nor the one after it is
+     * a letter or a digit. One pattern, built for this call, matches a marker first and
+     * keeps it, so no value is found inside a marker or a replacement; at each position the
+     * longest form that fits is taken.
+     */
+    private static String redactSubmitted(String text, AddressValidationRequest request) {
+        List<String> forms = addressForms(request);
+        if (forms.isEmpty()) {
+            return text;
+        }
+        Pattern submitted = Pattern.compile("(" + MARKERS + ")|(?<![\\p{L}\\p{N}])(?:"
+                + forms.stream().map(Pattern::quote).collect(Collectors.joining("|"))
+                + ")(?![\\p{L}\\p{N}])");
+        return submitted.matcher(text).replaceAll(match -> Matcher.quoteReplacement(
+                match.group(1) != null ? match.group() : ADDRESS_MARKER));
+    }
+
+    /**
+     * The forms in which a value the call submitted can come back: for each non-blank
+     * {@code address1}, {@code address2}, {@code city}, {@code state}, {@code zip5} and
+     * {@code zip4}, stripped as {@link UspsXmlCodec} writes it, the raw value, its element
+     * text as the request writer escapes it ({@code &}, {@code <} and {@code >}), its
+     * {@link UspsTextRedactor#xmlEscape full-entity} form, and the UTF-8 URL encoding of
+     * each, with a blank written as {@code +} and as {@code %20}. Duplicates are dropped,
+     * and the forms are sorted longest first.
+     */
+    private static List<String> addressForms(AddressValidationRequest request) {
+        Set<String> forms = new LinkedHashSet<>();
+        List<String> components = List.of(request.address1(), request.address2(), request.city(),
+                request.state(), request.zip5(), request.zip4());
+        for (String component : components) {
+            String value = component.strip();
+            if (value.isEmpty()) {
+                continue;
+            }
+            List<String> written = List.of(value, elementText(value), UspsTextRedactor.xmlEscape(value));
+            for (String form : written) {
+                String encoded = URLEncoder.encode(form, StandardCharsets.UTF_8);
+                forms.add(form);
+                forms.add(encoded);
+                forms.add(encoded.replace("+", "%20"));
+            }
+        }
+        List<String> sorted = new ArrayList<>(forms);
+        sorted.sort(Comparator.comparingInt(String::length).reversed());
+        return sorted;
+    }
+
+    /** Escapes {@code &}, {@code <} and {@code >} as the request writer escapes element text. */
+    private static String elementText(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * Escapes every character that could end, split or disguise a log line: each code
+     * point whose {@link Character#getType(int) general category} is
+     * {@link Character#CONTROL CONTROL} (CR, LF, TAB, ESC, DEL, NEL and the other C0 and
+     * C1 controls), {@link Character#FORMAT FORMAT} (such as the bidirectional override
+     * U+202E), {@link Character#LINE_SEPARATOR LINE_SEPARATOR} (U+2028) or
+     * {@link Character#PARAGRAPH_SEPARATOR PARAGRAPH_SEPARATOR} (U+2029) becomes a visible
+     * backslash, {@code u} and its code point in at least four uppercase hexadecimal
+     * digits, so a line feed is logged as <code>&#92;u000A</code>. Every other character is
+     * kept, accented letters included.
+     *
+     * <p>Applied to logged text only: results and exception messages keep the text as the
+     * service sent it.
+     *
+     * @param text text about to be logged; {@code null} reads as {@code ""}
+     * @return the text with those characters escaped
+     */
+    static String logSafe(String text) {
+        if (text == null) {
+            return "";
+        }
+        StringBuilder safe = new StringBuilder(text.length());
+        text.codePoints().forEach(codePoint -> {
+            switch (Character.getType(codePoint)) {
+                case Character.CONTROL, Character.FORMAT,
+                        Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR ->
+                        safe.append(String.format("\\u%04X", codePoint));
+                default -> safe.appendCodePoint(codePoint);
+            }
+        });
+        return safe.toString();
+    }
+
+    /**
+     * Status and bounded body of one exchange, captured inside the exchange callback and
+     * examined after the response is closed.
+     *
+     * @param status the HTTP status
+     * @param body   the body bytes read, empty for a non-2xx status
+     */
+    private record Raw(HttpStatusCode status, byte[] body) {
+    }
+}

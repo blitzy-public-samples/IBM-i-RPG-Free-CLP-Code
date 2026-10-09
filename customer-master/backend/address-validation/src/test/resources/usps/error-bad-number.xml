@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AddressValidateResponse>
+  <Address ID="0">
+    <Address2>99 NOWHERE LN</Address2>
+    <Error>
+      <Number>80040B1A</Number>
+      <Source>clsAMS</Source>
+      <Description>Invalid Address.</Description>
+      <HelpFile/>
+      <HelpContext/>
+    </Error>
+  </Address>
+</AddressValidateResponse>
