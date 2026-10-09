@@ -420,6 +420,7 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
           maxLength={FILTER_LENGTH}
           size={FILTER_LENGTH}
           uppercase
+          autoComplete="off"
           inputRef={filterRef}
           error={filterError}
         />
@@ -469,6 +470,7 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
                       size={OPTION_LENGTH}
                       inputMode="numeric"
                       autoComplete="off"
+                      spellCheck={false}
                       value={options[row.state] ?? ''}
                       onChange={(event) => changeOption(row.state, event.target.value)}
                       aria-invalid={error !== '' ? 'true' : undefined}

@@ -8,12 +8,13 @@
  * the ZIP as `Zip5-Zip4` (USPS_Address/MTNCUSTR.SQLRPGLE:471-499).
  *
  * Every field is read-only but focusable, so Tab and Shift+Tab move natively
- * and the keyboard scope never intercepts them. The data fields take their
- * order and labels from `CUSTOMER_FORM_FIELDS`, the one label table shared
- * with the editable form and the conflict comparison. The DEM0000/DEM0009
- * notice is not rendered here: the dialog publishes it as a status toast, so
- * it shows only once. The panel is presentational only: it sends no request
- * and binds no key; `CustomerDetailDialog` owns the confirmation keys.
+ * and the keyboard scope never intercepts them. The fields take their order,
+ * labels and rows from `CustomerFormRows`, the layout of the editable form,
+ * whose label table, `CUSTOMER_FORM_FIELDS`, the conflict comparison shares
+ * too. The DEM0000/DEM0009 notice is not rendered here: the dialog publishes
+ * it as a status toast, so it shows only once. The panel is presentational
+ * only: it sends no request and binds no key; `CustomerDetailDialog` owns the
+ * confirmation keys.
  *
  * Layer rule: imports come from `api/` (types only), `components/` and this
  * folder only.
@@ -22,13 +23,13 @@ import { useEffect } from 'react';
 import type { RefObject } from 'react';
 import type { CustomerFields } from '../../api/customers';
 import { FormField } from '../../components/FormField';
-import { CUSTOMER_FORM_FIELDS, ChangeStampLine } from './CustomerForm';
+import { ChangeStampLine, CustomerFormRows } from './CustomerForm';
 import type { CustomerChangeStamp } from './CustomerForm';
 
 /** SD_CUSTID: four base-36 characters. */
 const CUSTOMER_ID_LENGTH = 4;
 
-/** FormField requires a change handler; the read-only inputs never fire it. */
+/** FormField requires a change handler; the protected fields never fire it. */
 function keepReviewedValue(_value: string): void {
   return undefined;
 }
@@ -59,9 +60,10 @@ export interface ConfirmationPanelProps {
    * Ref to the panel's `tabIndex={-1}` container (focusable by script, not a
    * Tab stop), which the panel focuses on mount. The dialog passes it, or a
    * ref to an enclosing element, to `useFunctionKeys` as `containerRef`, so
-   * Enter on the container or any read-only input in it commits. Focusing
-   * the panel also takes focus off the form input that pressed Enter, which
-   * unmounts with the form.
+   * Enter on the container commits. On a protected field in it, a read-only
+   * textarea, Enter keeps its native action. Focusing the panel also takes
+   * focus off the form input that pressed Enter, which unmounts with the
+   * form.
    */
   containerRef: RefObject<HTMLDivElement | null>;
   /**
@@ -108,27 +110,30 @@ export function ConfirmationPanel({
           Address standardized.
         </p>
       ) : null}
-      <FormField
-        id={`${idPrefix}-custId`}
-        label="Customer Id"
-        value={custId}
-        onChange={keepReviewedValue}
-        maxLength={CUSTOMER_ID_LENGTH}
-        size={CUSTOMER_ID_LENGTH}
-        readOnly
+      <CustomerFormRows
+        customerId={
+          <FormField
+            id={`${idPrefix}-custId`}
+            label="Customer Id"
+            value={custId}
+            onChange={keepReviewedValue}
+            maxLength={CUSTOMER_ID_LENGTH}
+            size={CUSTOMER_ID_LENGTH}
+            readOnly
+          />
+        }
+        renderField={({ field, label, maxLength }) => (
+          <FormField
+            id={`${idPrefix}-${field}`}
+            label={label}
+            value={values[field] ?? ''}
+            onChange={keepReviewedValue}
+            maxLength={maxLength}
+            size={maxLength}
+            readOnly
+          />
+        )}
       />
-      {CUSTOMER_FORM_FIELDS.map(({ field, label, maxLength }) => (
-        <FormField
-          key={field}
-          id={`${idPrefix}-${field}`}
-          label={label}
-          value={values[field] ?? ''}
-          onChange={keepReviewedValue}
-          maxLength={maxLength}
-          size={maxLength}
-          readOnly
-        />
-      ))}
       <ChangeStampLine stamp={stamp} />
     </div>
   );

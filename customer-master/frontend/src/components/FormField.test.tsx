@@ -8,8 +8,10 @@ import { createRef, useState } from 'react';
 import type { Ref } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { FormField } from './FormField';
+import type { FormFieldElement } from './FormField';
 
 type HarnessProps = {
   uppercase?: boolean;
@@ -282,6 +284,49 @@ describe('FormField', () => {
     });
   });
 
+  // jsdom implements no `spellcheck` IDL property, so the content attribute
+  // React renders is asserted; a browser reflects `"false"` as
+  // `spellcheck === false`.
+  describe('browser spell checking and autocomplete', () => {
+    it('turns spell checking off by default, on an editable and on a read-only field', () => {
+      const { unmount } = render(<Harness uppercase onSubmit={vi.fn()} />);
+      expect(nameInput()).toHaveAttribute('spellcheck', 'false');
+      unmount();
+
+      render(<Harness readOnly uppercase initialValue="ACME" onSubmit={vi.fn()} />);
+      expect(nameInput()).toHaveAttribute('spellcheck', 'false');
+    });
+
+    it('turns spell checking on when spellCheck is true', () => {
+      render(<FormField id="note" label="Note" value="" onChange={vi.fn()} maxLength={40} spellCheck />);
+
+      expect(screen.getByLabelText('Note')).toHaveAttribute('spellcheck', 'true');
+    });
+
+    it('passes autoComplete through, and renders none without it', () => {
+      const { unmount } = render(<Harness onSubmit={vi.fn()} />);
+      expect(nameInput()).not.toHaveAttribute('autocomplete');
+      unmount();
+
+      render(
+        <>
+          <FormField id="filter" label="Filter" value="" onChange={vi.fn()} maxLength={13} autoComplete="off" />
+          <FormField
+            id="password"
+            label="Password"
+            type="password"
+            value=""
+            onChange={vi.fn()}
+            maxLength={64}
+            autoComplete="current-password"
+          />
+        </>,
+      );
+      expect(screen.getByLabelText('Filter')).toHaveAttribute('autocomplete', 'off');
+      expect(screen.getByLabelText('Password')).toHaveAttribute('autocomplete', 'current-password');
+    });
+  });
+
   describe('required', () => {
     it('renders the required attribute only with the prop, and marks nothing invalid by itself', () => {
       const onSubmit = vi.fn();
@@ -322,6 +367,270 @@ describe('FormField', () => {
 
       await user.click(screen.getByRole('button', { name: 'Submit' }));
       expect(onSubmit).toHaveBeenCalledWith('ACME');
+    });
+
+    /** An unbroken 40-character run: the longest protected value, which only a wrapping control shows whole on a narrow screen. */
+    const LONG_TOKEN = 'QALONGTOKEN'.repeat(4).slice(0, 40);
+
+    it('renders a protected text value as a labelled, read-only textarea with the input’s id, classes, length and width', () => {
+      render(
+        <FormField id="name" label="Name" value={LONG_TOKEN} onChange={vi.fn()} maxLength={40} size={40} readOnly />,
+      );
+      const field = screen.getByRole('textbox', { name: 'Name' });
+
+      expect(field).toBeInstanceOf(HTMLTextAreaElement);
+      expect(screen.getByLabelText('Name')).toBe(field);
+      expect(field).toHaveAttribute('id', 'name');
+      expect(field).toHaveAttribute('readonly');
+      expect(field).toHaveClass('form-field__input', 'read-only');
+      expect(field).toHaveAttribute('maxlength', '40');
+      expect(field).toHaveAttribute('cols', '40');
+      expect(field).toHaveAttribute('rows', '1');
+      expect(field).toHaveAttribute('spellcheck', 'false');
+      expect(field).toHaveValue(LONG_TOKEN);
+    });
+
+    it('ignores typing and a scripted change on the protected textarea, keeps its value, stays focusable and reports nothing', async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn();
+      const onValueChange = vi.fn();
+      render(<Harness readOnly initialValue={LONG_TOKEN} onSubmit={onSubmit} onValueChange={onValueChange} />);
+      const field = screen.getByRole('textbox', { name: 'Name' });
+
+      await user.type(field, 'xyz{Enter}');
+      fireEvent.change(field, { target: { value: 'CHANGED BY SCRIPT' } });
+
+      expect(field).toHaveValue(LONG_TOKEN);
+      expect(onValueChange).not.toHaveBeenCalled();
+      expect(field).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Submit' }));
+      expect(onSubmit).toHaveBeenCalledWith(LONG_TOKEN);
+    });
+
+    it('keeps the error attributes on a protected value', () => {
+      render(<Harness readOnly initialValue="ACME" error="Name: Must not be blank" onSubmit={vi.fn()} />);
+      const field = screen.getByRole('textbox', { name: 'Name' });
+
+      expect(field).toBeInstanceOf(HTMLTextAreaElement);
+      expect(field).toHaveAttribute('aria-invalid', 'true');
+      expect(field).toHaveAttribute('aria-describedby', 'name-error');
+      expect(field).toHaveAccessibleDescription('Name: Must not be blank');
+    });
+
+    it('keeps a protected password a masked, read-only input', () => {
+      render(
+        <FormField id="secret" label="Password" type="password" value="hunter2" onChange={vi.fn()} maxLength={64} readOnly />,
+      );
+      const field = screen.getByLabelText('Password');
+
+      expect(field).toBeInstanceOf(HTMLInputElement);
+      expect(field).toHaveAttribute('type', 'password');
+      expect(field).toHaveAttribute('readonly');
+      expect(field).toHaveClass('form-field__input', 'read-only');
+    });
+
+    it('hands the protected textarea to an object ref and takes it back on unmount', () => {
+      const ref = createRef<FormFieldElement>();
+      const { unmount } = render(
+        <FormField id="name" label="Name" value="ACME" onChange={vi.fn()} maxLength={40} readOnly inputRef={ref} />,
+      );
+
+      expect(ref.current).toBeInstanceOf(HTMLTextAreaElement);
+      expect(ref.current).toBe(screen.getByLabelText('Name'));
+
+      unmount();
+
+      expect(ref.current).toBeNull();
+    });
+
+    it('runs the cleanup a callback ref returns instead of passing it null, and passes null to one without', () => {
+      const cleanup = vi.fn();
+      const withCleanup = vi.fn((_el: FormFieldElement | null) => cleanup);
+      const plain = vi.fn((_el: FormFieldElement | null): void => undefined);
+      const { unmount } = render(
+        <>
+          <FormField id="name" label="Name" value="ACME" onChange={vi.fn()} maxLength={40} readOnly inputRef={withCleanup} />
+          <FormField id="city" label="City" value="BANGOR" onChange={vi.fn()} maxLength={20} readOnly inputRef={plain} />
+        </>,
+      );
+
+      expect(withCleanup).toHaveBeenCalledWith(screen.getByLabelText('Name'));
+      expect(plain).toHaveBeenCalledWith(screen.getByLabelText('City'));
+
+      unmount();
+
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(withCleanup).not.toHaveBeenCalledWith(null);
+      expect(plain).toHaveBeenLastCalledWith(null);
+    });
+
+    describe('height of the wrapped value', () => {
+      /** The `scrollHeight` the next measurement reads; jsdom lays nothing out and reports 0 itself. */
+      let measured = 0;
+
+      function measureAs(height: number): void {
+        measured = height;
+      }
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      });
+
+      function stubScrollHeight(): void {
+        vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(() => measured);
+      }
+
+      it('grows to every wrapped line before paint and refits when the value changes', () => {
+        stubScrollHeight();
+        measureAs(72);
+        const props = { id: 'name', label: 'Name', onChange: vi.fn(), maxLength: 40, size: 40, readOnly: true } as const;
+        const { rerender } = render(<FormField {...props} value={LONG_TOKEN} />);
+        const field = screen.getByRole('textbox', { name: 'Name' });
+
+        expect(field.style.blockSize).toBe('72px');
+
+        measureAs(36);
+        rerender(<FormField {...props} value="ACME" />);
+
+        expect(field.style.blockSize).toBe('36px');
+      });
+
+      it('takes the width of the editable input it stands in for, measured by a hidden probe that leaves nothing behind', () => {
+        stubScrollHeight();
+        measureAs(36);
+        const probes: Array<{ size: string | null; hidden: string | null; className: string; parent: Element | null }> = [];
+        const original = Element.prototype.getBoundingClientRect;
+        vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+          if (this instanceof HTMLInputElement) {
+            probes.push({
+              size: this.getAttribute('size'),
+              hidden: this.getAttribute('aria-hidden'),
+              className: this.className,
+              parent: this.parentElement,
+            });
+            return { x: 0, y: 0, top: 0, left: 0, right: 428, bottom: 34, width: 428, height: 34, toJSON: () => ({}) };
+          }
+          return original.call(this);
+        });
+        const { container } = render(
+          <FormField id="name" label="Name" value={LONG_TOKEN} onChange={vi.fn()} maxLength={40} size={40} readOnly />,
+        );
+        const field = screen.getByRole('textbox', { name: 'Name' });
+
+        expect(field.style.inlineSize).toBe('428px');
+        expect(probes.length).toBeGreaterThan(0);
+        for (const probe of probes) {
+          expect(probe).toEqual({ size: '40', hidden: 'true', className: 'form-field__input', parent: field.parentElement });
+        }
+        expect(container.querySelectorAll('input')).toHaveLength(0);
+      });
+
+      it('keeps the one-row height while nothing is laid out', () => {
+        stubScrollHeight();
+        measureAs(0);
+        render(<FormField id="name" label="Name" value={LONG_TOKEN} onChange={vi.fn()} maxLength={40} readOnly />);
+
+        expect(screen.getByRole('textbox', { name: 'Name' }).style.blockSize).toBe('');
+      });
+
+      it('refits in the next animation frame when its width changes, never inside the observer callback', () => {
+        stubScrollHeight();
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback): number => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', (handle: number): void => {
+          if (handle > 0 && handle <= frames.length) {
+            frames[handle - 1] = () => undefined;
+          }
+        });
+        const observers: FakeResizeObserver[] = [];
+        class FakeResizeObserver {
+          readonly callback: ResizeObserverCallback;
+          observed: Element[] = [];
+          readonly disconnect: Mock<() => void> = vi.fn();
+          constructor(callback: ResizeObserverCallback) {
+            this.callback = callback;
+            observers.push(this);
+          }
+          observe(target: Element): void {
+            this.observed.push(target);
+          }
+          unobserve(target: Element): void {
+            this.observed = this.observed.filter((element) => element !== target);
+          }
+        }
+        vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+        measureAs(36);
+        const { unmount } = render(
+          <FormField id="name" label="Name" value={LONG_TOKEN} onChange={vi.fn()} maxLength={40} size={40} readOnly />,
+        );
+        const field = screen.getByRole('textbox', { name: 'Name' });
+        const [observer] = observers;
+        if (observer === undefined) {
+          throw new Error('no ResizeObserver was created');
+        }
+        expect(observer.observed).toEqual([field]);
+        const notify = (width: number): void => {
+          observer.callback([{ contentRect: { width } } as ResizeObserverEntry], observer as unknown as ResizeObserver);
+        };
+
+        // A narrower box wraps the value to more lines.
+        measureAs(108);
+        notify(300);
+        expect(field.style.blockSize).toBe('36px');
+        expect(frames).toHaveLength(1);
+        frames[0]?.(0);
+        expect(field.style.blockSize).toBe('108px');
+
+        // The resize the refit itself causes keeps the width: no further frame.
+        notify(300);
+        expect(frames).toHaveLength(1);
+
+        unmount();
+        expect(observer.disconnect).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
+  describe('pending request', () => {
+    it('keeps the same editable input, its classes, focus and ref while pending, and takes no typing until it ends', async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const ref = createRef<FormFieldElement>();
+      const props = { id: 'name', label: 'Name', value: 'ACME', onChange, maxLength: 40, size: 40, uppercase: true, inputRef: ref };
+      const { rerender } = render(<FormField {...props} />);
+      const input = screen.getByLabelText('Name');
+      input.focus();
+
+      rerender(<FormField {...props} pending />);
+
+      expect(screen.getByLabelText('Name')).toBe(input);
+      expect(input).toBeInstanceOf(HTMLInputElement);
+      expect(input).toHaveAttribute('readonly');
+      expect(input).toHaveClass('form-field__input');
+      expect(input).not.toHaveClass('read-only');
+      expect(input).toHaveAttribute('size', '40');
+      expect(input).toHaveFocus();
+      expect(ref.current).toBe(input);
+      await user.type(input, 'xyz');
+      expect(input).toHaveValue('ACME');
+      expect(onChange).not.toHaveBeenCalled();
+
+      rerender(<FormField {...props} pending={false} />);
+
+      expect(screen.getByLabelText('Name')).toBe(input);
+      expect(input).not.toHaveAttribute('readonly');
+      await user.type(input, 'b');
+      expect(onChange).toHaveBeenLastCalledWith('ACMEB');
+    });
+
+    it('lets readOnly win over pending: the value is protected in its textarea', () => {
+      render(<FormField id="name" label="Name" value="ACME" onChange={vi.fn()} maxLength={40} readOnly pending />);
+      const field = screen.getByLabelText('Name');
+
+      expect(field).toBeInstanceOf(HTMLTextAreaElement);
+      expect(field).toHaveAttribute('readonly');
+      expect(field).toHaveClass('form-field__input', 'read-only');
     });
   });
 

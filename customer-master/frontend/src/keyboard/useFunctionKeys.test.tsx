@@ -30,7 +30,8 @@ interface ScopeProps {
 /**
  * A minimal screen that registers one key scope and renders one control of
  * each kind the Enter rule distinguishes: a text input, a button, a checkbox,
- * a select, a textarea and, with `withContainer`, the scope's own container.
+ * a select, an editable textarea, a read-only textarea (a protected value, as
+ * FormField renders it) and, with `withContainer`, the scope's own container.
  * `onButtonClick` observes the native-Enter rule and `onInputKeyDown` the
  * one-handler rule.
  */
@@ -57,6 +58,7 @@ function Scope({
         <option value="2">Two</option>
       </select>
       <textarea aria-label={`${name} textarea`} />
+      <textarea aria-label={`${name} read-only textarea`} readOnly defaultValue="PROTECTED VALUE" />
       {withContainer ? <div tabIndex={-1} ref={containerRef} aria-label={`${name} container`} /> : null}
     </section>
   );
@@ -674,6 +676,33 @@ describe('keyboard scope contract (AAP 0.4.4): Enter is a command only in a text
       expectUntouched(fixture);
     },
   );
+
+  it('Enter on a read-only textarea (a protected value) keeps its native action: not prevented, nothing dispatched, the value unchanged', async () => {
+    const user = userEvent.setup();
+    const fixture = scopeFixture('detail', DETAIL_KEYS, calls, { withContainer: true });
+    mountStack([fixture.props]);
+    const readOnly = screen.getByLabelText<HTMLTextAreaElement>('detail read-only textarea');
+
+    expect(isPrevented(readOnly, { key: 'Enter' })).toBe(false);
+    await user.type(readOnly, '{Enter}');
+
+    expect(readOnly).toHaveValue('PROTECTED VALUE');
+    expectUntouched(fixture);
+    expect(calls).toEqual([]);
+  });
+
+  it('Enter on an editable textarea keeps its new line and runs no binding', async () => {
+    const user = userEvent.setup();
+    const fixture = scopeFixture('detail', DETAIL_KEYS, calls);
+    mountStack([fixture.props]);
+    const editable = screen.getByLabelText<HTMLTextAreaElement>('detail textarea');
+
+    await user.type(editable, 'AB{Enter}C');
+
+    expect(editable).toHaveValue('AB\nC');
+    expectUntouched(fixture);
+    expect(calls).toEqual([]);
+  });
 
   it('Enter on the scope container itself runs the Enter binding and is prevented', () => {
     const fixture = scopeFixture('detail', DETAIL_KEYS, calls, { withContainer: true });

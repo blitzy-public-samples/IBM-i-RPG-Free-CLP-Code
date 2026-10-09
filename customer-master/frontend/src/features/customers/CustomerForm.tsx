@@ -18,11 +18,13 @@
  * `uppercase` prop alone. Layer rule: imports only types from `api/`, plus
  * `components/` and this folder.
  */
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 // CUSTOMER_FIELD_NAMES is read only through `typeof`, by the compile-time
 // coverage check of the field table, so a type-only import suffices.
 import type { CUSTOMER_FIELD_NAMES, CustomerFields } from '../../api/customers';
 import { FormField } from '../../components/FormField';
+import type { FormFieldElement } from '../../components/FormField';
 import { formatChangeStamp } from './formatChangeStamp';
 
 export type CustomerFieldName = keyof CustomerFields;
@@ -101,6 +103,81 @@ export const CUSTOMER_FORM_FIELDS: ReadonlyArray<CustomerFormFieldSpec> = [
 const CUSTOMER_ID_LENGTH = 4;
 
 /**
+ * The fields MTNCUSTD puts on the screen row of the field before them:
+ * Active Status beside the Customer Id on row 5
+ * (5250_Subfile/MTNCUSTD.DSPF:60-68), and ST+ and ZIP beside City on row 8
+ * (:83-103). Every other field starts a row of its own.
+ */
+const SHARES_PREVIOUS_ROW: ReadonlySet<CustomerFieldName> = new Set<CustomerFieldName>(['active', 'state', 'zip']);
+
+/** One place on a window row: the protected Customer Id, or a data field of {@link CUSTOMER_FORM_FIELDS}. */
+type FormRowSlot = 'custId' | CustomerFormFieldSpec;
+
+/** One window row: a slot or more, in screen order. */
+type FormRow = readonly [FormRowSlot, ...FormRowSlot[]];
+
+/**
+ * The window's rows in screen order: the Customer Id, then
+ * {@link CUSTOMER_FORM_FIELDS} in table order, broken into rows by
+ * {@link SHARES_PREVIOUS_ROW}. Built from the field table, the grouping only
+ * decides where a row ends: it can never reorder, drop or repeat a field, so
+ * DOM order, and with it tab and reading order, stays screen order.
+ */
+const FORM_ROWS: ReadonlyArray<FormRow> = (() => {
+  const rows: [FormRowSlot, ...FormRowSlot[]][] = [['custId']];
+  for (const spec of CUSTOMER_FORM_FIELDS) {
+    const current = rows[rows.length - 1];
+    if (current !== undefined && SHARES_PREVIOUS_ROW.has(spec.field)) {
+      current.push(spec);
+    } else {
+      rows.push([spec]);
+    }
+  }
+  return rows;
+})();
+
+/** The React key of a slot, unique within the window: `custId` or the field name. */
+function slotKey(slot: FormRowSlot): string {
+  return slot === 'custId' ? 'custId' : slot.field;
+}
+
+export interface CustomerFormRowsProps {
+  /** The protected Customer Id field. */
+  customerId: ReactNode;
+  /** Renders the field of one entry of {@link CUSTOMER_FORM_FIELDS}. */
+  renderField: (spec: CustomerFormFieldSpec) => ReactNode;
+}
+
+/**
+ * The Customer Id and the nine data fields laid out in MTNCUSTD's rows
+ * ({@link FORM_ROWS}): the one layout of this form and the confirmation
+ * panel, as MTNCUSTR shows both phases in the same window. The fields of a
+ * shared row are wrapped in one `.form-row`, which src/styles/global.css sets
+ * side by side, controls aligned with the rows above and below, where the
+ * viewport holds the row, and stacks one field per row elsewhere. A field
+ * alone on its row renders unwrapped.
+ */
+export function CustomerFormRows({ customerId, renderField }: CustomerFormRowsProps) {
+  function renderSlot(slot: FormRowSlot): ReactNode {
+    return <Fragment key={slotKey(slot)}>{slot === 'custId' ? customerId : renderField(slot)}</Fragment>;
+  }
+
+  return (
+    <>
+      {FORM_ROWS.map((row) =>
+        row.length === 1 ? (
+          renderSlot(row[0])
+        ) : (
+          <div key={row.map(slotKey).join(' ')} className="form-row">
+            {row.map(renderSlot)}
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
  * Change handler of the Customer Id output. The input is always read-only,
  * so the browser never fires a change for it; FormField still requires a
  * handler, and this one deliberately keeps the value as the caller set it.
@@ -162,6 +239,14 @@ export interface CustomerFormProps {
   /** Protect every field (MTNCUSTD indicator 10, display mode). */
   readOnly: boolean;
   /**
+   * A review, reload or write is in flight: every editable field is set
+   * read-only through FormField's `pending`, which keeps its input and its
+   * editable look, so nothing is typed that the response would replace and
+   * the form looks and lays out as before. It is not protection: the fields
+   * keep their elements, so focus stays where it is. Defaults to `false`.
+   */
+  pending?: boolean;
+  /**
    * Field error messages, already formatted (a problem's `errors[].message`).
    * A non-empty message marks that input `aria-invalid="true"` (reverse
    * image) and renders the message under it, linked by `aria-describedby`.
@@ -169,11 +254,12 @@ export interface CustomerFormProps {
   errors: Partial<Record<CustomerFieldName, string>>;
   /**
    * Ref factory: called once per field and render with the field name, it
-   * returns the callback ref that receives that field's input (and `null`
-   * when the input goes away), so the owner can move focus to a field in
-   * error and tell whether focus sits on State before opening the picker.
+   * returns the callback ref that receives that field's control (and `null`
+   * when the control goes away): an input, or a textarea while the field is
+   * protected (`readOnly`). The owner uses it to move focus to a field in
+   * error and to tell whether focus sits on State before opening the picker.
    */
-  inputRef?: (field: CustomerFieldName) => (el: HTMLInputElement | null) => void;
+  inputRef?: (field: CustomerFieldName) => (el: FormFieldElement | null) => void;
   /**
    * The field to focus once, right after the form mounts (DSPATR(PC)). The
    * owner remounts the form through `key` whenever it reloads, clears or
@@ -198,6 +284,7 @@ export function CustomerForm({
   values,
   onChange,
   readOnly,
+  pending = false,
   errors,
   inputRef,
   initialFocusField,
@@ -206,7 +293,7 @@ export function CustomerForm({
   // The inputs of the mounted form, by field, for the focus-on-mount effect.
   // Written only by the callback refs below (during commit) and read only in
   // that effect, never during render.
-  const inputs = useRef<Partial<Record<CustomerFieldName, HTMLInputElement>>>({});
+  const inputs = useRef<Partial<Record<CustomerFieldName, FormFieldElement>>>({});
 
   // The field to focus is the one given at mount; a useState initializer
   // captures it once, so the effect runs exactly once per mount.
@@ -224,7 +311,7 @@ export function CustomerForm({
    */
   function bindInput(field: CustomerFieldName) {
     const ownerRef = inputRef?.(field);
-    return (el: HTMLInputElement | null): void => {
+    return (el: FormFieldElement | null): void => {
       if (el === null) {
         delete inputs.current[field];
       } else {
@@ -236,30 +323,35 @@ export function CustomerForm({
 
   return (
     <div className="customer-form">
-      <FormField
-        id={`${idPrefix}-custId`}
-        label="Customer Id"
-        value={custId}
-        onChange={keepCustomerId}
-        maxLength={CUSTOMER_ID_LENGTH}
-        size={CUSTOMER_ID_LENGTH}
-        readOnly
+      <CustomerFormRows
+        customerId={
+          <FormField
+            id={`${idPrefix}-custId`}
+            label="Customer Id"
+            value={custId}
+            onChange={keepCustomerId}
+            maxLength={CUSTOMER_ID_LENGTH}
+            size={CUSTOMER_ID_LENGTH}
+            readOnly
+          />
+        }
+        renderField={({ field, label, maxLength }) => (
+          <FormField
+            id={`${idPrefix}-${field}`}
+            label={label}
+            value={values[field] ?? ''}
+            onChange={(value) => onChange(field, value)}
+            maxLength={maxLength}
+            size={maxLength}
+            uppercase
+            autoComplete="off"
+            readOnly={readOnly}
+            pending={pending}
+            error={errors[field]}
+            inputRef={bindInput(field)}
+          />
+        )}
       />
-      {CUSTOMER_FORM_FIELDS.map(({ field, label, maxLength }) => (
-        <FormField
-          key={field}
-          id={`${idPrefix}-${field}`}
-          label={label}
-          value={values[field] ?? ''}
-          onChange={(value) => onChange(field, value)}
-          maxLength={maxLength}
-          size={maxLength}
-          uppercase
-          readOnly={readOnly}
-          error={errors[field]}
-          inputRef={bindInput(field)}
-        />
-      ))}
       <ChangeStampLine stamp={stamp} />
     </div>
   );

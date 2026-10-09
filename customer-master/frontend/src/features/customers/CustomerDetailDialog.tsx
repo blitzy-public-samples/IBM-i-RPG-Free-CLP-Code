@@ -33,6 +33,7 @@ import { isApiError } from '../../api/problem';
 import type { FieldError } from '../../api/problem';
 import { useAuth } from '../../auth/AuthProvider';
 import { Dialog } from '../../components/Dialog';
+import type { FormFieldElement } from '../../components/FormField';
 import { FunctionKeyBar } from '../../components/FunctionKeyBar';
 import type { FunctionKeyBarItem } from '../../components/FunctionKeyBar';
 import { ScreenHeader } from '../../components/ScreenHeader';
@@ -362,9 +363,11 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const [pickerOpen, setPickerOpen] = useState(false);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
   // A review, reload or write is pending: the rendered side of `inFlight`.
-  // It protects the editable form (read-only) and disables every key-bar
-  // entry whose handler ignores a press meanwhile, so nothing is typed or
-  // pressed that the response would silently replace or swallow.
+  // It sets the editable form's inputs read-only (CustomerForm `pending`,
+  // which keeps their element and editable look, so focus stays and nothing
+  // flashes) and disables every key-bar entry whose handler ignores a press
+  // meanwhile, so nothing is typed or pressed that the response would
+  // silently replace or swallow.
   const [busy, setBusy] = useState(false);
   // Bumped whenever the form is reloaded, cleared or shown again after the
   // confirmation; as the form's key it remounts the form, which re-applies
@@ -372,8 +375,10 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const [formKey, setFormKey] = useState(0);
 
   // Refs: written by callback refs, effects and handlers; never read during render.
-  const inputs = useRef<Partial<Record<CustomerFieldName, HTMLInputElement | null>>>({});
-  const nameRef = useRef<HTMLInputElement | null>(null);
+  const inputs = useRef<Partial<Record<CustomerFieldName, FormFieldElement | null>>>({});
+  const nameRef = useRef<FormFieldElement | null>(null);
+  // The window body: the key container outside the confirmation, and the
+  // Display window's initial focus.
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLDivElement | null>(null);
   // A request is in flight. Read by the key handlers and by `changeField`,
@@ -409,11 +414,11 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
 
   /**
    * The callback ref of one form input: records it for focus moves and for
-   * the "is focus on State" test of F4, and keeps `nameRef` (the window's
-   * initial focus) pointing at the Name input.
+   * the "is focus on State" test of F4, and keeps `nameRef` (the initial
+   * focus of an Edit or Add window) pointing at the Name input.
    */
   function bindInput(field: CustomerFieldName) {
-    return (el: HTMLInputElement | null): void => {
+    return (el: FormFieldElement | null): void => {
       inputs.current[field] = el;
       if (field === 'name') {
         nameRef.current = el;
@@ -536,13 +541,17 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
       return;
     }
     // Each screen cycle starts without the previous cycle's highlights, as
-    // MTNCUSTR clears its RI/PC indicators after every read.
-    setFieldErrors([]);
+    // MTNCUSTR clears its RI/PC indicators after every read. They are dropped
+    // when the answer arrives, in the render that shows it, not when the
+    // request starts: the 5250 writes the screen once per cycle, so its old
+    // highlights stay until the new screen replaces them, and the window
+    // keeps its height and its fields their places while the request waits.
     try {
       const response = await customersApi.review({ purpose: REVIEW_PURPOSE[mode], ...fields });
       if (!alive.current) {
         return;
       }
+      setFieldErrors([]);
       setReviewed(response.customer);
       setStandardized(response.standardized);
       setDraft(response.customer);
@@ -553,6 +562,9 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
       if (!alive.current) {
         return;
       }
+      // A failure naming fields replaces the highlights through the
+      // presenter; any other failure leaves none.
+      setFieldErrors([]);
       present(error, { setFieldErrors, focusField });
       const accepted = isApiError(error) ? error.problem.stateAccepted : undefined;
       if (typeof accepted === 'string') {
@@ -791,7 +803,9 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   // comparison push their own scopes on top while open, which suspends this
   // one until they close (search → detail → picker). Enter is a command on
   // the text inputs and on the container: the confirmation panel while
-  // confirming (it takes focus on mount), the window body otherwise.
+  // confirming (it takes focus on mount), the window body otherwise (a
+  // Display window opens with focus there). On a protected value's read-only
+  // textarea Enter keeps its native action.
   useFunctionKeys(keys, {
     onUnbound: keyNotActive,
     containerRef: confirming ? confirmRef : bodyRef,
@@ -836,14 +850,23 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
   const errors = errorsByField(fieldErrors);
   const firstErrorField = fieldErrors.map((error) => error.field).find(isCustomerField);
 
+  // Initial focus: Name in Edit and Add, the first editable field. A Display
+  // window has none, so it opens on its key container, where Enter, like F4,
+  // F5, F12 and Escape, closes it; `customer-detail--display` keeps that
+  // deliberate focus visible.
   return (
     <Dialog
       open
       labelledBy={LABELLED_BY}
-      initialFocusRef={editable ? nameRef : undefined}
+      initialFocusRef={editable ? nameRef : bodyRef}
       className="dialog dialog--detail"
     >
-      <div ref={bodyRef} tabIndex={-1} className="customer-detail" aria-busy={busy || undefined}>
+      <div
+        ref={bodyRef}
+        tabIndex={-1}
+        className={editable ? 'customer-detail' : 'customer-detail customer-detail--display'}
+        aria-busy={busy || undefined}
+      >
         <ScreenHeader id={HEADER_ID} functionText={FUNCTION_TEXT[mode]} user={username ?? undefined} />
         {confirming ? (
           <ConfirmationPanel
@@ -861,7 +884,8 @@ function DetailWindow({ mode, custId, initialRecord, onClose }: DetailWindowProp
             custId={record?.custId ?? custId ?? ''}
             values={draft}
             onChange={editable ? changeField : keepDisplayedValue}
-            readOnly={!editable || busy}
+            readOnly={!editable}
+            pending={busy}
             errors={errors}
             inputRef={bindInput}
             initialFocusField={editable ? (firstErrorField ?? 'name') : undefined}

@@ -216,7 +216,9 @@ test.describe('search and display (Inquiry)', () => {
       await expect(detail.getByLabel('City', { exact: true })).toHaveValue(NIBH.city);
       await expect(detail.getByLabel('State +', { exact: true })).toHaveValue(NIBH.state);
 
-      const inputs = detail.locator('input');
+      // Protected values render as read-only textareas, which wrap a long
+      // value; the textbox role covers them and any input alike.
+      const inputs = detail.getByRole('textbox');
       await expect(inputs).toHaveCount(DETAIL_INPUT_COUNT);
       for (const input of await inputs.all()) {
         await expect(input).not.toBeEditable();

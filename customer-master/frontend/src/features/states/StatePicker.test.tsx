@@ -465,6 +465,19 @@ describe('StatePicker', () => {
       expect(within(dialog).getByText('Bottom')).toBeInTheDocument();
       expect(within(dialog).getByText('Sorted by: Name')).toBeInTheDocument();
     });
+
+    // The uppercase filter and options are data, never prose or form history;
+    // jsdom has no `spellcheck` property, so the attribute is asserted.
+    it('turns browser spell checking and autocomplete off on the filter and the option fields', async () => {
+      const first = rowAt(await serverRows('', 'name'), 0);
+
+      const { dialog, filter } = await openPicker();
+
+      for (const input of [filter, within(dialog).getByRole('textbox', { name: `Option for ${first.name}` })]) {
+        expect(input).toHaveAttribute('spellcheck', 'false');
+        expect(input).toHaveAttribute('autocomplete', 'off');
+      }
+    });
   });
 
   describe('F7 sort toggle', () => {

@@ -79,15 +79,18 @@ button {
  *   matches the character count. Width stays `auto` and `size` is the sizing
  *   mechanism, because it works in every browser and even without CSS,
  *   whereas typed attr() lengths are not available in every supported
- *   browser. max-inline-size only stops overflow on narrow screens, and on a
- *   coarse pointer the touch-target minimum (after the link rules) widens a
- *   short field such as Opt or Active to 44px.
+ *   browser. A protected value's textarea carries the same length as `cols`,
+ *   and src/components/FormField.tsx fits it to the width the input of that
+ *   `size` takes, which `cols` alone falls a few pixels short of.
+ *   max-inline-size only stops overflow on narrow screens, and on a coarse
+ *   pointer the touch-target minimum (after the link rules) widens a short
+ *   field such as Opt or Active to 44px.
  * - No CSS case transform: src/components/upperField.ts uppercases the real
  *   value as it is typed, so what is shown is exactly what is submitted.
  * - :where() keeps this rule at element specificity, so .read-only,
- *   input[readonly], textarea[readonly] and the [aria-invalid] reverse image
- *   below override it on specificity, wherever they sit. Checkboxes and
- *   radios keep their native rendering.
+ *   textarea[readonly] and the [aria-invalid] reverse image below override it
+ *   on specificity, wherever they sit. Checkboxes and radios keep their
+ *   native rendering.
  */
 input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])),
 select,
@@ -148,7 +151,7 @@ button:not(:disabled, [aria-disabled="true"]):active {
  * not-allowed cursor; the border stays. opacity: 1 cancels the browser's own
  * dimming of a disabled select, which would pull that text below 4.5:1.
  * :where() leaves only :disabled in the specificity, so .read-only,
- * input[readonly] and the [aria-invalid] reverse image below still win.
+ * textarea[readonly] and the [aria-invalid] reverse image below still win.
  * Checkboxes and radios stay native.
  */
 :where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):disabled {
@@ -163,8 +166,8 @@ button:not(:disabled, [aria-disabled="true"]):active {
  * surface) and --color-accent when pressed (7.59:1 / 7.13:1), distinct from
  * hover and from the --color-focus ring. The zero-specificity :where()
  * exclusions leave only :hover or :active in the specificity and skip
- * disabled, read-only and reverse-image ([aria-invalid]) fields, so their own
- * treatment holds in every state.
+ * disabled, read-only (protected, or waiting on a request) and reverse-image
+ * ([aria-invalid]) fields, so their own treatment holds in every state.
  */
 @media (hover: hover) {
   :where(input:not([type="checkbox"], [type="radio"], [type="hidden"]), select, textarea):where(:not(:disabled, [readonly], .read-only, [aria-invalid="true"])):hover {
@@ -239,6 +242,9 @@ a:active {
  * so Enter and the function keys stay commands there. Without this rule the
  * next key press would ring the whole screen or window. Every control inside
  * keeps its ring, and so do .confirmation-panel and the <dialog> element.
+ * The one deliberate focus among them, the body of a Display window, which
+ * that window focuses when it opens, keeps its ring too
+ * (.customer-detail--display, near the end of this file).
  */
 .search-panel:focus-visible,
 .state-picker__body:focus-visible,
@@ -535,6 +541,19 @@ dialog::backdrop {
   border-color: var(--color-accent);
 }
 
+/*
+ * The MTNCUSTD window keeps its top edge in place: it sits a --space-4 below
+ * the top of the area the dialog, .dialog rule gives every window, and stays
+ * centred across. Its height follows its content (a field message, "Address
+ * standardized.", the confirmation), so a vertically centred window would
+ * shift its top fields at every change; anchored, it grows and shrinks
+ * downwards only. The State picker and the conflict window opened over it
+ * are separate <dialog> elements and keep the shared centring.
+ */
+.dialog.dialog--detail {
+  margin-block: var(--space-4) auto;
+}
+
 /* Labels then inputs, as MTNCUSTD puts labels at column 1 and inputs from column 9 to 17. */
 .form-field {
   display: grid;
@@ -575,12 +594,68 @@ dialog::backdrop {
 }
 
 /*
+ * Shared rows: MTNCUSTD row 5 (Customer Id, Active Status) and row 8 (City,
+ * ST+, ZIP), each one .form-row from CustomerFormRows. Below 60rem a row is a
+ * plain block, so its fields stack one per row like every other field. From
+ * 60rem, which holds the widest row (City, State + and ZIP: about 51rem with
+ * the window's padding) with room to spare for wider platform fonts, the
+ * row's fields sit side by side on one grid:
+ * - display: contents hands each field's label, control and message to the
+ *   row grid. The first label takes the minmax(8rem, 14rem) column of every
+ *   other field, so the first control lines up with the controls above and
+ *   below; later labels and controls take auto columns sized to their
+ *   content, and justify-content: start keeps those from stretching. Six
+ *   columns hold row 8's three fields; row 5 leaves the last two empty.
+ * - Labels and controls share the first grid row and its baseline. A later
+ *   label's start margin sets fields further apart than a label from its
+ *   control.
+ * - Messages auto-place below, one grid row each in field order, from the
+ *   first control's column to the end. contain: inline-size keeps a message
+ *   out of the column widths, so an error never widens the row or the window.
+ * Literal for the same reason as the 30rem breakpoints.
+ */
+@media (min-width: 60rem) {
+  .form-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 14rem) repeat(5, auto);
+    justify-content: start;
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    align-items: baseline;
+    margin-block: var(--space-2);
+  }
+
+  .form-row > .form-field {
+    display: contents;
+  }
+
+  .form-row .form-field__label,
+  .form-row .form-field__input {
+    grid-row: 1;
+    grid-column: auto;
+  }
+
+  .form-row > .form-field + .form-field > .form-field__label {
+    margin-inline-start: var(--space-2);
+  }
+
+  .form-row .form-field__message {
+    grid-column: 2 / -1;
+    contain: inline-size;
+  }
+}
+
+/*
  * Protected values (DSPATR(PR) + HI): display mode and the confirmation
- * panel. Read-only inputs stay focusable, so the focus ring still applies.
- * resize: none drops a protected textarea's grip; nothing else here resizes.
+ * panel, which src/components/FormField.tsx renders as read-only textareas
+ * (a protected password as a read-only input). They stay focusable, so the
+ * focus ring still applies. resize: none drops the textarea's grip; nothing
+ * else here resizes. An input set read-only only while a request is in
+ * flight (FormField `pending`) is not protected and matches neither
+ * selector, so it keeps the editable border, background and weight, and the
+ * form looks the same while it waits.
  */
 .read-only,
-input[readonly],
 textarea[readonly] {
   font-family: var(--font-mono);
   font-weight: 600;
@@ -591,11 +666,25 @@ textarea[readonly] {
 }
 
 /*
+ * A protected value's textarea wraps its value at its width (that of the
+ * editable input it stands in for, capped by max-inline-size), an unbroken
+ * 40-character run included, and FormField sets its block size to the
+ * wrapped lines: nothing is cut, nothing scrolls inside it, and no scrollbar
+ * takes width from the text.
+ */
+textarea.read-only {
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/*
  * Long values wrap inside their column. As grid items, a span or output
  * display value and a field message would otherwise keep their longest
  * unbroken run as their minimum width, so a 40-character name would push a
- * dialog sideways at 320 CSS px. Native controls keep their `size` width and
- * scroll their own value, so they are left out.
+ * dialog sideways at 320 CSS px. Native controls keep their `size` width, so
+ * they are left out: an editable input scrolls its own value, and a protected
+ * value's textarea, fitted to the same width, wraps it (textarea.read-only,
+ * above).
  */
 .form-field__input:not(input, select, textarea),
 .read-only:not(input, select, textarea),
@@ -725,7 +814,52 @@ textarea[aria-invalid="true"] {
   border-block-end: 1px solid var(--color-fg);
 }
 
-/* .customer-form, .confirmation-panel, .dialog--detail and .dialog--picker are deliberately unstyled hooks; .search-panel takes only the key-scope focus rule (after :focus-visible). */
+/* .customer-form and .dialog--picker are deliberately unstyled hooks; .search-panel takes only the key-scope focus rule (after :focus-visible). */
+
+/*
+ * The confirmation (MTNCUSTD after ProtectAll) takes focus as a whole, so its
+ * ring needs room: --space-2 of padding keeps the ring clear of the fields,
+ * and an equal negative margin takes that room from the window's --space-4
+ * padding and the header and footer margins, so the fields keep the form's
+ * columns and the window keeps its width. The ring is drawn inside the
+ * panel's edge, in that padding (an offset of minus its width), so the
+ * window's overflow never clips it where the panel shows, and it sits on the
+ * window surface (4.88:1).
+ */
+.confirmation-panel {
+  margin: calc(-1 * var(--space-2));
+  padding: var(--space-2);
+}
+
+.confirmation-panel:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+/*
+ * The detail window body (.customer-detail, the window's key container).
+ * Focusing a body taller than a short viewport's window scrolls it into
+ * view; a scroll margin equal to the window's padding keeps that padding in
+ * view, so the header stays at the top and a ring drawn there is not
+ * scrolled out of sight.
+ */
+.customer-detail {
+  scroll-margin: var(--space-4);
+}
+
+/*
+ * A Display window opens with focus on its body, the key container where
+ * Enter closes it: its fields are read-only textareas, on which Enter keeps
+ * its native action. There the body is the window's deliberate focus, not
+ * the incidental one the key-scope rule (after :focus-visible) hides, so it
+ * keeps the ring. The ring is drawn --space-2 outside the body, in the
+ * window's --space-4 padding: clear of the header, the fields and the key
+ * bar, and inside the window's padding box, so the window's overflow never
+ * clips it.
+ */
+.customer-detail--display:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--space-2);
+}
 
 .sign-in {
   max-inline-size: var(--size-sign-in);

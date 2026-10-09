@@ -69,6 +69,7 @@ export function SearchFilters({
         maxLength={13}
         size={13}
         uppercase
+        autoComplete="off"
         error={errors.name}
         inputRef={nameRef}
       />
@@ -80,6 +81,7 @@ export function SearchFilters({
         maxLength={13}
         size={13}
         uppercase
+        autoComplete="off"
         error={errors.city}
       />
       <FormField
@@ -90,6 +92,7 @@ export function SearchFilters({
         maxLength={2}
         size={2}
         uppercase
+        autoComplete="off"
         error={errors.state}
         inputRef={stateRef}
       />

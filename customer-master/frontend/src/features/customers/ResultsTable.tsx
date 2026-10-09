@@ -144,6 +144,7 @@ export function ResultsTable({
                   size={1}
                   inputMode="numeric"
                   autoComplete="off"
+                  spellCheck={false}
                   value={options[custId] ?? ''}
                   onChange={(event) => onOptionChange(custId, event.target.value)}
                   aria-invalid={error !== '' ? 'true' : undefined}

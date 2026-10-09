@@ -137,9 +137,12 @@ function isFunctionKey(key: CommandKey): key is FunctionKey {
  * The Enter target rule. Enter is a command only when the event target is a
  * text-entry `<input>` or is exactly the scope's own container.
  * `HTMLInputElement.type` reads a missing or unknown `type` as `text`, which
- * covers the option fields, and read-only inputs count, so Enter closes a
- * Display dialog. On a button, link, checkbox, radio, `<select>`, `<textarea>`
- * or anything else Enter keeps its native action, such as a button's click.
+ * covers the option fields, and read-only inputs count. On a button, link,
+ * checkbox, radio, `<select>`, any `<textarea>` (the read-only textarea
+ * `components/FormField.tsx` renders for a protected value included) or
+ * anything else Enter keeps its native action, such as a button's click or a
+ * new line. A window of protected values therefore takes Enter through its
+ * container, which the Display window and the confirmation panel focus.
  */
 function isEnterCommandTarget(target: EventTarget | null, scope: KeyScope): boolean {
   if (target instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(target.type)) {

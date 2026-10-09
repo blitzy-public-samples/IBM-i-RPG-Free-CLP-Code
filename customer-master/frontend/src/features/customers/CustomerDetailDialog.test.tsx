@@ -440,22 +440,42 @@ interface OpenedDialog extends RenderedDialog {
 /**
  * Renders the window for `mode` (the stored customer in display and edit) and
  * waits until it can be keyed: the window is shown, the catalog has loaded
- * and, in edit and add, Name holds focus.
+ * and the opening focus is in place: Name in edit and add, the window's key
+ * container in display.
  */
 async function openDialog(mode: DetailMode): Promise<OpenedDialog> {
   const rendered = renderDialog({ mode, custId: mode === 'add' ? undefined : STORED.custId });
   const dialog = await screen.findByRole('dialog', { name: DIALOG_NAMES[mode] });
   await waitFor(() => expect(screen.getByTestId(CATALOG_PROBE_ID)).toHaveAttribute('data-ready', 'true'));
-  if (mode !== 'display') {
+  if (mode === 'display') {
+    await waitFor(() => expect(keyContainerOf(dialog)).toHaveFocus());
+  } else {
     await waitFor(() => expect(inputOf(dialog, 'name')).toHaveFocus());
   }
   return { ...rendered, dialog };
 }
 
-function inputOf(scope: HTMLElement, field: CustomerFieldName): HTMLInputElement {
+/**
+ * The window body (`.customer-detail`, a `tabindex="-1"` child of the
+ * `<dialog>`): the window's key container outside the confirmation, where
+ * Enter is a command, and the Display window's opening focus.
+ */
+function keyContainerOf(dialog: HTMLElement): HTMLElement {
+  const container = Array.from(dialog.children).find((child) => child.classList.contains('customer-detail'));
+  if (!(container instanceof HTMLElement)) {
+    throw new Error('The detail window has no .customer-detail key container');
+  }
+  return container;
+}
+
+/**
+ * The control `field`'s label names: an input while the field is editable,
+ * or the read-only textarea FormField renders for a protected value.
+ */
+function inputOf(scope: HTMLElement, field: CustomerFieldName): HTMLInputElement | HTMLTextAreaElement {
   const element = within(scope).getByLabelText(labelOf(field));
-  if (!(element instanceof HTMLInputElement)) {
-    throw new Error(`The ${labelOf(field)} label does not name an input`);
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+    throw new Error(`The ${labelOf(field)} label does not name an input or a textarea`);
   }
   return element;
 }
@@ -623,7 +643,10 @@ describe('CustomerDetailDialog', () => {
       return within(scope)
         .getAllByRole('textbox')
         .map((input) => {
-          const labels = input instanceof HTMLInputElement && input.labels !== null ? Array.from(input.labels) : [];
+          const labels =
+            (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) && input.labels !== null
+              ? Array.from(input.labels)
+              : [];
           const [forLabel, ...others] = labels.filter((label) => input.id !== '' && label.htmlFor === input.id);
           return {
             label: forLabel !== undefined && others.length === 0 ? forLabel.textContent : null,
@@ -691,6 +714,72 @@ describe('CustomerDetailDialog', () => {
       expect(traffic).toHaveLength(1);
       expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
     });
+
+    /**
+     * The textboxes inside `scope`, in DOM order, grouped by the shared row
+     * (`.form-row`) that holds them; a field outside a shared row is a group of
+     * its own. Each entry is the text of the one `<label>` whose `for` names
+     * the control, or `null` when there is not exactly one, and that label
+     * must also resolve, as an exact label query, to that control alone.
+     */
+    function shownRows(scope: HTMLElement): (string | null)[][] {
+      const rows: { row: Element | null; labels: (string | null)[] }[] = [];
+      const labels = Array.from(scope.querySelectorAll('label'));
+      for (const control of within(scope).getAllByRole('textbox')) {
+        const forLabels = labels.filter((label) => control.id !== '' && label.htmlFor === control.id);
+        const text = forLabels.length === 1 ? forLabels[0]?.textContent ?? null : null;
+        if (text !== null) {
+          expect(within(scope).getByLabelText(text)).toBe(control);
+        }
+        const row = control.closest('.form-row');
+        const current = rows[rows.length - 1];
+        if (row !== null && current !== undefined && current.row === row) {
+          current.labels.push(text);
+        } else {
+          rows.push({ row, labels: [text] });
+        }
+      }
+      return rows.map(({ labels: rowLabels }) => rowLabels);
+    }
+
+    /**
+     * MTNCUSTD's rows (MTNCUSTD.DSPF:60-133): Customer Id beside Active Status
+     * on row 5, City beside ST+ and ZIP on row 8, every other field alone.
+     */
+    const EXPECTED_ROWS: readonly (readonly string[])[] = [
+      [CUSTOMER_ID_CONTRACT.label, labelOf('active')],
+      [labelOf('name')],
+      [labelOf('addr')],
+      [labelOf('city'), labelOf('state'), labelOf('zip')],
+      [labelOf('acctPhone')],
+      [labelOf('acctMgr')],
+      [labelOf('corpPhone')],
+    ];
+
+    it.each(['display', 'edit', 'add'] as const)(
+      'the %s form shares MTNCUSTD rows 5 and 8 (Customer Id with Active; City with State + and ZIP) in screen order',
+      async (mode) => {
+        const { dialog } = await openDialog(mode);
+
+        expect(shownRows(dialog)).toEqual(EXPECTED_ROWS);
+      },
+    );
+
+    it.each([
+      ['edit', 'DEM0000'],
+      ['add', 'DEM0009'],
+    ] as const)('the %s confirmation keeps the same shared rows in screen order', async (mode, notice) => {
+      const { user, dialog } = await openDialog(mode);
+      if (mode === 'edit') {
+        await retype(user, dialog, 'name', 'shared rows co');
+      } else {
+        await fillForm(user, dialog, NEW_CUSTOMER);
+      }
+
+      const panel = await reviewToConfirmation(user, dialog, notice);
+
+      expect(shownRows(panel)).toEqual(EXPECTED_ROWS);
+    });
   });
 
   // Display (function code D, MTNCUSTR :181-191)
@@ -709,7 +798,47 @@ describe('CustomerDetailDialog', () => {
       expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
     });
 
-    it.each(['Enter', 'F4', 'F5', 'F12', 'Escape'])(
+    it('renders every protected value as a read-only textarea as wide as its field, so a long value wraps instead of being cut', async () => {
+      const { dialog } = await openDialog('display');
+
+      const custIdField = within(dialog).getByLabelText(CUSTOMER_ID_CONTRACT.label);
+      expect(custIdField).toBeInstanceOf(HTMLTextAreaElement);
+      expect(custIdField).toHaveAttribute('cols', String(CUSTOMER_ID_CONTRACT.width));
+      for (const { field, width } of FIELD_CONTRACT) {
+        const control = inputOf(dialog, field);
+        expect(control).toBeInstanceOf(HTMLTextAreaElement);
+        expect(control).toHaveAttribute('cols', String(width));
+        expect(control).toHaveAttribute('rows', '1');
+        expect(control).toHaveClass('form-field__input', 'read-only');
+      }
+    });
+
+    /** The window closed once, as a cancel: no State picker, no second read, no message. */
+    function expectClosedOnce(onClose: CloseMock): void {
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledWith();
+      expect(screen.queryByRole('dialog', { name: STATE_PICKER_NAME })).not.toBeInTheDocument();
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+      expect(sent('GET', STATES_PATH)).toHaveLength(0);
+      expect(alertRegion()).toBeEmptyDOMElement();
+    }
+
+    it('opens with focus on its key container, not on a field, and closes once on Enter there', async () => {
+      const { user, dialog, onClose } = await openDialog('display');
+      const container = keyContainerOf(dialog);
+
+      expect(container).toHaveFocus();
+      expect(container).toHaveAttribute('tabindex', '-1');
+      for (const control of within(dialog).getAllByRole('textbox')) {
+        expect(control).not.toHaveFocus();
+      }
+
+      await user.keyboard('{Enter}');
+
+      expectClosedOnce(onClose);
+    });
+
+    it.each(['F4', 'F5', 'F12', 'Escape'])(
       'closes once on %s, with no State picker opened and no second read',
       async (key) => {
         const { user, dialog, onClose } = await openDialog('display');
@@ -718,14 +847,31 @@ describe('CustomerDetailDialog', () => {
 
         await user.keyboard(`{${key}}`);
 
-        expect(onClose).toHaveBeenCalledTimes(1);
-        expect(onClose).toHaveBeenCalledWith();
-        expect(screen.queryByRole('dialog', { name: STATE_PICKER_NAME })).not.toBeInTheDocument();
-        expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
-        expect(sent('GET', STATES_PATH)).toHaveLength(0);
-        expect(alertRegion()).toBeEmptyDOMElement();
+        expectClosedOnce(onClose);
       },
     );
+
+    it('Enter on a focused protected field keeps its native action: the window stays open and nothing changes', async () => {
+      const { user, dialog, onClose } = await openDialog('display');
+      const name = inputOf(dialog, 'name');
+      expect(name).toBeInstanceOf(HTMLTextAreaElement);
+      await user.click(name);
+      expect(name).toHaveFocus();
+
+      await user.keyboard('{Enter}');
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(dialog).toBeInTheDocument();
+      expect(name).toHaveFocus();
+      expect(valuesOf(dialog)).toEqual(fieldsOf(STORED));
+      expect(alertRegion()).toBeEmptyDOMElement();
+      expect(sent('GET', CUSTOMER_PATH)).toHaveLength(1);
+
+      // The keys the window enables still close it from the field.
+      await user.keyboard('{F12}');
+
+      expectClosedOnce(onClose);
+    });
 
     it('shows DEM0003 "Key is not active now" for F3 and stays open', async () => {
       const { user, dialog, onClose } = await openDialog('display');
@@ -998,6 +1144,46 @@ describe('CustomerDetailDialog', () => {
       expect(within(panel).getByText('Address standardized.')).toBeInTheDocument();
       expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
 
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(onClose).toHaveBeenCalledWith({ saved });
+      expect(await bodiesOf<CustomerUpdateRequest>('PUT', CUSTOMER_PATH)).toEqual([
+        { ...reviewed, version: STORED.version },
+      ]);
+    });
+
+    it('edit: Enter on a focused protected field of the confirmation keeps its native action: no PUT, the confirmation stays', async () => {
+      const reviewed: FieldValues = { ...fieldsOf(STORED), name: 'FOCUSED FIELD CO' };
+      const saved: CustomerResponse = { ...STORED, ...reviewed, version: STORED.version + 1 };
+      answerReview(() => reviewPassed('EDIT', reviewed));
+      answerUpdate(() => HttpResponse.json(saved));
+      const { user, dialog, onClose } = await openDialog('edit');
+      await retype(user, dialog, 'name', 'focused field co');
+      const panel = await reviewToConfirmation(user, dialog, 'DEM0000');
+      const protectedName = inputOf(panel, 'name');
+      expect(protectedName).toBeInstanceOf(HTMLTextAreaElement);
+
+      // Focused as Tab would focus it: a click would clear the notice itself.
+      act(() => protectedName.focus());
+      expect(protectedName).toHaveFocus();
+      await user.keyboard('{Enter}');
+
+      // A dispatched Enter would clear the notice and start the save (the
+      // Enter key disabled) before the keystroke returns.
+      expect(within(statusRegion()).getByText('Press Enter to update. F12 to Cancel.')).toBeInTheDocument();
+      const keyBar = within(dialog).getByRole('toolbar', { name: 'Function keys' });
+      expect(within(keyBar).getByRole('button', { name: 'Enter' })).toBeEnabled();
+      expect(sent('PUT', CUSTOMER_PATH)).toHaveLength(0);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(queryConfirmation(dialog)).toBe(panel);
+      expect(protectedName).toHaveFocus();
+      expect(protectedName).toHaveValue('FOCUSED FIELD CO');
+      expect(alertRegion()).toBeEmptyDOMElement();
+
+      // Back on the panel, the window's key container, Enter commits once.
+      await user.click(panel);
+      expect(panel).toHaveFocus();
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
@@ -1961,10 +2147,16 @@ describe('CustomerDetailDialog', () => {
      * Asserts the protected form of a pending request: every input
      * read-only, Name keeping `name` whether typed into or changed before a
      * render could protect it, Enter, F4 and F5 disabled and F12 enabled.
+     * Busy is not protection: every data field stays the editable input,
+     * without the protected-value class, so it keeps its look and its focus.
      */
     async function expectProtectedForm(user: UserEvent, dialog: HTMLElement, name: string): Promise<void> {
       for (const input of within(dialog).getAllByRole('textbox')) {
         expect(input).toHaveAttribute('readonly');
+      }
+      for (const { field } of FIELD_CONTRACT) {
+        expect(inputOf(dialog, field)).toBeInstanceOf(HTMLInputElement);
+        expect(inputOf(dialog, field)).not.toHaveClass('read-only');
       }
       const nameInput = inputOf(dialog, 'name');
       await user.type(nameInput, 'zzz');
@@ -1985,10 +2177,14 @@ describe('CustomerDetailDialog', () => {
       server.use(http.post(REVIEW_PATH, () => gate.answer(() => reviewPassed('EDIT', reviewed))));
       const { user, dialog } = await openDialog('edit');
       await retype(user, dialog, 'name', 'new name co');
+      const nameInput = inputOf(dialog, 'name');
 
       await user.keyboard('{Enter}');
       await waitFor(() => expect(keyButton(dialog, 'Enter')).toBeDisabled());
 
+      // The field Enter was pressed in is the same element and keeps focus.
+      expect(inputOf(dialog, 'name')).toBe(nameInput);
+      expect(nameInput).toHaveFocus();
       expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
       await expectProtectedForm(user, dialog, 'NEW NAME CO');
       expect(queryConfirmation(dialog)).not.toBeInTheDocument();
@@ -2003,6 +2199,39 @@ describe('CustomerDetailDialog', () => {
         expect(keyButton(dialog, legend)).toBeEnabled();
       }
       expect(sent('POST', REVIEW_PATH)).toHaveLength(1);
+    });
+
+    it('a pending review keeps the last highlight and message until its answer replaces them, so the window does not change meanwhile', async () => {
+      const { user, dialog } = await openDialog('edit');
+      await retype(user, dialog, 'name', '');
+      await user.keyboard('{Enter}');
+      await within(alertRegion()).findByText('Name: Must not be blank');
+      const name = inputOf(dialog, 'name');
+      await waitFor(() => expect(name).toHaveAttribute('aria-invalid', 'true'));
+
+      const gate = hold();
+      const reviewed: FieldValues = { ...fieldsOf(STORED), name: 'KEPT HIGHLIGHT CO' };
+      server.use(http.post(REVIEW_PATH, () => gate.answer(() => reviewPassed('EDIT', reviewed))));
+      await user.type(name, 'kept highlight co');
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(keyButton(dialog, 'Enter')).toBeDisabled());
+
+      // While the request waits, the field still shows the last cycle's answer.
+      expect(inputOf(dialog, 'name')).toBe(name);
+      expect(name).toHaveAttribute('aria-invalid', 'true');
+      expect(name).toHaveAccessibleDescription('Name: Must not be blank');
+      expect(name).toHaveFocus();
+
+      gate.release();
+
+      await within(dialog).findByRole('group', { name: CONFIRM_GROUP_NAME });
+      // F4 at the edit confirmation returns to the form with the entries kept:
+      // the passed review left no highlight behind.
+      await user.keyboard('{F4}');
+      await waitForForm(dialog);
+      expect(inputOf(dialog, 'name')).toHaveValue('KEPT HIGHLIGHT CO');
+      expect(inputOf(dialog, 'name')).not.toHaveAttribute('aria-invalid');
+      expect(document.getElementById(`${inputOf(dialog, 'name').id}-error`)).toBeNull();
     });
 
     it('F12 and the F12=Cancel button still close the window while a review is pending', async () => {

@@ -551,8 +551,9 @@ describe('CustomerPicker', () => {
       await waitFor(() => expect(within(display).getByLabelText('Name')).toHaveValue(FIRST_ROW.name));
       expect(traffic.filter((entry) => entry.method === 'GET' && entry.path === `${SEARCH_PATH}/${FIRST_ROW.custId}`)).toHaveLength(1);
 
-      // Every key the display window enables closes it; Enter from its Name field.
-      await user.click(within(display).getByLabelText('Name'));
+      // Every key the display window enables closes it; Enter from its key
+      // container, where the window opens.
+      await waitFor(() => expect(display.querySelector('.customer-detail')).toHaveFocus());
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(display).not.toBeInTheDocument());

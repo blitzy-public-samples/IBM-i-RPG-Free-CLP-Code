@@ -390,8 +390,9 @@ function splitAround(
  * True for a field the user can type into or change: an input other than a
  * hidden one, a select or a textarea that is enabled and, for inputs and
  * textareas, not read-only; or an editing host. Display mode renders every
- * field read-only, so it has no editable field and focus falls through to
- * the first tab stop.
+ * field read-only, so it has no editable field: the detail window prefers
+ * its key container there, and without a preferred element focus falls
+ * through to the first tab stop.
  */
 function isEditable(element: HTMLElement): boolean {
   if (element instanceof HTMLInputElement) {
@@ -822,11 +823,12 @@ function registerWindow(entry: OpenWindow): () => void {
  * else its first editable field in tab order, else its first tab stop, else
  * itself, moving down that list whenever an element does not actually take
  * focus, so that choice always wins at open. Owners therefore pick the
- * opening field through `initialFocusRef` (Name in the detail window, the
- * filter in the pickers) rather than with `autoFocus` or a focusing mount
- * effect, which this component would override. A child may still move focus
- * later, from a handler or when it remounts while the window stays open (the
- * detail form focusing the first field in error).
+ * opening field through `initialFocusRef` (Name in the detail window's Edit
+ * and Add, its key container in Display, the filter in the pickers) rather
+ * than with `autoFocus` or a focusing mount effect, which this component
+ * would override. A child may still move focus later, from a handler or when
+ * it remounts while the window stays open (the detail form focusing the
+ * first field in error).
  *
  * Keys are not handled here; the owner closes the window from its
  * `useFunctionKeys` scope by setting `open` to false. Because the keyboard

@@ -660,7 +660,8 @@ describe('CustomerSearchPage', () => {
       const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
       expect(within(dialog).getByLabelText('Name')).toHaveValue(FIRST_ACTIVE.name);
       expect(sent('GET', `${SEARCH_PATH}/${FIRST_ACTIVE.custId}`)).toHaveLength(1);
-      await user.click(within(dialog).getByLabelText('Name'));
+      // The display window opens on its key container, where Enter closes it.
+      await waitFor(() => expect(dialog.querySelector('.customer-detail')).toHaveFocus());
       await user.keyboard('{Enter}');
 
       await waitFor(() => expect(dialog).not.toBeInTheDocument());
@@ -1397,6 +1398,23 @@ describe('CustomerSearchPage', () => {
       expect(screen.getByRole('heading', { level: 1, name: 'Customer Master' })).toBeInTheDocument();
       expect(screen.getByText('Type options, press Enter.')).toBeInTheDocument();
       expect(screen.getByText('Demo Corp of America')).toBeInTheDocument();
+    });
+
+    // The uppercase codes and names are data, never prose or form history;
+    // jsdom has no `spellcheck` property, so the attribute is asserted.
+    it('turns browser spell checking and autocomplete off on the criteria and the option fields', async () => {
+      await renderSearchPage('INQUIRY');
+      await waitForPage(ACTIVE_ROWS, 0);
+
+      for (const input of [
+        filterInput(NAME_FILTER),
+        filterInput(CITY_FILTER),
+        filterInput(STATE_FILTER),
+        optionInput(FIRST_ACTIVE.name),
+      ]) {
+        expect(input).toHaveAttribute('spellcheck', 'false');
+        expect(input).toHaveAttribute('autocomplete', 'off');
+      }
     });
 
     it('shows the "Including Inactives" label only while inactive rows are included', async () => {
