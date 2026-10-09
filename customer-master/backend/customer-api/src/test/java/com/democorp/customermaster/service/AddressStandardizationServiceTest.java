@@ -399,6 +399,43 @@ final class AddressStandardizationServiceTest {
         }
 
         @Test
+        @DisplayName("DEM9898 masks, whole, a word holding the password attribute doubly URL-encoded")
+        void addressErrorMasksDoublyEncodedPasswordWhole() {
+            // Fictitious password; its request-wire form is "pl&amp;ce&quot;holder".
+            String password = "pl&ce\"holder";
+            String doublyEncoded = "PASSWORD%253D%2522pl%2526amp%253Bce%2526quot%253Bholder%2522";
+            assertThat(doublyEncoded).isEqualTo(
+                    urlEncoded(urlEncoded("PASSWORD=\"" + password.replace("&", "&amp;").replace("\"", "&quot;") + "\"")));
+            String description = "Rejected " + doublyEncoded + " for TESTUSER8";
+            String expected = "Rejected **** for ****";
+            AddressValidationProperties properties = new AddressValidationProperties(
+                    true, Client.STUB, new Usps(UNUSED_BASE_URL, "TESTUSER8", password, TIMEOUT, TIMEOUT));
+            AddressStandardizationService service = service(client, properties);
+            Address in = new Address("1 NOWHERE LANE", "OLD LYME", "CT", "06371");
+            MessageCatalog catalog = new MessageCatalog();
+            AddressValidationResult rejected = AddressValidationResult.error(
+                    "", "", "", "", "", "", -2147219401, "clsAMS", description);
+            when(client.validate(any())).thenReturn(rejected);
+
+            assertThatThrownBy(() -> service.standardize(in))
+                    .isInstanceOfSatisfying(CustomerValidationException.class, e -> {
+                        assertThat(e.code()).isEqualTo("DEM9898");
+                        assertThat(e.args()).containsExactly(expected);
+                        Object[] args = e.args().toArray();
+                        List<String> messages = new ArrayList<>();
+                        messages.add(catalog.text(e.code(), args));
+                        e.errors().forEach(error -> messages.add(catalog.text(error.code(), args)));
+                        assertThat(messages).hasSize(5).containsOnly("USPS: " + expected);
+                        List<String> texts = new ArrayList<>(e.args());
+                        texts.addAll(messages);
+                        for (String text : texts) {
+                            assertThat(text).doesNotContain(doublyEncoded, "holder", "%25", "TESTUSER8");
+                        }
+                    });
+            assertThat(rejected.errorDescription()).isEqualTo(description);
+        }
+
+        @Test
         @DisplayName("DEM9898 with a credential under four characters shows a documented description as sent and withholds any other whole")
         void addressErrorWithShortCredentialShowsDocumentedDescriptionOrWithholds() {
             // Fictitious one-character password, which "Address" holds twice and "Rejected pass s" three times.

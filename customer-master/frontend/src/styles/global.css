@@ -79,7 +79,9 @@ button {
  *   matches the character count. Width stays `auto` and `size` is the sizing
  *   mechanism, because it works in every browser and even without CSS,
  *   whereas typed attr() lengths are not available in every supported
- *   browser. max-inline-size only stops overflow on narrow screens.
+ *   browser. max-inline-size only stops overflow on narrow screens, and on a
+ *   coarse pointer the touch-target minimum (after the link rules) widens a
+ *   short field such as Opt or Active to 44px.
  * - No CSS case transform: src/components/upperField.ts uppercases the real
  *   value as it is typed, so what is shown is exactly what is submitted.
  * - :where() keeps this rule at element specificity, so .read-only,
@@ -193,14 +195,55 @@ a:active {
 }
 
 /*
+ * Touch targets: on a coarse primary pointer (phone, tablet) every button
+ * (function keys, row actions, Sign in and Sign out included), text field and
+ * menu link is at least --size-touch-target (44 CSS px) in both dimensions.
+ * Only minimum sizes are set, never padding, font or colour, so a fine pointer
+ * renders exactly as without this block. The text-field selector repeats the
+ * base rule's :where(), so it stays at element specificity. A menu link
+ * becomes an inline flex box, so the minimum height applies and its text stays
+ * centred; a link inside running text is exempt and keeps its line box.
+ */
+@media (pointer: coarse) {
+  button,
+  input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])),
+  select,
+  textarea {
+    min-block-size: var(--size-touch-target);
+    min-inline-size: var(--size-touch-target);
+  }
+
+  nav a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: var(--size-touch-target);
+    min-inline-size: var(--size-touch-target);
+  }
+}
+
+/*
  * Universal keyboard focus ring (replaces DSPATR(PC)). The 2px offset keeps
  * the ring on the surrounding background: on a reverse-image field the ring
  * colour against --color-error-bg alone would reach only 1.49:1.
- * No rule in this file removes an outline.
+ * Only the key-scope container rule below removes an outline.
  */
 :focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus);
   outline-offset: 2px;
+}
+
+/*
+ * Key-scope containers (tabIndex -1): the search panel, the State picker body
+ * and the detail dialog body. None is a tab stop; each takes focus only from a
+ * press on its plain text, or by script when its focused control is dropped,
+ * so Enter and the function keys stay commands there. Without this rule the
+ * next key press would ring the whole screen or window. Every control inside
+ * keeps its ring, and so do .confirmation-panel and the <dialog> element.
+ */
+.search-panel:focus-visible,
+.state-picker__body:focus-visible,
+.customer-detail:focus-visible {
+  outline: none;
 }
 
 /*
@@ -682,7 +725,7 @@ textarea[aria-invalid="true"] {
   border-block-end: 1px solid var(--color-fg);
 }
 
-/* .search-panel, .customer-form, .confirmation-panel, .dialog--detail and .dialog--picker are deliberately unstyled hooks. */
+/* .customer-form, .confirmation-panel, .dialog--detail and .dialog--picker are deliberately unstyled hooks; .search-panel takes only the key-scope focus rule (after :focus-visible). */
 
 .sign-in {
   max-inline-size: var(--size-sign-in);
@@ -778,9 +821,11 @@ textarea[aria-invalid="true"] {
 }
 
 /*
- * Backgrounds are replaced by system colours, so the reverse image and the
- * alert accent would vanish; borders keep them distinguishable. These system
- * colours are the only non-token colours in this file.
+ * Author colours are replaced by system colours, so the reverse image and the
+ * alert accent (backgrounds) and the pink sorted heading (text colour) would
+ * vanish. Borders keep the first two distinguishable; the sorted heading's
+ * underline turns double, a line style forced colours leave in place. These
+ * system colours are the only non-token colours in this file.
  */
 @media (forced-colors: active) {
   input[aria-invalid="true"],
@@ -792,5 +837,10 @@ textarea[aria-invalid="true"] {
   .toast--alert {
     border: 2px solid CanvasText;
     border-inline-start-width: 4px;
+  }
+
+  .is-sorted,
+  .results-table th.is-sorted {
+    text-decoration-style: double;
   }
 }

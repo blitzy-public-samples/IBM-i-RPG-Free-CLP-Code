@@ -68,17 +68,17 @@ class UspsTextRedactorTest {
         redactions.put("q API=Verify&XML=%3cAddressValidateRequest+USERID%3d%22X%22%3e", "q [request query]");
         redactions.put("q API=Verify&XML=", "q [request query]");
         redactions.put("Endpoint " + BASE_URL + " is down", "Endpoint [request URL] is down");
-        // A wholly percent-encoded query is not a recognized Verify query; only the encoded
-        // document inside it is replaced.
+        // A wholly percent-encoded query is replaced whole, together with the document
+        // marker the first step left inside it.
         redactions.put("q API%3DVerify%26XML%3D%3CAddressValidateRequest+USERID%3D%22X%22%3E end",
-                "q API%3DVerify%26XML%3D[request document] end");
+                "q [request query] end");
+        redactions.put(URLEncoder.encode(BASE_URL, StandardCharsets.UTF_8) + " API%3DVerify%26XML%3D1",
+                "[request URL] [request query]");
         List<String> unchanged = List.of(
                 "Address Not Found.",
                 "Address 123 MAIN ST, ANYTOWN CA 90210 see https://example.invalid/x",
                 "response root is not AddressValidateResponse",
                 "API=Other&XML=1 and AddressValidateRequest without its bracket",
-                // Neither an encoded base URL nor an encoded Verify query is recognized.
-                URLEncoder.encode(BASE_URL, StandardCharsets.UTF_8) + " API%3DVerify%26XML%3D1",
                 "");
 
         redactions.forEach((text, redacted) ->
@@ -99,6 +99,87 @@ class UspsTextRedactorTest {
             assertThat(redactor.redactRequest("%3CAddressValidateRequest ".repeat(2_500)))
                     .isEqualTo("[request document] ".repeat(2_500));
         });
+    }
+
+    @Test
+    @DisplayName("redactRequest replaces, whole, a token whose decoded layers echo the document, the query or the base URL")
+    void redactRequestReplacesEncodedEchoesWhole() {
+        String query = "API=Verify&XML=1";
+        String document = "<AddressValidateRequest USERID=\"X\"><Address2>8 ELMWOOD DR</Address2>";
+        Map<String, String> redactions = new LinkedHashMap<>();
+        redactions.put("q " + encoded(query, 1) + " end", "q [request query] end");
+        redactions.put("q " + encoded(query, 2) + " end", "q [request query] end");
+        redactions.put("q " + encoded(query, 3) + " end", "q [request query] end");
+        redactions.put("q " + encoded("API=Verify&amp;XML=1", 2) + " end", "q [request query] end");
+        redactions.put("doc " + encoded(document, 2) + " end", "doc [request document] end");
+        redactions.put("doc " + encoded(UspsTextRedactor.xmlEscape(document), 2) + " end", "doc [request document] end");
+        redactions.put("doc " + encoded(document, 3), "doc [request document]");
+        redactions.put("at " + encoded(BASE_URL, 1) + " now", "at [request URL] now");
+        redactions.put("at " + encoded(BASE_URL, 2) + " now", "at [request URL] now");
+        // A mixed encoding: the scheme separator encoded, the rest as configured.
+        redactions.put("at " + BASE_URL.replace("://", ":%2F%2F") + " now", "at [request URL] now");
+        // The echoed request URL, encoded once more: the document inside it decides.
+        redactions.put("Rejected " + encoded(BASE_URL + "&API=Verify&XML=" + encoded(document, 1), 1),
+                "Rejected [request document]");
+        // Five layers: still encoded after the fourth decoding, so it cannot be checked.
+        redactions.put("x " + encoded("a=b", 5) + " y", "x [encoded text] y");
+        redactions.put("%" + "25".repeat(5), "[encoded text]");
+        List<String> unchanged = List.of(
+                "100% sure", "%41BC", "50%-off and 5%", "%zz %4 %", "%E2%82%AC 5 net",
+                // Four layers decode completely, and the text echoes nothing.
+                "x " + encoded("a=b", 4) + " y",
+                "%" + "25".repeat(4),
+                // The element name in another case, and an encoded word outside any echo.
+                "%61ddressvalidaterequest Address%20Not%20Found.");
+
+        redactions.forEach((text, redacted) ->
+                assertThat(redactor.redactRequest(text)).as(text).isEqualTo(redacted));
+        unchanged.forEach(text -> assertThat(redactor.redactRequest(text)).as(text).isEqualTo(text));
+        // redact and redactDescription run the same step.
+        assertThat(redactor.redact("q " + encoded(query, 2) + " end")).isEqualTo("q [request query] end");
+        assertThat(redactor.redactDescription("x " + encoded("a=b", 5) + " y")).isEqualTo("x [encoded text] y");
+
+        // 64 KiB tokens: each is decoded at most five times, so each call ends at once.
+        // The watchdog only keeps a broken scan from hanging the build.
+        assertTimeoutPreemptively(WATCHDOG, () -> {
+            assertThat(redactor.redactRequest("%25".repeat(21_000))).isEqualTo("%25".repeat(21_000));
+            assertThat(redactor.redactRequest("%" + "25".repeat(32_000))).isEqualTo("[encoded text]");
+            assertThat(redactor.redactRequest("%41 ".repeat(16_000))).isEqualTo("%41 ".repeat(16_000));
+            assertThat(redactor.redactRequest("%[request query]".repeat(4_000))).isEqualTo("%[request query]".repeat(4_000));
+            assertThat(redactor.redact("%2".repeat(32_000))).isEqualTo("%2".repeat(32_000));
+        });
+    }
+
+    @Test
+    @DisplayName("percentDecode decodes each escape leniently: either hex case, UTF-8 runs, U+FFFD for malformed bytes, + kept")
+    void percentDecodeIsLenient() {
+        String plain = "Address Not Found.";
+
+        assertThat(UspsTextRedactor.percentDecode("a%41%62c")).isEqualTo("aAbc");
+        assertThat(UspsTextRedactor.percentDecode("%3a%3A%2f%2F")).isEqualTo(":://");
+        assertThat(UspsTextRedactor.percentDecode("%C3%A9%F0%9F%98%80")).isEqualTo("é\uD83D\uDE00");
+        assertThat(UspsTextRedactor.percentDecode("%c3%a9")).isEqualTo("é");
+        assertThat(UspsTextRedactor.percentDecode("a%C3b%FF")).isEqualTo("a\uFFFDb\uFFFD");
+        assertThat(UspsTextRedactor.percentDecode("a+b%2B")).isEqualTo("a+b+");
+        assertThat(UspsTextRedactor.percentDecode("100% %4 %G1 %%41")).isEqualTo("100% %4 %G1 %A");
+        // A non-ASCII digit is no hex digit.
+        assertThat(UspsTextRedactor.percentDecode("%\u0663\u0663")).isEqualTo("%\u0663\u0663");
+        assertThat(UspsTextRedactor.percentDecode(plain)).isSameAs(plain);
+    }
+
+    @Test
+    @DisplayName("decodedLayers decodes until nothing changes, at most four times, and reports a token still encoded")
+    void decodedLayersStopsAtFourLayers() {
+        assertThat(UspsTextRedactor.MAX_DECODE_LAYERS).isEqualTo(4);
+        assertThat(UspsTextRedactor.decodedLayers("a%252541"))
+                .isEqualTo(new UspsTextRedactor.DecodedLayers(List.of("a%2541", "a%41", "aA"), false));
+        assertThat(UspsTextRedactor.decodedLayers("x%25252541"))
+                .isEqualTo(new UspsTextRedactor.DecodedLayers(List.of("x%252541", "x%2541", "x%41", "xA"), false));
+        assertThat(UspsTextRedactor.decodedLayers("x%2525252541"))
+                .isEqualTo(new UspsTextRedactor.DecodedLayers(
+                        List.of("x%25252541", "x%252541", "x%2541", "x%41"), true));
+        assertThat(UspsTextRedactor.decodedLayers("100% sure"))
+                .isEqualTo(new UspsTextRedactor.DecodedLayers(List.of(), false));
     }
 
     @Test
@@ -153,14 +234,17 @@ class UspsTextRedactorTest {
                 "%70 a&b", "%70%20%61%26%62", "%71\"r's");
         List<String> unchanged = List.of(
                 "Address Not Found.", "pa b", "p a&c", "P A&B", "p a&B", "q a&b", "Q\"R'S",
-                // %2B is a literal plus, never a space.
-                "p%2Ba%26b");
+                // %2B is a literal plus, never a space, and its decoding p+a!b is no form either.
+                "p%2Ba!b");
 
         forms.forEach(form -> assertThat(encoded.mask("x " + form + " y"))
                 .as(form)
                 .isEqualTo("x " + AddressValidationProperties.MASK + " y"));
         assertThat(encoded.mask("Rejected p%20a%26b and p+a%26amp%3bb")).isEqualTo("Rejected **** and ****");
         unchanged.forEach(text -> assertThat(encoded.mask(text)).as(text).isEqualTo(text));
+        // In place, %2B is a literal plus, never a space; decoded, p%2Ba%26b is p+a&b, the
+        // partly encoded form above encoded once more, so the token is masked whole.
+        assertThat(encoded.mask("x p%2Ba%26b y")).isEqualTo("x " + AddressValidationProperties.MASK + " y");
         assertThat(encoded.mask(null)).isEmpty();
     }
 
@@ -183,6 +267,49 @@ class UspsTextRedactorTest {
                 .as(form)
                 .isEqualTo("x " + AddressValidationProperties.MASK + " y"));
         unchanged.forEach(text -> assertThat(accented.mask(text)).as(text).isEqualTo(text));
+    }
+
+    @Test
+    @DisplayName("mask replaces, whole, a token whose decoded layers hold a credential form; in-place masks stay as they were")
+    void maskReplacesMultiplyEncodedCredentialTokensWhole() {
+        // Fictitious password; '&' and '"' make its raw and request-wire forms differ.
+        String password = "pl&ce\"holder";
+        UspsTextRedactor quoted = redactor(BASE_URL, USER_ID, password);
+        String wire = UspsXmlCodec.attributeValue(password);
+        assertThat(wire).isEqualTo("pl&amp;ce&quot;holder");
+        String doublyEncodedAttribute = "PASSWORD%253D%2522pl%2526amp%253Bce%2526quot%253Bholder%2522";
+        assertThat(doublyEncodedAttribute).isEqualTo(encoded("PASSWORD=\"" + wire + "\"", 2));
+        List<String> tokens = List.of(doublyEncodedAttribute,
+                encoded(password, 2), encoded(wire, 2), encoded(wire, 3), encoded(wire, 5),
+                // The user id with its T percent-encoded, then the attribute encoded once more.
+                "USERID%3D%22%2554ESTUSER123%22");
+        // The apostrophe password of the other cases, in its request-wire and full-entity forms.
+        List<String> apostropheTokens = List.of(encoded(PASSWORD, 2),
+                encoded(UspsXmlCodec.attributeValue(PASSWORD), 2), encoded(UspsTextRedactor.xmlEscape(PASSWORD), 3));
+        List<String> unchanged = List.of(
+                "100% sure", "%41BC", "x %2541 y", encoded("pl&ce\"holdeR", 2),
+                // A form whose percent-encoding the in-place step already masked keeps its other characters.
+                "Rejected ****%2Fx");
+
+        tokens.forEach(token -> assertThat(quoted.mask("Rejected " + token + " now"))
+                .as(token)
+                .isEqualTo("Rejected " + AddressValidationProperties.MASK + " now"));
+        apostropheTokens.forEach(token -> assertThat(redactor.mask("Rejected " + token + " now"))
+                .as(token)
+                .isEqualTo("Rejected " + AddressValidationProperties.MASK + " now"));
+        unchanged.forEach(text -> assertThat(quoted.mask(text)).as(text).isEqualTo(text));
+        // The in-place step runs first and keeps its output for raw and singly encoded forms.
+        assertThat(quoted.mask(USER_ID + "%2Fx and " + encoded(wire, 1) + "!"))
+                .isEqualTo("****%2Fx and ****!");
+        assertThat(quoted.redact("Rejected " + doublyEncodedAttribute)).isEqualTo("Rejected ****");
+        assertThat(quoted.redactDescription("Rejected " + doublyEncodedAttribute)).isEqualTo("Rejected ****");
+
+        // The watchdog only keeps a broken scan from hanging the build.
+        assertTimeoutPreemptively(WATCHDOG, () -> {
+            assertThat(quoted.mask("%25".repeat(21_000))).isEqualTo("%25".repeat(21_000));
+            assertThat(quoted.mask("%" + "25".repeat(32_000))).isEqualTo("%" + "25".repeat(32_000));
+            assertThat(quoted.mask(encoded(wire, 2).repeat(1_500))).isEqualTo(AddressValidationProperties.MASK);
+        });
     }
 
     @Test
@@ -236,7 +363,7 @@ class UspsTextRedactorTest {
         assertThat(shortPassword.redactDescription("Invalid City.")).isEqualTo("Invalid City.");
         UspsWebToolsAddressValidationClient.DOCUMENTED_DESCRIPTIONS.forEach(documented ->
                 assertThat(shortPassword.redactDescription(documented)).as(documented).isEqualTo(documented));
-        // Log masking is unchanged: every occurrence is still masked.
+        // mask and redact, which fault reasons use, mask every occurrence.
         assertThat(shortPassword.mask("Address Not Found.")).isEqualTo("Addre******** Not Found.");
         assertThat(shortPassword.redact("Address Not Found.")).isEqualTo("Addre******** Not Found.");
     }
@@ -264,7 +391,7 @@ class UspsTextRedactorTest {
         assertThat(angle.redactDescription("Rejected %3C")).isEqualTo(withheld);
         assertThat(semicolon.redactDescription("Rejected a%3bb")).isEqualTo(withheld);
         assertThat(semicolon.redactDescription("Rejected a%3Bb")).isEqualTo(withheld);
-        // mask, which the log lines use, still masks each occurrence in place.
+        // mask, which fault reasons use, still masks each occurrence in place.
         assertThat(shortPassword.mask("Rejected pass s")).isEqualTo("Rejected pa******** ****");
         assertThat(shortUserId.mask("Unknown user %53")).isEqualTo("Unknown user ****");
     }
@@ -336,5 +463,14 @@ class UspsTextRedactorTest {
     private static UspsTextRedactor redactor(String baseUrl, String userId, String password) {
         return new UspsTextRedactor(new AddressValidationProperties.Usps(
                 baseUrl, userId, password, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+    }
+
+    /** {@code text} URL-encoded {@code times} times, as an echo that re-encodes it carries it. */
+    private static String encoded(String text, int times) {
+        String result = text;
+        for (int time = 0; time < times; time++) {
+            result = URLEncoder.encode(result, StandardCharsets.UTF_8);
+        }
+        return result;
     }
 }

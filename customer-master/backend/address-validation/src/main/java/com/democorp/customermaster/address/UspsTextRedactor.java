@@ -8,22 +8,27 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Redacts text the USPS service sends back, such as an {@code Error} element's
- * {@code Number} or {@code Description}: the shared redactor for the log lines of
- * {@link UspsWebToolsAddressValidationClient}, through {@link #redact redact}, and for a
- * USPS {@code Description} that reaches a customer-facing message, through
+ * {@code Number} or {@code Description}: the shared redactor of the log lines of
+ * {@link UspsWebToolsAddressValidationClient}, which redact a fault reason through
+ * {@link #redact redact} and a {@code Number} by the rule of
+ * {@link #redactDescription redactDescription}, and of a USPS {@code Description}, which
+ * a customer-facing message and those log lines alike take from
  * {@link #redactDescription redactDescription}.
  *
  * <p>{@link #redact redact} replaces each echo of the outbound request that
  * {@link #redactRequest redactRequest} recognizes with a marker, then {@link #mask masks}
  * every configured credential; all other text is kept, so an ordinary USPS message passes
- * unchanged. The recognized echo forms are literal ones, listed at
- * {@link #redactRequest redactRequest}; the client's log projection adds the steps that
- * keep every other form of URL and undocumented text out of the log.
+ * unchanged. The recognized echo forms, listed at {@link #redactRequest redactRequest}, are
+ * the literal and entity-escaped ones and each percent-encoding of them, to any depth: a
+ * token still encoded after {@value #MAX_DECODE_LAYERS} decodings is withheld whole, since
+ * what it hides cannot be checked. The client's log lines add the steps that replace the
+ * values a call submitted and every other URL with markers.
  * {@link #redactDescription redactDescription} returns what {@code redact} returns unless
  * a credential shorter than {@value #SHORT_CREDENTIAL_CODE_POINTS} code points occurs in
  * the description; it then shows a documented USPS description as sent and withholds any
@@ -35,14 +40,40 @@ import java.util.regex.Pattern;
  */
 public final class UspsTextRedactor {
 
-    /** Replaces an echoed request document, in any of the forms {@link #REQUEST_DOCUMENT} matches. */
+    /**
+     * Replaces an echoed request document, in any of the forms {@link #REQUEST_DOCUMENT}
+     * matches, and, whole, an encoded token that echoes one.
+     */
     static final String REQUEST_DOCUMENT_MARKER = "[request document]";
 
-    /** Replaces an echoed Verify query, in any of the forms {@link #REQUEST_QUERY} matches. */
+    /**
+     * Replaces an echoed Verify query, in any of the forms {@link #REQUEST_QUERY} matches,
+     * and, whole, an encoded token that echoes one.
+     */
     static final String REQUEST_QUERY_MARKER = "[request query]";
 
-    /** Replaces each occurrence of the configured base URL. */
+    /**
+     * Replaces each occurrence of the configured base URL and, whole, an encoded token that
+     * echoes it.
+     */
     static final String REQUEST_URL_MARKER = "[request URL]";
+
+    /**
+     * Replaces, whole, a token holding {@code %} that is still percent-encoded after
+     * {@value #MAX_DECODE_LAYERS} decodings: what it hides cannot be checked, so it is
+     * withheld.
+     */
+    static final String ENCODED_TEXT_MARKER = "[encoded text]";
+
+    /**
+     * The most percent-decodings {@link #decodedLayers decodedLayers} applies to one token.
+     * An echoed request URL, encoded once more by the service that echoes it, carries the
+     * request document and its credentials encoded twice; four layers reach them through two
+     * further encodings. A token still encoded after four is replaced whole by
+     * {@value #ENCODED_TEXT_MARKER}, so no depth of encoding lets an echo or a credential
+     * through, and the bound keeps the work on each token a fixed multiple of its length.
+     */
+    static final int MAX_DECODE_LAYERS = 4;
 
     /**
      * A credential shorter than this many Unicode code points is short: it occurs by chance
@@ -81,6 +112,23 @@ public final class UspsTextRedactor {
      */
     private static final Pattern REQUEST_QUERY = Pattern.compile(
             "API=Verify(?:&amp;|&)XML=(?:" + Pattern.quote(REQUEST_DOCUMENT_MARKER) + ")?\\S*");
+
+    /**
+     * The request document's element name, which a decoded layer of an encoded token holds
+     * when the token echoes the document, whatever form its opening {@code <} takes.
+     */
+    private static final String REQUEST_ELEMENT = "AddressValidateRequest";
+
+    /** The Verify query's start, its separator written as {@code &} or {@code &amp;}. */
+    private static final List<String> VERIFY_QUERY_STARTS = List.of("API=Verify&XML=", "API=Verify&amp;XML=");
+
+    /**
+     * The markers that hold a blank. {@link #replaceEncodedTokens replaceEncodedTokens} reads
+     * each as part of the token it adjoins, so a marker an earlier step left inside an
+     * encoded token is replaced together with that token, never split from it.
+     */
+    private static final List<String> BLANK_MARKERS = List.of(REQUEST_DOCUMENT_MARKER, REQUEST_QUERY_MARKER,
+            REQUEST_URL_MARKER, ENCODED_TEXT_MARKER, DESCRIPTION_WITHHELD_MARKER);
 
     private final String baseUrl;
 
@@ -139,8 +187,11 @@ public final class UspsTextRedactor {
      * <p>The reason: a short credential occurs by chance in ordinary words. Masking each
      * occurrence garbles the text, so that {@code Address Not Found.} with the password
      * {@code s} would read {@code Addre******** Not Found.}, and the text left around each
-     * mask reveals the credential. Log lines are unaffected: {@link #redact redact} and
-     * {@link #mask mask} keep masking every occurrence.
+     * mask reveals the credential. The client's log lines therefore carry a
+     * {@code Description} and a {@code Number} each as this method returns it, so a
+     * {@code Number} in which a short credential occurs logs as
+     * {@value #DESCRIPTION_WITHHELD_MARKER}, while their fault reasons keep masking every
+     * occurrence through {@link #redact redact} and {@link #mask mask}.
      *
      * @param description the {@code Description} the USPS service sent; {@code null} reads
      *                    as {@code ""}
@@ -169,12 +220,20 @@ public final class UspsTextRedactor {
      *   <li>a Verify query, with {@value #REQUEST_QUERY_MARKER}: the literal text
      *       {@code API=Verify}, then {@code &} or {@code &amp;}, then {@code XML=}, up to the
      *       next whitespace;</li>
-     *   <li>the configured base URL, with {@value #REQUEST_URL_MARKER}, only as its literal
-     *       configured string.</li>
+     *   <li>the configured base URL, with {@value #REQUEST_URL_MARKER}, as its literal
+     *       configured string;</li>
+     *   <li>each {@link #replaceEncodedTokens token} still holding {@code %}, whole, when the
+     *       token itself or one of its {@link #decodedLayers decoded layers} holds an echo:
+     *       with {@value #REQUEST_DOCUMENT_MARKER} when one holds
+     *       {@code AddressValidateRequest}, whatever form its opening {@code <} takes; else
+     *       with {@value #REQUEST_QUERY_MARKER} when one holds {@code API=Verify&XML=} or
+     *       {@code API=Verify&amp;XML=}; else with {@value #REQUEST_URL_MARKER} when one
+     *       holds the configured base URL; else with {@value #ENCODED_TEXT_MARKER} when the
+     *       token is still encoded after {@value #MAX_DECODE_LAYERS} decodings.</li>
      * </ol>
-     * No other form is recognized: a percent-encoded {@code API%3DVerify} query and an
-     * encoded base URL are kept as they are, as is every other character. Linear in the
-     * text length.
+     * Every other token and character is kept, so text the first three steps leave without
+     * a {@code %}, and a token such as {@code 100%} or {@code %41BC} that decodes to no
+     * echo, read as before. Linear in the text length.
      *
      * <p>Package-private so that the tests can check every form it covers.
      *
@@ -189,7 +248,34 @@ public final class UspsTextRedactor {
                 .replaceAll(Matcher.quoteReplacement(REQUEST_DOCUMENT_MARKER));
         redacted = REQUEST_QUERY.matcher(redacted)
                 .replaceAll(Matcher.quoteReplacement(REQUEST_QUERY_MARKER));
-        return redacted.replace(baseUrl, REQUEST_URL_MARKER);
+        redacted = redacted.replace(baseUrl, REQUEST_URL_MARKER);
+        return replaceEncodedTokens(redacted, this::encodedEcho);
+    }
+
+    /**
+     * The replacement {@link #redactRequest redactRequest} gives a token holding {@code %}:
+     * the marker of the first echo the token or one of its decoded layers holds, in the order
+     * document, query, base URL; else {@value #ENCODED_TEXT_MARKER} when it is still encoded
+     * after {@value #MAX_DECODE_LAYERS} decodings; else the token itself.
+     *
+     * @param token a token holding {@code %}; never {@code null}
+     * @return the marker, or {@code token}
+     */
+    private String encodedEcho(String token) {
+        DecodedLayers decoded = decodedLayers(token);
+        List<String> layers = new ArrayList<>(decoded.layers().size() + 1);
+        layers.add(token);
+        layers.addAll(decoded.layers());
+        if (layers.stream().anyMatch(layer -> layer.contains(REQUEST_ELEMENT))) {
+            return REQUEST_DOCUMENT_MARKER;
+        }
+        if (layers.stream().anyMatch(layer -> VERIFY_QUERY_STARTS.stream().anyMatch(layer::contains))) {
+            return REQUEST_QUERY_MARKER;
+        }
+        if (layers.stream().anyMatch(layer -> layer.contains(baseUrl))) {
+            return REQUEST_URL_MARKER;
+        }
+        return decoded.stillEncoded() ? ENCODED_TEXT_MARKER : token;
     }
 
     /**
@@ -197,11 +283,16 @@ public final class UspsTextRedactor {
      * that spells a {@link #secretForms credential form} with each of its code points either
      * written as itself or percent-encoded as its UTF-8 bytes, hex digits in either case; a
      * space also matches {@code +} and {@code %20}. Raw, wholly, partly and mixed-case
-     * URL-encoded forms are therefore all masked, while every literal character is matched
-     * case-sensitively, as credentials are. A doubly encoded form is not matched. The
-     * longest form is tried first, so one credential contained in the other is still masked
-     * whole. Linear in the text length for a given configuration: each code point is one
-     * group of fixed-length alternatives, with no repetition.
+     * URL-encoded forms are therefore all masked in place, while every literal character is
+     * matched case-sensitively, as credentials are. The longest form is tried first, so one
+     * credential contained in the other is still masked whole. Then each
+     * {@link #replaceEncodedTokens token} still holding {@code %} becomes
+     * {@value AddressValidationProperties#MASK} whole when one of its
+     * {@link #decodedLayers decoded layers} holds such a stretch, so a form percent-encoded
+     * again, up to {@value #MAX_DECODE_LAYERS} more times, is masked too, as an encoded echo
+     * of the request URL carries it. Linear in the text length for a given
+     * configuration: each code point is one group of fixed-length alternatives, with no
+     * repetition, and each token is decoded a bounded number of times.
      *
      * <p>Package-private so that the tests can check every credential form it covers.
      *
@@ -215,7 +306,194 @@ public final class UspsTextRedactor {
         if (secrets == null) {
             return text;
         }
-        return secrets.matcher(text).replaceAll(Matcher.quoteReplacement(AddressValidationProperties.MASK));
+        String masked = secrets.matcher(text)
+                .replaceAll(Matcher.quoteReplacement(AddressValidationProperties.MASK));
+        return replaceEncodedTokens(masked, token -> decodedLayers(token).layers().stream()
+                .anyMatch(layer -> secrets.matcher(layer).find()) ? AddressValidationProperties.MASK : token);
+    }
+
+    /**
+     * Replaces each token of {@code text} that holds a {@code %} with what
+     * {@code replacement} returns for it, and keeps every other character. A token is a
+     * maximal run of characters other than the six whitespace characters {@code \s}
+     * matches (blank, tab, line feed, line tabulation, form feed and carriage return), in
+     * which each {@link #BLANK_MARKERS marker that holds a blank} counts as one character,
+     * so a token never ends inside a marker. A simple scan, linear in the text length when
+     * {@code replacement} is linear in the token's.
+     *
+     * <p>Package-private so that the client's log lines can replace an encoded URL by token
+     * as this class replaces an encoded echo.
+     *
+     * @param text        the text to scan; never {@code null}
+     * @param replacement maps a token holding {@code %} to its replacement, the token
+     *                    itself to keep it
+     * @return the text with each such token replaced
+     */
+    static String replaceEncodedTokens(String text, UnaryOperator<String> replacement) {
+        if (text.indexOf('%') < 0) {
+            return text;
+        }
+        StringBuilder replaced = new StringBuilder(text.length());
+        int length = text.length();
+        int index = 0;
+        while (index < length) {
+            if (isTokenBoundary(text.charAt(index))) {
+                replaced.append(text.charAt(index));
+                index++;
+                continue;
+            }
+            int start = index;
+            boolean encoded = false;
+            while (index < length && !isTokenBoundary(text.charAt(index))) {
+                int marker = blankMarkerLength(text, index);
+                if (marker > 0) {
+                    index += marker;
+                } else {
+                    encoded |= text.charAt(index) == '%';
+                    index++;
+                }
+            }
+            String token = text.substring(start, index);
+            replaced.append(encoded ? replacement.apply(token) : token);
+        }
+        return replaced.toString();
+    }
+
+    /**
+     * Whether {@code character} ends a {@link #replaceEncodedTokens token}: one of the six
+     * whitespace characters {@code \s} matches.
+     */
+    private static boolean isTokenBoundary(char character) {
+        return character == ' ' || character == '\t' || character == '\n'
+                || character == '\u000B' || character == '\f' || character == '\r';
+    }
+
+    /**
+     * The length of the {@link #BLANK_MARKERS marker that holds a blank} starting at
+     * {@code index}, or 0 when none starts there.
+     */
+    private static int blankMarkerLength(String text, int index) {
+        if (text.charAt(index) != '[') {
+            return 0;
+        }
+        for (String marker : BLANK_MARKERS) {
+            if (text.startsWith(marker, index)) {
+                return marker.length();
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * The percent-decoded layers of a token, as {@link #decodedLayers decodedLayers} returns
+     * them.
+     *
+     * @param layers       the token decoded once, twice and so on, each layer differing from
+     *                     the one before; at most {@value #MAX_DECODE_LAYERS}, and empty when
+     *                     the token holds no escape
+     * @param stillEncoded whether the last layer still holds an escape, so one more decoding
+     *                     would change it; always {@code false} when fewer than
+     *                     {@value #MAX_DECODE_LAYERS} layers exist
+     */
+    record DecodedLayers(List<String> layers, boolean stillEncoded) {
+
+        /**
+         * Copies {@code layers}, so the record stays immutable.
+         *
+         * @throws NullPointerException if {@code layers} or one of its elements is {@code null}
+         */
+        DecodedLayers {
+            layers = List.copyOf(layers);
+        }
+    }
+
+    /**
+     * Decodes {@code token} with {@link #percentDecode percentDecode} until a decoding
+     * changes nothing or {@value #MAX_DECODE_LAYERS} layers exist, and reports whether the
+     * last of them would still change. Linear in the token length: each layer is shorter
+     * than the one before.
+     *
+     * @param token the text to decode; never {@code null}
+     * @return the decoded layers
+     */
+    static DecodedLayers decodedLayers(String token) {
+        List<String> layers = new ArrayList<>(MAX_DECODE_LAYERS);
+        String current = token;
+        while (layers.size() < MAX_DECODE_LAYERS) {
+            if (firstEscape(current) < 0) {
+                return new DecodedLayers(layers, false);
+            }
+            current = percentDecode(current);
+            layers.add(current);
+        }
+        return new DecodedLayers(layers, firstEscape(current) >= 0);
+    }
+
+    /**
+     * Percent-decodes {@code text} leniently: each run of escapes, a {@code %} followed by
+     * two hex digits in either case, becomes the UTF-8 text of its octets, with U+FFFD in
+     * place of each malformed sequence; every other character is kept as it stands, a
+     * {@code %} that starts no escape included, and so is {@code +}, which {@link #mask mask}
+     * already matches as a space. Linear in the text length.
+     *
+     * @param text the text to decode; never {@code null}
+     * @return the decoded text, {@code text} itself when it holds no escape
+     */
+    static String percentDecode(String text) {
+        int index = firstEscape(text);
+        if (index < 0) {
+            return text;
+        }
+        StringBuilder decoded = new StringBuilder(text.length());
+        decoded.append(text, 0, index);
+        byte[] octets = new byte[(text.length() - index) / 3];
+        while (index < text.length()) {
+            if (!isEscape(text, index)) {
+                decoded.append(text.charAt(index));
+                index++;
+                continue;
+            }
+            int count = 0;
+            while (index < text.length() && isEscape(text, index)) {
+                octets[count++] = (byte) (hexValue(text.charAt(index + 1)) << 4 | hexValue(text.charAt(index + 2)));
+                index += 3;
+            }
+            decoded.append(new String(octets, 0, count, StandardCharsets.UTF_8));
+        }
+        return decoded.toString();
+    }
+
+    /** The index of the first escape in {@code text}, or -1 when it holds none. */
+    private static int firstEscape(String text) {
+        for (int index = text.indexOf('%'); index >= 0; index = text.indexOf('%', index + 1)) {
+            if (isEscape(text, index)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether an escape, {@code %} and two hex digits in either case, starts at {@code index}. */
+    private static boolean isEscape(String text, int index) {
+        return text.charAt(index) == '%' && index + 2 < text.length()
+                && hexValue(text.charAt(index + 1)) >= 0 && hexValue(text.charAt(index + 2)) >= 0;
+    }
+
+    /**
+     * The value of an ASCII hex digit in either case, or -1 for any other character, a
+     * non-ASCII digit included.
+     */
+    private static int hexValue(char character) {
+        if (character >= '0' && character <= '9') {
+            return character - '0';
+        }
+        if (character >= 'a' && character <= 'f') {
+            return character - 'a' + 10;
+        }
+        if (character >= 'A' && character <= 'F') {
+            return character - 'A' + 10;
+        }
+        return -1;
     }
 
     /**

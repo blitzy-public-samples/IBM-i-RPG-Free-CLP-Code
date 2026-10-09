@@ -368,9 +368,9 @@ public final class UspsXmlCodec {
      * Reads the {@code Number} and {@code Description} of the USPS {@code Error} element a
      * body holds, for the log line of a fault {@link #parse parse} reported or of an
      * address-level error it returned. The {@code Number} is kept as text, not parsed, so
-     * the client can project what the service sent: an error code logs as sent, anything
-     * undocumented as markers. Logging only: the values are not validated, and no result
-     * or exception is built from them.
+     * the client logs it from what the service sent and recognizes a credential echoed
+     * there as it was written. Logging only: the values are not validated, and no result or
+     * exception is built from them.
      *
      * <p>The {@code Error} read is:
      * <ul>

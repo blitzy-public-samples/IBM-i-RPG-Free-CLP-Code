@@ -406,9 +406,10 @@ function StatePickerWindow({ onSelect, onCancel }: Omit<StatePickerProps, 'open'
       {/*
         tabIndex -1: the div is the key scope's container, so a click on its
         plain text gives it focus and Enter stays a command there; it is never
-        a tab stop.
+        a tab stop. The state-picker__body class keeps its focus ring off
+        (global.css).
       */}
-      <div ref={containerRef} tabIndex={-1}>
+      <div ref={containerRef} tabIndex={-1} className="state-picker__body">
         {/* SH_FUNCT is never assigned by PMTSTATER, so the function line stays blank. */}
         <ScreenHeader id={HEADER_ID} title="USA States" functionText="" user={username ?? undefined} />
         <FormField

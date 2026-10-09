@@ -63,6 +63,8 @@
   --shadow-dialog: 0 4px 16px var(--color-backdrop);
   --shadow-toast: 0 2px 8px var(--color-backdrop);
   --size-sign-in: 36rem;
+  /* Touch-target minimum on coarse pointers: 44 CSS px (WCAG 2.5.5, platform guidelines). */
+  --size-touch-target: 2.75rem;
 
   --radius: 4px;
   /* Focus ring thickness; WCAG 2.2 focus appearance needs at least 2 CSS px. */
