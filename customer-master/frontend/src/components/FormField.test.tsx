@@ -17,6 +17,7 @@ type HarnessProps = {
   maxLength?: number;
   error?: string;
   readOnly?: boolean;
+  required?: boolean;
   inputRef?: Ref<HTMLInputElement>;
   /** The value the controlled state starts with; empty by default. */
   initialValue?: string;
@@ -52,6 +53,7 @@ function Harness(props: HarnessProps) {
         uppercase={props.uppercase}
         error={props.error}
         readOnly={props.readOnly}
+        required={props.required}
         inputRef={props.inputRef}
       />
       <button type="submit">Submit</button>
@@ -277,6 +279,24 @@ describe('FormField', () => {
       expect(input).toHaveClass('form-field__input');
       expect(input).not.toHaveClass('read-only');
       expect(screen.getByRole('textbox', { name: 'Name' })).toBe(input);
+    });
+  });
+
+  describe('required', () => {
+    it('renders the required attribute only with the prop, and marks nothing invalid by itself', () => {
+      const onSubmit = vi.fn();
+      const { rerender } = render(<Harness required onSubmit={onSubmit} />);
+      const input = nameInput();
+
+      expect(input).toBeRequired();
+      expect(input).toHaveAttribute('required');
+      expect(input).not.toHaveAttribute('aria-invalid');
+      expect(input).not.toHaveAttribute('aria-describedby');
+
+      rerender(<Harness onSubmit={onSubmit} />);
+
+      expect(nameInput()).not.toBeRequired();
+      expect(nameInput()).not.toHaveAttribute('required');
     });
   });
 

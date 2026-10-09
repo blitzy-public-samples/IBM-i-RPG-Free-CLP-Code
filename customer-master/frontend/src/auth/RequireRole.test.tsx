@@ -15,6 +15,7 @@ import { useEffect } from 'react';
 import type { ReactElement } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { http } from 'msw/http';
@@ -34,6 +35,12 @@ import { SignInPage } from './SignInPage';
 const SIGN_IN_REQUIRED = 'Sign in required.';
 
 const NOT_AUTHORIZED = 'You are not authorized to perform this action.';
+
+const USER_BLANK = 'User: Must not be blank';
+
+const PASSWORD_BLANK = 'Password: Must not be blank';
+
+const SIGNING_IN = 'Signing in…';
 
 const SIGN_IN_ROUTE = 'Sign-in route';
 
@@ -327,9 +334,11 @@ async function renderApp({ path, session, gateRole, signInElement, beside }: Ren
 }
 
 describe('RequireRole', () => {
-  it('serves the APP0401 and APP0403 texts these tests assert from the catalog', () => {
+  it('serves the APP0401, APP0403 and DEM0502 texts these tests assert from the catalog', () => {
     expect(messageText('APP0401')).toBe(SIGN_IN_REQUIRED);
     expect(messageText('APP0403')).toBe(NOT_AUTHORIZED);
+    expect(messageText('DEM0502', ['User'])).toBe(USER_BLANK);
+    expect(messageText('DEM0502', ['Password'])).toBe(PASSWORD_BLANK);
   });
 
   describe('signed out', () => {
@@ -441,6 +450,176 @@ describe('RequireRole', () => {
     });
   });
 
+  describe('blank sign-in fields', () => {
+    /** The texts of the toasts in the alert region, in order. */
+    function alertTexts(): string[] {
+      return Array.from(screen.getByRole('alert').children, (toast) => toast.textContent ?? '');
+    }
+
+    /** Replaces the value of the input labelled `label` with `value`, pasted verbatim. */
+    async function replaceValue(user: UserEvent, label: string, value: string): Promise<void> {
+      const input = screen.getByLabelText(label);
+      await user.clear(input);
+      await user.click(input);
+      await user.paste(value);
+    }
+
+    it('marks both blank fields, focuses User and alerts once, sending no request', async () => {
+      const user = userEvent.setup();
+      await renderApp({ path: '/customers', signInElement: <SignInPage /> });
+      const userInput = screen.getByLabelText('User');
+      const passwordInput = screen.getByLabelText('Password');
+      expect(userInput).toBeRequired();
+      expect(passwordInput).toBeRequired();
+      expect(userInput).not.toHaveAttribute('aria-invalid');
+
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+      expect(userInput).toHaveAttribute('aria-invalid', 'true');
+      expect(userInput).toHaveAccessibleDescription(USER_BLANK);
+      expect(passwordInput).toHaveAttribute('aria-invalid', 'true');
+      expect(passwordInput).toHaveAccessibleDescription(PASSWORD_BLANK);
+      expect(userInput).toHaveFocus();
+      expect(alertTexts()).toEqual([USER_BLANK]);
+      expect(recordedGets(SESSION_PATH)).toHaveLength(0);
+      expect(screen.queryByTestId('mode')).not.toBeInTheDocument();
+    });
+
+    it('flags only a blank password, keeps the mark while typing, and clears it on a submit that passes', async () => {
+      const user = userEvent.setup();
+      const sales = demoUser('MAINTENANCE');
+      await renderApp({ path: '/customers', signInElement: <SignInPage /> });
+      const userInput = screen.getByLabelText('User');
+      const passwordInput = screen.getByLabelText('Password');
+
+      await user.type(userInput, sales.username);
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+      expect(userInput).not.toHaveAttribute('aria-invalid');
+      expect(userInput).not.toHaveAttribute('aria-describedby');
+      expect(passwordInput).toHaveAttribute('aria-invalid', 'true');
+      expect(passwordInput).toHaveAccessibleDescription(PASSWORD_BLANK);
+      expect(passwordInput).toHaveFocus();
+      expect(alertTexts()).toEqual([PASSWORD_BLANK]);
+      expect(recordedGets(SESSION_PATH)).toHaveLength(0);
+
+      // As on a 5250 screen, the mark stays until the next submit.
+      await user.type(passwordInput, sales.password);
+      expect(passwordInput).toHaveAttribute('aria-invalid', 'true');
+
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+      expect(await screen.findByTestId('mode')).toHaveTextContent(/^Maintenance$/);
+      const sessionCalls = recordedGets(SESSION_PATH);
+      expect(sessionCalls).toHaveLength(1);
+      expect(sessionCalls[0]?.headers.get('Authorization')).toBe(basicAuth(sales.username, sales.password));
+    });
+
+    it('reads blank as Java does: whitespace-only names are blank, a no-break space is not, and a password the server could hold is sent', async () => {
+      const user = userEvent.setup();
+      const sales = demoUser('MAINTENANCE');
+      await renderApp({ path: '/customers', signInElement: <SignInPage /> });
+      const userInput = screen.getByLabelText('User');
+      const passwordInput = screen.getByLabelText('Password');
+      const submit = screen.getByRole('button', { name: 'Sign in' });
+
+      // Space, ideographic space and tab are Java whitespace; U+00A0 is not.
+      await replaceValue(user, 'User', ' \u3000\t');
+      await replaceValue(user, 'Password', '\u00a0');
+      await user.click(submit);
+
+      expect(userInput).toHaveAccessibleDescription(USER_BLANK);
+      expect(passwordInput).not.toHaveAttribute('aria-invalid');
+      expect(userInput).toHaveFocus();
+      expect(alertTexts()).toEqual([USER_BLANK]);
+      expect(recordedGets(SESSION_PATH)).toHaveLength(0);
+
+      // A password of whitespace the server's @NotBlank also trims is blank.
+      await replaceValue(user, 'User', sales.username);
+      await replaceValue(user, 'Password', ' \t\u001f');
+      await user.click(submit);
+
+      expect(userInput).not.toHaveAttribute('aria-invalid');
+      expect(passwordInput).toHaveAccessibleDescription(PASSWORD_BLANK);
+      expect(passwordInput).toHaveFocus();
+      expect(alertTexts()).toEqual([PASSWORD_BLANK]);
+      expect(recordedGets(SESSION_PATH)).toHaveLength(0);
+
+      // U+3000 survives that trim, so a configured password may consist of it:
+      // it is tried, refused as any wrong password is, and marks no field.
+      await replaceValue(user, 'Password', '\u3000');
+      await user.click(submit);
+
+      expect(await within(screen.getByRole('alert')).findByText(SIGN_IN_REQUIRED)).toBeInTheDocument();
+      expect(alertTexts()).toEqual([SIGN_IN_REQUIRED]);
+      const sessionCalls = recordedGets(SESSION_PATH);
+      expect(sessionCalls).toHaveLength(1);
+      expect(sessionCalls[0]?.headers.get('Authorization')).toBe(basicAuth(sales.username, '\u3000'));
+      expect(userInput).not.toHaveAttribute('aria-invalid');
+      expect(passwordInput).not.toHaveAttribute('aria-invalid');
+      expect(passwordInput).toHaveValue('');
+      expect(passwordInput).toHaveFocus();
+    });
+  });
+
+  describe('pending sign-in', () => {
+    it('keeps focus on the aria-disabled button, shows "Signing in…" and ignores every repeat until the attempt ends', async () => {
+      const user = userEvent.setup();
+      const sales = demoUser('MAINTENANCE');
+      const held = holdFirstSession();
+      await renderApp({ path: '/customers', signInElement: <SignInPage /> });
+      const submit = screen.getByRole('button', { name: 'Sign in' });
+      const form = submit.closest('form');
+      expect(form).toHaveAttribute('aria-busy', 'false');
+      expect(submit).not.toHaveAttribute('aria-disabled');
+      expect(submit).not.toHaveAttribute('aria-describedby');
+      expect(screen.queryByText(SIGNING_IN)).not.toBeInTheDocument();
+
+      await user.type(screen.getByLabelText('User'), sales.username);
+      await user.type(screen.getByLabelText('Password'), 'wrong-password');
+      await user.click(submit);
+      await held.arrived;
+
+      expect(form).toHaveAttribute('aria-busy', 'true');
+      expect(submit).toHaveAttribute('aria-disabled', 'true');
+      expect(submit).toBeEnabled();
+      expect(submit).toHaveFocus();
+      expect(submit).toHaveAccessibleName('Sign in');
+      expect(submit).toHaveAccessibleDescription(SIGNING_IN);
+      const region = screen.getByText(SIGNING_IN).parentElement;
+      expect(region).toHaveAttribute('aria-live', 'polite');
+      expect(region).toHaveAttribute('aria-atomic', 'true');
+      expect(region).not.toHaveAttribute('role');
+
+      // A click, Enter and Space on the button, and Enter in a field, each
+      // submit again while the attempt is in flight, and each is ignored.
+      let repeats = 0;
+      form?.addEventListener('submit', () => {
+        repeats += 1;
+      });
+      await user.click(submit);
+      await user.keyboard('{Enter}');
+      await user.keyboard(' ');
+      expect(submit).toHaveFocus();
+      await user.click(screen.getByLabelText('User'));
+      await user.keyboard('{Enter}');
+      expect(repeats).toBe(4);
+      expect(recordedGets(SESSION_PATH)).toHaveLength(1);
+
+      await held.release();
+
+      expect(within(screen.getByRole('alert')).getByText(SIGN_IN_REQUIRED)).toBeInTheDocument();
+      expect(recordedGets(SESSION_PATH)).toHaveLength(1);
+      expect(screen.queryByText(SIGNING_IN)).not.toBeInTheDocument();
+      expect(region).toBeInTheDocument();
+      expect(region).toBeEmptyDOMElement();
+      expect(form).toHaveAttribute('aria-busy', 'false');
+      expect(submit).not.toHaveAttribute('aria-disabled');
+      expect(submit).not.toHaveAttribute('aria-describedby');
+      expect(screen.getByLabelText('Password')).toHaveFocus();
+    });
+  });
+
   describe('abandoned and superseded sign-in attempts', () => {
     /**
      * Submits attempt A as `inquiry` with `passwordA` and holds it at the
@@ -464,12 +643,12 @@ describe('RequireRole', () => {
       await user.type(screen.getByLabelText('Password'), passwordA);
       await user.click(screen.getByRole('button', { name: 'Sign in' }));
       await held.arrived;
-      expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Sign in' })).toHaveAttribute('aria-disabled', 'true');
 
       // Leaving for another guarded path unmounts the first form; the guard
       // sends the visitor to a new, empty one whose `from` is /admin.
       await user.click(screen.getByRole('link', { name: GO_TO_ADMIN }));
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in' })).not.toHaveAttribute('aria-disabled'));
       expect(screen.getByTestId('path')).toHaveTextContent(/^\/sign-in$/);
       expect(screen.getByLabelText('User')).toHaveValue('');
 

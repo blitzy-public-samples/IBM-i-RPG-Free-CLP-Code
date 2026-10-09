@@ -53,6 +53,13 @@ export type FormFieldProps = {
   uppercase?: boolean;
   /** Protect the value (DSPATR(PR)): display mode and the confirmation panel. */
   readOnly?: boolean;
+  /**
+   * Render the input's `required` attribute, which exposes the required
+   * state to assistive technology. The host form sets `noValidate` and
+   * reports a blank field itself through `error`, so the browser shows no
+   * validation bubble of its own.
+   */
+  required?: boolean;
   /** Input type; defaults to `text`. */
   type?: 'text' | 'password';
   /** Browser autofill hint, for example `username` or `current-password`. */
@@ -117,6 +124,7 @@ export function FormField({
   error,
   uppercase,
   readOnly,
+  required,
   type,
   autoComplete,
   size,
@@ -161,6 +169,7 @@ export function FormField({
         size={size}
         autoComplete={autoComplete}
         readOnly={readOnly}
+        required={required}
         aria-invalid={hasError ? 'true' : undefined}
         aria-describedby={hasError ? errorId : undefined}
         onChange={handleChange}

@@ -110,8 +110,13 @@ button {
   cursor: pointer;
 }
 
-/* No opacity, so disabled text stays crisp. */
-button:disabled {
+/*
+ * No opacity, so disabled text stays crisp. aria-disabled="true" marks a
+ * button that refuses presses yet stays focusable, so it keeps the focus a
+ * click gave it (the sign-in button while an attempt is pending).
+ */
+button:disabled,
+button[aria-disabled="true"] {
   color: var(--color-muted);
   cursor: not-allowed;
 }
@@ -124,13 +129,13 @@ button:disabled {
  * property set here.
  */
 @media (hover: hover) {
-  button:not(:disabled):hover {
+  button:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--color-bg);
     border-color: var(--color-fg);
   }
 }
 
-button:not(:disabled):active {
+button:not(:disabled, [aria-disabled="true"]):active {
   color: var(--color-bg);
   background: var(--color-fg);
   border-color: var(--color-fg);
@@ -683,6 +688,24 @@ textarea[aria-invalid="true"] {
   max-inline-size: var(--size-sign-in);
   margin-inline: auto;
   padding: var(--space-4);
+}
+
+/*
+ * Sign-in pending: while the form is aria-busy its aria-disabled button
+ * trades the surface fill for --color-bg, its solid border for a dashed one
+ * (--color-border, 4.55:1) and the not-allowed cursor for progress, so the
+ * shape, not the muted label alone, tells it from the idle button.
+ */
+.sign-in form[aria-busy="true"] button[aria-disabled="true"] {
+  background: var(--color-bg);
+  border-style: dashed;
+  cursor: progress;
+}
+
+/* "Signing in…" beside the button, in --color-muted (6.11:1 on bg). */
+.sign-in__pending {
+  margin-inline-start: var(--space-3);
+  color: var(--color-muted);
 }
 
 /*

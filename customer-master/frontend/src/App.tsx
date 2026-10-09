@@ -43,6 +43,11 @@ import { AppRoutes } from './routes';
  * - **No refetch on window focus or reconnect.** The 5250 screens refreshed
  *   only on an explicit user action (Enter, F5, PageDown); a background
  *   refetch would change the list or the form behind the user's back.
+ * - **Sent whatever the browser reports (`networkMode: 'always'`).** Offline,
+ *   a read or write is still sent, so its failure reaches `api/client.ts` as
+ *   the synthetic DEM9999 `ApiError` and the owning feature presents it
+ *   once. Nothing is paused and replayed on reconnect: a retry is the user's
+ *   next Enter, PageDown or option.
  *
  * Created at module level rather than during render, so the render stays
  * pure (react-hooks purity rules) and StrictMode's double render or a
@@ -54,9 +59,11 @@ const queryClient = new QueryClient({
       retry: false,
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
+      networkMode: 'always',
     },
     mutations: {
       retry: false,
+      networkMode: 'always',
     },
   },
 });

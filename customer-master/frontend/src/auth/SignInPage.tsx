@@ -11,9 +11,23 @@
  *   Each submit is one attempt with its own `AbortController`; a submit while
  *   it is in flight is ignored, and leaving the page aborts it, so an
  *   abandoned attempt never navigates, presents or stores anything.
+ * - While an attempt is in flight the form is `aria-busy` and "Signing in…"
+ *   shows beside the button, which it describes. The button is
+ *   `aria-disabled` rather than `disabled`, so it keeps the focus a click
+ *   gave it; pressing it again submits, and that submit is ignored.
+ * - Both fields are required. A submit with a blank field
+ *   ({@link isBlankUsername}, {@link isBlankPassword}) sends no request: every
+ *   blank field gets the catalog's DEM0502 text ("User: Must not be blank") as
+ *   its field error, the first of them in form order is focused, and its
+ *   message is the one alert. The marks stay until the next submit, as a 5250
+ *   field keeps its RI and PC attributes until the next Enter; a submit whose
+ *   fields pass clears them before it tries the credentials.
  * - A failure of an attempt the page still owns is presented unchanged as the
  *   one alert (earlier messages are cleared first), and the password is
  *   cleared and focused so the user can retype it.
+ * - Message texts come from the catalog (`useMessages`, imported from
+ *   `../messages`): every component that shows a message reads it there, and
+ *   the bundle holds no message text.
  * - The "User" field is neither uppercased (no `uppercase` prop, unlike every
  *   5250-derived field) nor trimmed: the value is sent exactly as typed. The
  *   server looks the name up case-insensitively and reports its configured
@@ -29,12 +43,16 @@ import { FormField } from '../components/FormField';
 import { ScreenHeader } from '../components/ScreenHeader';
 import { useToasts } from '../components/ToastRegion';
 import { useProblemPresenter } from '../errors/useProblemPresenter';
+import { useMessages } from '../messages/MessageCatalogProvider';
 
 const HOME_PATH = '/';
 
 const SIGN_IN_PATH = '/sign-in';
 
 const HEADER_ID = 'sign-in';
+
+/** Id of the pending label, which describes the button while an attempt is in flight. */
+const PENDING_ID = 'sign-in-pending';
 
 /**
  * Longest accepted username: the server's limit, which fits the change stamp
@@ -56,6 +74,89 @@ const PASSWORD_MAX_LENGTH = 128;
  * sign-in column, and the password still scrolls up to its maximum length.
  */
 const FIELD_SIZE = USERNAME_MAX_LENGTH;
+
+/**
+ * The field labels. The e2e sign-in fixture finds the inputs by them, and
+ * DEM0502 names a blank field by its label.
+ */
+const USER_LABEL = 'User';
+
+const PASSWORD_LABEL = 'Password';
+
+/** Catalog key of "{0}: Must not be blank". */
+const BLANK_FIELD_CODE = 'DEM0502';
+
+/**
+ * The code points Java's `Character.isWhitespace(int)` accepts, the ones
+ * `String.isBlank` skips: U+0009–U+000D, U+001C–U+001F, the space, and the
+ * Unicode space, line and paragraph separators other than the no-break spaces.
+ * U+00A0, U+2007 and U+202F are not whitespace. Listed literally, because
+ * JavaScript's `trim()` and `\s` use a different set.
+ */
+const JAVA_WHITESPACE: ReadonlySet<number> = new Set([
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d,
+  0x001c, 0x001d, 0x001e, 0x001f,
+  0x0020,
+  0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+  0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029,
+  0x205f,
+  0x3000,
+]);
+
+/**
+ * The highest code point Java's `String.trim` strips. The server's
+ * `@NotBlank` on a configured password trims, so it accepts a password
+ * holding any code point above this one.
+ */
+const TRIM_LIMIT = 0x0020;
+
+/** Whether every code point of `value` passes `test`; `true` for an empty value. */
+function everyCodePoint(value: string, test: (codePoint: number) => boolean): boolean {
+  for (const char of value) {
+    const codePoint = char.codePointAt(0);
+    if (codePoint === undefined || !test(codePoint)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether a typed user name is blank: empty or only Java whitespace
+ * ({@link JAVA_WHITESPACE}), as `String.isBlank` reads it. The server admits
+ * only names of letters, digits, `.`, `_` and `-`, so such a name can never
+ * authenticate and refusing it here refuses no valid credential.
+ *
+ * @example isBlankUsername(' \t')   // true
+ * @example isBlankUsername('\u3000') // true
+ * @example isBlankUsername('\u00a0') // false
+ */
+function isBlankUsername(value: string): boolean {
+  return everyCodePoint(value, (codePoint) => JAVA_WHITESPACE.has(codePoint));
+}
+
+/**
+ * Whether a typed password is blank: empty or only Java whitespace that
+ * `String.trim` also strips (U+0009–U+000D, U+001C–U+001F, the space). The
+ * server's `@NotBlank` refuses a configured password made only of such
+ * characters, so it can never authenticate. Other Java whitespace, U+3000 for
+ * example, passes that check and may be configured, so a password made of it
+ * is sent.
+ *
+ * @example isBlankPassword('  ')     // true
+ * @example isBlankPassword('\u3000') // false
+ * @example isBlankPassword('\u00a0') // false
+ */
+function isBlankPassword(value: string): boolean {
+  return everyCodePoint(value, (codePoint) => codePoint <= TRIM_LIMIT && JAVA_WHITESPACE.has(codePoint));
+}
+
+/** The field error of each input; an empty string marks nothing. */
+type FieldErrors = { readonly username: string; readonly password: string };
+
+const NO_FIELD_ERRORS: FieldErrors = { username: '', password: '' };
 
 /**
  * The path a successful sign-in returns to, read from the navigation state
@@ -93,9 +194,11 @@ export function SignInPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { present } = useProblemPresenter();
-  const { clear } = useToasts();
+  const { clear, publish } = useToasts();
+  const { format } = useMessages();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>(NO_FIELD_ERRORS);
   const [submitting, setSubmitting] = useState(false);
   const userRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -123,7 +226,9 @@ export function SignInPage() {
   );
 
   /**
-   * Tries the typed credentials. Success navigates to {@link readFrom}'s
+   * Tries the typed credentials. A blank field stops the submit before any
+   * attempt exists: the blank fields are marked, the first is focused and its
+   * message is the one alert. Success navigates to {@link readFrom}'s
    * target, replacing `/sign-in` in the history so Back does not return here.
    * Failure clears and focuses the password and presents the problem. An
    * attempt superseded in `AuthProvider` or abandoned by leaving the page
@@ -134,6 +239,23 @@ export function SignInPage() {
     if (attemptRef.current !== null) {
       return;
     }
+    const errors: FieldErrors = {
+      username: isBlankUsername(username) ? format(BLANK_FIELD_CODE, [USER_LABEL]) : '',
+      password: isBlankPassword(password) ? format(BLANK_FIELD_CODE, [PASSWORD_LABEL]) : '',
+    };
+    if (errors.username !== '' || errors.password !== '') {
+      setFieldErrors(errors);
+      clear();
+      if (errors.username !== '') {
+        publish({ kind: 'alert', text: errors.username });
+        userRef.current?.focus();
+      } else {
+        publish({ kind: 'alert', text: errors.password });
+        passwordRef.current?.focus();
+      }
+      return;
+    }
+    setFieldErrors(NO_FIELD_ERRORS);
     const attempt = new AbortController();
     attemptRef.current = attempt;
     clear();
@@ -175,28 +297,50 @@ export function SignInPage() {
       >
         <FormField
           id="sign-in-user"
-          label="User"
+          label={USER_LABEL}
           value={username}
           onChange={setUsername}
           maxLength={USERNAME_MAX_LENGTH}
+          error={fieldErrors.username}
+          required
           size={FIELD_SIZE}
           autoComplete="username"
           inputRef={userRef}
         />
         <FormField
           id="sign-in-password"
-          label="Password"
+          label={PASSWORD_LABEL}
           type="password"
           value={password}
           onChange={setPassword}
           maxLength={PASSWORD_MAX_LENGTH}
+          error={fieldErrors.password}
+          required
           size={FIELD_SIZE}
           autoComplete="current-password"
           inputRef={passwordRef}
         />
-        <button type="submit" disabled={submitting}>
+        <button
+          type="submit"
+          aria-disabled={submitting ? 'true' : undefined}
+          aria-describedby={submitting ? PENDING_ID : undefined}
+        >
           Sign in
         </button>
+        {/*
+          The pending label, a screen label like the search page's
+          "Searching..." and never a catalog message. Its polite live region
+          (aria-atomic; not role="status", which is the toast host's) is always
+          present, so assistive technology has registered it before the text
+          appears.
+        */}
+        <span aria-live="polite" aria-atomic="true">
+          {submitting ? (
+            <span id={PENDING_ID} className="sign-in__pending">
+              Signing in…
+            </span>
+          ) : null}
+        </span>
       </form>
     </main>
   );

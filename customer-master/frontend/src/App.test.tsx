@@ -39,6 +39,10 @@
  *   (the menu's F3 would sign out). A command key clears the previous message
  *   before its handler publishes the next one, which is the toast reset `App`
  *   wires into `KeyScopeProvider`.
+ * - **Offline reads.** While react-query reports the browser offline, a
+ *   search, a PageDown and option 5 are still sent; the network failure shows
+ *   DEM9999 once, as an alert, and the reconnect sends nothing, so the next
+ *   read is the user's own.
  *
  * Isolation. `App` holds module-level state: its `QueryClient` (with the
  * cached catalog and any customer data), the credentials `api/client.ts`
@@ -67,11 +71,12 @@
  * behavioural equivalence with it.
  */
 import { StrictMode } from 'react';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { onlineManager } from '@tanstack/react-query';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { http } from 'msw/http';
+import { http, HttpResponse } from 'msw/http';
 import type * as ApiClient from './api/client';
 import { basicAuth, customerDetail, customers, messageText, problem, users } from './test/handlers';
 import type { Role } from './test/handlers';
@@ -150,6 +155,27 @@ const CUSTOMER_UPDATE = {
 
 /** The function lines of the guarded screens' headers: the menu, both search modes and the host form. */
 const GUARDED_FUNCTION_LINES = ['Main Menu', 'Inquiry', 'Maintenance', 'Order entry'] as const;
+
+/** The rows of one search page: the `size` the search page sends, PMTCUSTR's 12-record subfile page. */
+const SEARCH_PAGE_ROWS = 12;
+
+/** The first row of the second active-only page, which PageDown from the first page shows. */
+const SECOND_PAGE_FIRST_ROW = (() => {
+  const row = customers.filter((candidate) => candidate.active === 'Y')[SEARCH_PAGE_ROWS];
+  if (row === undefined) {
+    throw new Error('The customers fixture holds no second page of active rows');
+  }
+  return row;
+})();
+
+/** The read option 5 sends for the first active row. */
+const FIRST_ACTIVE_ROW_PATH = `${SEARCH_PATH}/${FIRST_ACTIVE_ROW.custId}`;
+
+/** The accessible name of the window option 5 opens: the screen title and the Display header. */
+const DISPLAY_DIALOG = 'Customer Master Displaying Customer';
+
+/** The catalog text of DEM9999, which a read that never got an answer shows. */
+const PROGRAM_ERROR = messageText('DEM9999');
 
 // ---------------------------------------------------------------------------
 // Request log
@@ -332,6 +358,68 @@ function holdRoute(method: 'get' | 'put', path: string, respond: () => Response)
 /** The 401 APP0401 problem+json the API answers credentials it does not accept with. */
 function refusedCustomer(): Response {
   return problem(401, 'APP0401', { instance: CUSTOMER_PATH });
+}
+
+/** `METHOD path` of every request recorded from index `from` of the request log on. */
+function sentSince(from: number): string[] {
+  return requests.slice(from).map((entry) => `${entry.method} ${entry.path}`);
+}
+
+/** Whether the simulated connection is down; the handlers {@link goOffline} installs read it. */
+let networkDown = false;
+
+/**
+ * Takes the browser offline: react-query's `onlineManager` (a module
+ * singleton loaded outside the module reset, so the one the rendered `App`'s
+ * client listens to) reports offline, and the search and detail reads fail at
+ * the network, as `fetch` does without a connection. Every other request, and
+ * every customer read once {@link goOnline} ran, reaches the default handlers.
+ */
+function goOffline(): void {
+  networkDown = true;
+  server.use(
+    ...[SEARCH_PATH, `${SEARCH_PATH}/:custId`].map((path) =>
+      http.get(path, () => (networkDown ? HttpResponse.error() : undefined)),
+    ),
+  );
+  act(() => {
+    onlineManager.setOnline(false);
+  });
+}
+
+/** Brings the connection back and lets react-query see the browser online again. */
+async function goOnline(): Promise<void> {
+  networkDown = false;
+  await act(async () => {
+    onlineManager.setOnline(true);
+  });
+}
+
+/**
+ * Reconnects ({@link goOnline}) and asserts that the reconnect sent nothing.
+ * A read react-query held back while offline would be sent by the reconnect
+ * itself, ahead of the probe that the application's own client sends next,
+ * so the probe settling with nothing recorded before it is the condition.
+ */
+async function expectReconnectSendsNothing(client: typeof ApiClient): Promise<void> {
+  const reconnectedAt = requests.length;
+
+  await goOnline();
+
+  await expect(client.request(SESSION_PATH)).resolves.toEqual({
+    username: INQUIRY_USER.username,
+    roles: INQUIRY_USER.roles,
+  });
+  expect(sentSince(reconnectedAt)).toEqual([`GET ${SESSION_PATH}`]);
+}
+
+/** Signs `inquiry` in from `/customers` and waits for the first page Inquiry loads on open. */
+async function openInquirySearch(): Promise<RenderedApp> {
+  const rendered = await renderApp('/customers');
+  await expectSignInScreen();
+  await signIn(rendered.user, INQUIRY_USER);
+  expect(await screen.findByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` })).toBeInTheDocument();
+  return rendered;
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +743,94 @@ describe('App', () => {
       expect(keyNotActive).not.toBeInTheDocument();
       expect(alert.textContent).toBe(messageText('DEM0005'));
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Reads while the browser is offline: sent, failed, presented, not replayed
+  // -------------------------------------------------------------------------
+
+  describe('offline reads', () => {
+    afterEach(() => {
+      // `onlineManager` outlives the test. The tree is unmounted first, so its
+      // query client stops listening before the browser is put back online,
+      // and no read it held can be sent into the next test; the setup file's
+      // own cleanup then finds nothing left to unmount.
+      cleanup();
+      networkDown = false;
+      onlineManager.setOnline(true);
+    });
+
+    it('a search sent offline shows DEM9999 once, as an alert, and the reconnect searches nothing', async () => {
+      expect(PROGRAM_ERROR).toBe('Program Error! Please contact IT now.');
+      const { user, client } = await openInquirySearch();
+      const alert = screen.getByRole('alert');
+      const offlineAt = requests.length;
+      goOffline();
+
+      await user.type(screen.getByLabelText('Name starts with:'), 'nib');
+      await user.keyboard('{Enter}');
+
+      expect(await within(alert).findByText(PROGRAM_ERROR)).toBeInTheDocument();
+      expect(alert.textContent).toBe(PROGRAM_ERROR);
+      expect(sentSince(offlineAt)).toEqual([`GET ${SEARCH_PATH}`]);
+
+      await expectReconnectSendsNothing(client);
+
+      expect(alert.textContent).toBe(PROGRAM_ERROR);
+    });
+
+    it('a PageDown sent offline shows DEM9999 once, the reconnect loads nothing, and the next PageDown shows page 2', async () => {
+      const { user, client } = await openInquirySearch();
+      const alert = screen.getByRole('alert');
+      const offlineAt = requests.length;
+      goOffline();
+
+      await user.keyboard('{PageDown}');
+
+      expect(await within(alert).findByText(PROGRAM_ERROR)).toBeInTheDocument();
+      expect(alert.textContent).toBe(PROGRAM_ERROR);
+      expect(sentSince(offlineAt)).toEqual([`GET ${SEARCH_PATH}`]);
+      // A failed next page leaves the loaded page current.
+      expect(screen.getByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` })).toBeInTheDocument();
+
+      await expectReconnectSendsNothing(client);
+      const retriedAt = requests.length;
+
+      await user.keyboard('{PageDown}');
+
+      // The user's own retry loads the page that failed, not the one after it.
+      expect(
+        await screen.findByRole('textbox', { name: `Option for ${SECOND_PAGE_FIRST_ROW.name}` }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` })).not.toBeInTheDocument();
+      expect(sentSince(retriedAt)).toEqual([`GET ${SEARCH_PATH}`]);
+    });
+
+    it('option 5 sent offline shows DEM9999 once and the window on blank fields, and the reconnect reads nothing', async () => {
+      const { user, client } = await openInquirySearch();
+      const alert = screen.getByRole('alert');
+      const offlineAt = requests.length;
+      goOffline();
+
+      await user.type(screen.getByRole('textbox', { name: `Option for ${FIRST_ACTIVE_ROW.name}` }), '5');
+      await user.keyboard('{Enter}');
+
+      expect(await within(alert).findByText(PROGRAM_ERROR)).toBeInTheDocument();
+      expect(alert.textContent).toBe(PROGRAM_ERROR);
+      // A failed read still opens the window, on blank fields, as the detail
+      // dialog does for any read that fails.
+      const dialog = await screen.findByRole('dialog', { name: DISPLAY_DIALOG });
+      expect(within(dialog).getByLabelText('Name')).toHaveValue('');
+      // StrictMode's simulated remount may send the read a second time, after
+      // aborting the first; nothing but that read is sent.
+      expect(new Set(sentSince(offlineAt))).toEqual(new Set([`GET ${FIRST_ACTIVE_ROW_PATH}`]));
+
+      await expectReconnectSendsNothing(client);
+
+      expect(screen.getAllByRole('dialog')).toEqual([dialog]);
+      expect(within(dialog).getByLabelText('Name')).toHaveValue('');
+      expect(alert.textContent).toBe(PROGRAM_ERROR);
     });
   });
 });
